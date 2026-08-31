@@ -1205,6 +1205,91 @@ broken.
 
 ---
 
+## Final real smoke: Checkpoint G confirmed working end-to-end
+
+A third real `make live-smoke` run, after the FK-ordering fix above, completed successfully — all four
+Live LLM operations executed for real against OpenAI, the objective-parse persistence fix held under a
+real run, and both retry paths a fixture-only smoke can't otherwise exercise fired for real and
+recovered correctly. **No further Checkpoint G live smoke is required.**
+
+**Configuration:** model `gpt-5.6-terra`, `reasoning_effort=low`, `llm_max_output_tokens=2048`.
+
+**Real per-attempt provider behavior:**
+
+| Operation | Attempt 1 | Attempt 2 |
+|---|---|---|
+| `objective_parse` | `TIMEOUT` | `transport_retry` → `OK` |
+| `research_extraction` | `OK` | — |
+| `score_explanation` | `PROVIDER_ERROR` | `transport_retry` → `OK` |
+| `personalization` | `OK` | — |
+
+Both retryable-transport statuses this checkpoint's flat retry loop was built to handle —
+`TIMEOUT` (objective_parse) and a 5xx-shaped `PROVIDER_ERROR` (score_explanation) — occurred for real
+against the live API in this run, each recovering via exactly one `transport_retry` attempt and landing
+`OK`. This is the flat retry loop (`providers/live/openai_llm.py::OpenAILLMProvider.structured()`)
+doing its designed job against genuine transient failures, not a simulated/scripted one — the same
+mechanism `tests/test_live_openai_provider.py` proves offline against a scripted transport, now also
+confirmed against the real thing. No schema repairs and no truncations occurred in this run — every
+attempt that reached `OK` did so with a strict-schema-valid response on the first try after any
+transport retry.
+
+**Usage:** `tokens_in=2511`, `tokens_out=693`, `reasoning_tokens=0` where reported by the API. Pricing
+remains intentionally unconfigured (`OPENAI_PRICE_*_USD_PER_MTOK` unset) — `estimated_cost_usd` and every
+per-attempt `cost_usd` stayed `null`, exactly as designed; Groundwork made no attempt to compute or guess
+a dollar figure.
+
+**Final prospect: Sable Compute — `score=56`, `status=REJECTED`, `review verdict=FAIL`.** Guardrail
+results:
+
+| Check | Result |
+|---|---|
+| `claim_grounding` | **FAIL** — one generated composite outreach claim was not sufficiently supported by its cited evidence |
+| `no_fabricated_contact` | PASS |
+| `cross_prospect_leak` | PASS |
+| `no_placeholders` | PASS |
+| `duplicate_account` | PASS |
+| `score_support` | PASS |
+| `confidence_floor` | PASS |
+
+This run's own guardrail printout (added in the first post-smoke hardening pass —
+`live_smoke.py::_print_review()`) settles what the second real smoke's investigation could only infer
+from code analysis: it was `claim_grounding`, specifically, and only `claim_grounding` — every other hard
+check passed cleanly, consistent with that investigation's elimination reasoning (single-prospect run, no
+fabricated contact fields anywhere in this codebase). **This REJECTED result is correct safety behavior,
+not a smoke test failure.** The model produced valid, schema-conformant, on-topic structured output at
+every step — the failure is not "the model broke" or "the pipeline broke." Deterministic grounding
+(`domain/review.py`/`domain/grounding.py`, unchanged, byte-for-byte, this entire checkpoint) is what
+caught a claim built by composing multiple grounded facts into a single sentence whose combined wording
+no longer token-overlaps any one cited evidence snippet closely enough, and correctly withheld it from
+being an approvable outreach draft. That is the guardrail doing exactly its documented job — the model
+that wrote the draft does not get to grade whether its own claim is well-supported; a deterministic
+check with no LLM in its path does, and it said no. A live system that let this through unreviewed would
+be the actual defect.
+
+**What this run specifically confirms, that the code-level fixes alone could not:**
+
+- **The `create_play_with_attempts` FK-ordering fix holds under a real run.** `objective_parse` (with a
+  real `TIMEOUT` + transport retry in the middle of it) persisted its `Play` and telemetry together
+  without error — the exact path the second post-smoke fix repaired, now proven against a live,
+  non-scripted failure sequence, not just the offline reproduction and regression test.
+- **The real transport-retry path was exercised successfully** (`objective_parse`'s `TIMEOUT` →
+  `transport_retry` → `OK`), for the first time against a genuine network condition rather than a
+  scripted `httpx2.MockTransport` failure.
+- **The real provider-error retry path was exercised successfully** (`score_explanation`'s
+  `PROVIDER_ERROR` → `transport_retry` → `OK`), likewise for the first time against a real upstream
+  condition.
+- All four Live LLM operations (`objective_parse`, `research_extraction`, `score_explanation`,
+  `personalization`) have now each completed successfully against the real API at least once, across
+  the three real smoke runs in this checkpoint's history.
+
+**No further Checkpoint G live smoke is required.** Every mechanism this checkpoint set out to prove —
+real structured-output calls, the flat retry loop's transport-retry path, the objective-parse
+transactional persistence fix, and the deterministic review gate holding against genuine (not scripted)
+model output — has now been confirmed against the real API at least once. This is a documentation-only
+update; no application code changed as part of recording these results.
+
+---
+
 ## Known issues / deviations from plan
 
 - **`stable_seed()` instead of `hash()`** for seeded jitter (see `providers/base.py`) — Python's
