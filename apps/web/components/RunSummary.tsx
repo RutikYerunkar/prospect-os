@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Progress } from "@/components/ui/Progress";
 import { Stat } from "@/components/ui/Stat";
-import { formatElapsedSince, formatStatus } from "@/lib/format";
+import { formatElapsedSince, formatRunStatus } from "@/lib/format";
 import { MAX_CONCURRENT_PROSPECTS } from "@/lib/constants";
 import type { ProspectSummary, RunResponse } from "@/lib/types";
 import type { ConnectionState } from "@/lib/useRunStream";
@@ -29,6 +29,8 @@ const CONNECTION_TONE: Record<ConnectionState, BadgeTone> = {
   closed: "neutral",
   error: "rose",
 };
+
+const RUN_TERMINAL_STATUSES = new Set(["COMPLETED", "PARTIAL", "INTERRUPTED"]);
 
 function TERMINAL(status: ProspectSummary["status"]): boolean {
   return status !== "RUNNING" && status !== "PENDING";
@@ -73,9 +75,13 @@ export function RunSummary({
         <div className="flex items-center gap-2.5">
           <h1 className="text-base font-semibold text-zinc-100">Run</h1>
           <span className="font-mono text-sm text-zinc-500">{run.id}</span>
-          <Badge tone={RUN_STATUS_TONE[run.status] ?? "neutral"}>{formatStatus(run.status)}</Badge>
+          <span title={`raw backend status: ${run.status}`}>
+            <Badge tone={RUN_STATUS_TONE[run.status] ?? "neutral"}>{formatRunStatus(run.status)}</Badge>
+          </span>
           <Badge tone="indigo">{run.mode.toUpperCase()}</Badge>
-          <Badge tone={CONNECTION_TONE[connection]}>{CONNECTION_LABEL[connection]}</Badge>
+          {!RUN_TERMINAL_STATUSES.has(run.status) && (
+            <Badge tone={CONNECTION_TONE[connection]}>{CONNECTION_LABEL[connection]}</Badge>
+          )}
         </div>
         <div className="font-mono text-sm text-zinc-400">
           {formatElapsedSince(run.started_at, run.finished_at)}

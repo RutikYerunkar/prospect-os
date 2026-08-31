@@ -14,16 +14,20 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **B — Core engine** | `5edff10` (merged to `master` via PR #2) | Domain layer, fixtures, engine, demo providers, tracing/events, tests, headless demo. |
 | **C — API / SSE** | `21a615e` (merged to `master` via PR #3) | FastAPI routers for every P0 endpoint, async run launch (202), resumable SSE over `run_events`, computed-on-read evaluation metrics, approve/reject as state transitions, tests. |
 | **D — Hero product UI** | `aa41f97` (merged to `master` via PR #4) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
-| **E — Depth UI** | *this commit* (branch `claude/prospect-detail-checkpoint-e-tqmiu5`) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
+| **E — Depth UI** | `a1f9190` (merged to `master` via PR #5) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
+| **F — Quality + hardening** | *this commit* (branch `claude/eager-wright-pvdo5h`) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
 
 ---
 
 ## Current checkpoint
 
-**E — Depth UI.** Status: **complete**, ready to stop per the checkpoint protocol.
+**F — Quality + hardening. P0 COMPLETE.** All six checkpoints (A–F) are done; the full §32
+founder-demo checklist passes against the real running stack, rehearsed twice from a clean
+`make demo-reset`.
 
-Next session should start **Checkpoint F — Quality + hardening** (see `docs/IMPLEMENTATION_PLAN.md`
-§30), after reading `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file.
+A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
+P1 work (§5 of `docs/IMPLEMENTATION_PLAN.md`, in order: OpenAI provider → live search → deployment →
+MCP shim → polish). See "Next task" below for what's actually next.
 
 ---
 
@@ -363,6 +367,109 @@ latter trips `react-hooks/set-state-in-effect`, hit and fixed during this checkp
 
 ---
 
+## What Checkpoint F added
+
+**Backend** — one additive field, no invariant touched. `apps/api/groundwork/evaluation/metrics.py`
+gained `reliability.per_step_success_rate` (a `dict[step_name, float]` computed from the same
+`agent_tasks` rows already loaded — a step "succeeds" if any attempt for a given `(prospect_id,
+step_name)` pair reached `OK`, counted over distinct pairs so a 3-attempt retry sequence doesn't dilute
+the rate). Nothing existing changed shape; `test_api_evaluation.py`'s assertions are all still exact
+matches on the fields they already checked.
+
+**`apps/api/groundwork/models/schemas.py` / `apps/api/groundwork/api/schemas.py`** —
+`PlaySpec.target_count` and `PlayCreateRequest.target_count` defaults changed `6 → 7`, to match the
+fixture pack's own canonical count (`demo_pack.yaml`'s `play_spec.target_count: 7`, already what
+`tests/api_helpers.py::create_play` and `test_api_evaluation.py` assert). This was the task's own
+named presentation inconsistency ("UI asks for 6, Demo Mode intentionally returns 7") — resolved by
+making the default truthful rather than special-casing Sable Compute out of the count anywhere.
+
+**Frontend — Quality tab** (`apps/web/components/MetricGrid.tsx`, `GuardrailPanel.tsx`,
+`QualityTab.tsx`, new; `lib/types.ts`/`lib/api.ts` extended with `RunEvaluation` and
+`getRunEvaluation`): replaces the Board-tab-only placeholder string in `app/runs/[id]/page.tsx` with a
+real dashboard backed **only** by `GET /api/runs/{id}/evaluation` — Volume (discovered / completed /
+PASS / NEEDS_REVIEW / REJECTED / DUPLICATE / FAILED, all read from `by_status` where possible so the
+label matches the real enum, not a re-derived approximation), Grounding/Quality (evidence coverage,
+grounded-claim rate, dimension support, unsupported-claim count, mean score/confidence, contact
+verification breakdown, provenance mix with an explicit "100% synthetic" callout when every evidence
+row is `DEMO_FIXTURE`), Reliability (retries, p50/p95 duration, run wall time, per-step success rate,
+provider error breakdown), and a `GuardrailPanel` showing all seven checks' pass rates with
+click-through links to the specific prospects that failed each. Every label carries an explanatory
+`title` tooltip stating how it's computed, per the plan's "no fabricated benchmark numbers, tooltip on
+every metric" requirement. Polls every 2s only while the run is still `RUNNING` (so opening the tab
+mid-run stays live); a single fetch is enough once terminal. No decorative charts — cards, compact
+tables, and small progress bars only, matching the task's "readable in under 45 seconds" constraint.
+
+**Frontend — visual polish** (no design-system change; §18's locked palette/typography untouched):
+- `RunSummary.tsx`: raw run status now renders through a new `formatRunStatus()` (`lib/format.ts`) —
+  `PARTIAL` → "Completed with issues" — with the true raw enum value still available via a `title`
+  tooltip on the badge, never discarded. The connection-state badge (`live`/`reconnecting`/`stream
+  closed`/etc.) is now hidden entirely once the run reaches a terminal status, instead of showing
+  "stream closed" next to a finished run in a way that could read as an error.
+- `ActivityStream.tsx`: added the missing `prospect.stage_changed` case (was previously falling through
+  to the raw `"{company} · prospect.stage_changed"` machine label — a real instance of the bug the task
+  named) rendering as `"{company} · advanced to {stage}"`; the generic fallback for any future
+  unhandled event type now humanizes dots/underscores instead of printing the raw type verbatim;
+  `run.completed`'s line now reuses `formatRunStatus()` too, so "run completed · Completed with issues"
+  matches the header badge instead of the raw enum.
+- `EvidenceCard.tsx`: `DEMO_FIXTURE` evidence now carries an explicit `SYNTHETIC` badge next to the
+  signal-type/confidence badges (not just the existing muted footer caption) — scannable at a glance
+  across a whole evidence list, per the task's explicit "make this obvious enough to point to in the
+  interview" requirement.
+- `ScoreBreakdown.tsx`: `industry_fit`/`size_fit` (the two dimensions `domain/scoring.py` documents as
+  always structurally supported from `CompanySeed`, never evidence-gated) now render "supported ·
+  profile" with `profile` in the Evidence column instead of a bare `0` — resolves the apparent
+  contradiction of "supported" next to "0 evidence" without changing any scoring semantics; every other
+  dimension's evidence-gated Support/Evidence columns are unchanged.
+- Several standalone help/error strings bumped `text-zinc-600 → text-zinc-500` for readability against
+  the `zinc-950` background (QualityTab's computed-on-read note and error detail, MetricGrid's
+  empty-state lines, ReviewPanel's explainer line, ApprovalBar's helper/error lines, New Play's mode
+  note, both pages' `loadError` detail lines, ActivityStream's timestamp column). Decorative `—`
+  placeholders (ProspectRow, PlanPanel) were deliberately left at their original muted tone — they're
+  null-markers, not prose a founder needs to read.
+- `app/icon.svg` and `app/favicon.ico` (a hand-built minimal 16×16 ICO, no image tooling available in
+  this environment — written directly via `struct` in Python) added; there was no favicon in the repo
+  before this checkpoint, which meant every single page load logged a real browser-console 404 —
+  caught during rehearsal, not a hypothetical.
+
+**Frontend — demo consistency, the real bug found during rehearsal**
+(`app/plays/new/page.tsx`): the New Play form's `overrides()` function only ever sent
+`target_industries`/`size_band_min`/`size_band_max`/`min_score` — the four controls the form exposes —
+and silently omitted `excluded_industries`, `adjacent_industries`, `target_funding_stages`,
+`target_technologies`, `persona_titles`, and `min_confidence` entirely, defaulting them to empty/zero
+via `PlaySpec`'s own Pydantic defaults. Two concrete, verified consequences of this, caught by actually
+running the canonical play through the browser (not curl) during rehearsal:
+1. **Cobalt Retail Systems scored `PASS` instead of the fixture's intended `REJECTED`** — its hard
+   disqualifier (`retail_pos` on the exclude list) never fired because `excluded_industries` was never
+   sent. This silently broke checklist item 5 of §32 ("see a mix of outcomes — pass, needs-review,
+   rejected, duplicate, failed") for anyone using the actual product UI rather than the test suite's
+   `DEMO_ICP_OVERRIDES`.
+2. The default `industries` chip was the human-readable `"AI Infrastructure"`, not the fixture
+   companies' actual `industry` slug (`"ai_infrastructure"`); `domain/scoring.py::_industry_fit` matches
+   by exact string, so every fixture company's `industry_fit` dimension silently downgraded from a full
+   `1.0` match to a `0.6` adjacent-match — Northwind Labs scored **84** through the UI instead of the
+   documented, tested **92**.
+
+Fixed by sending the full canonical ICP override set (matching `tests/api_helpers.py::DEMO_ICP_OVERRIDES`
+and the fixture pack's own `play_spec` exactly) as defaults, with the four exposed form controls still
+overriding their corresponding fields — and by changing the default size band (`1–500 → 50–250`, the
+fixture's own band) and the default industry chip (`"AI Infrastructure" → "ai_infrastructure"`).
+Re-verified twice from a clean `make demo-reset`: the play created through the actual New Play UI now
+reproduces the exact documented reference numbers byte-for-byte (Northwind Labs 92, Riverbend Analytics
+35, Cobalt Retail Systems 25, Ferrous Grid 58, Sable Compute 79; `PASS ×2 / NEEDS_REVIEW ×2 / REJECTED
+×1 / DUPLICATE ×1 / FAILED ×1`), matching `make demo`'s headless output and this file's own previously
+recorded Checkpoint E numbers.
+
+**Docs** — `README.md` rewritten from the one-line stub into a founder/recruiter-facing document
+(thesis, Mermaid architecture diagram, deterministic-vs-LLM table, evidence/provenance model,
+concurrency/isolation explanation with the real `execute_run` snippet, demo-vs-live-provider boundary,
+local setup, `make` commands, an explicit "what's real vs. synthetic" table, and a short
+production-scaling discussion). `docs/DEMO_SCRIPT.md` filled in from its stub with the full 5–6 minute
+walkthrough (exact 13-beat sequence), a 2-minute shortened version, the seven strongest one-line
+answers to the founder discussion questions, and a rehearsal-notes section recording the demo-bug find
+above and the exact reproducible numbers.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -542,6 +649,48 @@ to the repository.
 
 ---
 
+**Checkpoint F verification.**
+
+1. `cd apps/api && uv run pytest` — **63/63 passing** both before and after every change this
+   checkpoint made (the `metrics.py` addition, the `target_count` default change) — zero regressions,
+   confirmed by re-running the full suite after each edit, not just at the end.
+2. `cd apps/web && pnpm lint` — clean. `pnpm build` — compiles, typechecks, prerenders `/`, `/plays/new`
+   static and `/icon.svg`, `/prospects/[id]`, `/runs/[id]` dynamic, no errors — checked after every
+   round of frontend edits in this checkpoint, not just once at the end.
+3. `make demo-reset && make demo`, run twice independently: **identical** status distribution both
+   times (`PASS: 2, NEEDS_REVIEW: 2, REJECTED: 1, DUPLICATE: 1, FAILED: 1`, 3 retries recorded),
+   matching this file's own Checkpoint B reference numbers exactly.
+4. **Two full clean-reset browser rehearsals** (`make demo-reset` between them, API and web servers
+   both restarted, Playwright/Chromium driving the real running stack — not curl, not a mock) of the
+   full canonical founder demo: New Play → Run Agents → concurrency → mid-run refresh → terminal state →
+   Quality tab → open the PASS prospect → approve → reject another prospect → open the FAILED prospect →
+   open the DUPLICATE prospect → invalid run URL → invalid prospect URL. Both rehearsals reproduced the
+   identical outcome distribution and identical per-company scores (see the demo-consistency bug section
+   above — the *first* rehearsal pass is what surfaced that bug; the two passes reported here are the
+   two *post-fix* confirmations). Zero page-level JavaScript errors either time; the only console
+   `404`s were the intentionally-invalid-URL fetches (2 per pass) plus, before the favicon was added,
+   one `/favicon.ico` 404 per page navigation — gone after the fix. Zero horizontal overflow at
+   1440×900 on the run board, prospect detail, or Quality tab.
+5. Quality-tab numbers reconciled by hand against the board on both rehearsals: Volume
+   (discovered/completed/PASS/NEEDS_REVIEW/REJECTED/DUPLICATE/FAILED = 7/7/2/2/1/1/1) matches the board
+   exactly; guardrail pass rates (`score_support` 3/5, `confidence_floor` 4/5, all others 5/5) match the
+   two `NEEDS_REVIEW` prospects' individually-rendered Review panels; evidence coverage 67% = 4 of 6
+   non-duplicate researched prospects with ≥3 evidence rows (Quarry never reached Research).
+6. `make demo-reset && make dev` from the current branch — the full §32 14-item checklist walked
+   manually via the real UI: create play (parsed spec visible) → Run Agents → concurrent rows → retry
+   badge visible → PASS/NEEDS_REVIEW/REJECTED/DUPLICATE/FAILED all present → open Northwind Labs →
+   evidence with provenance chips (SYNTHETIC badge, no link) → score breakdown table reconciling to 92 →
+   outreach citing grounded signals → all seven review checks → approve (and reject Riverbend
+   Analytics separately) → execution trace with a visible retry → Quality tab with computed metrics and
+   guardrail pass rates → scaling story is now written into `README.md` and `DEMO_SCRIPT.md` beat 13.
+   All 14 pass.
+7. A ~90-second fallback screen recording (Playwright's built-in video capture, `.webm`) of the
+   canonical flow — New Play → Run Agents → concurrency hold → Northwind Labs score breakdown →
+   evidence → outreach → review → approve → Quality tab — was captured and sent to the user for local
+   review. Per instructions, not committed to the repository.
+
+---
+
 ## Known issues / deviations from plan
 
 - **`stable_seed()` instead of `hash()`** for seeded jitter (see `providers/base.py`) — Python's
@@ -650,28 +799,75 @@ to the repository.
   health-check card — there is intentionally no dashboard/home page in P0 (§5), and an unreachable
   root route would be a broken-feeling entry point for the founder demo.
 
+**Checkpoint F's own deviations:**
+
+- **`reliability.per_step_success_rate` added to the evaluation payload** — not explicitly named as a
+  field in §16, which lists "per-step success rate" as prose under Reliability without specifying the
+  JSON shape. Implemented as the smallest faithful reading: one number per step name, computed from
+  data the endpoint already loaded, purely additive (no existing field changed, no existing test
+  touched).
+- **`PlaySpec.target_count`/`PlayCreateRequest.target_count` defaults changed `6 → 7`** — not a scope
+  addition, a correction: the fixture pack (`demo_pack.yaml`) and every backend test already treated 7
+  as canonical; only the two Pydantic model defaults and the New Play form's `useState` were still on
+  the pre-Sable-Compute value of 6. `docs/IMPLEMENTATION_PLAN.md` §4's narrative prose still says "six
+  prospect rows" (written before Sable Compute was added in Checkpoint B) — `DEMO_SCRIPT.md` was written
+  to match what the product actually does (seven) rather than copying that now-stale prose forward.
+- **New Play's default ICP overrides expanded from 4 fields to the full canonical set** (see "What
+  Checkpoint F added" above for the full story) — this is a bug fix, not a UI scope expansion: the form
+  still exposes exactly the four controls §18 specifies (target industries, size min/max, min score);
+  the additional fields are sent as fixed defaults matching the fixture pack's own `play_spec`, the same
+  way `tests/api_helpers.py::DEMO_ICP_OVERRIDES` already did for the backend test suite. No new form
+  field was added.
+- **No new backend test file for the `target_count`/override default changes.** Existing tests already
+  pass `target_count`/`icp_overrides` explicitly (`tests/api_helpers.py`, `test_isolation.py`,
+  `test_scoring.py`), so they were unaffected by the default change and remain the coverage for those
+  code paths; the *frontend* default was verified by browser rehearsal (§32 checklist), not a new
+  Playwright/component test suite — consistent with Checkpoint D/E's precedent of no frontend automated
+  tests in this repo.
+- **`app/favicon.ico` is a hand-built minimal ICO** (16×16, 32bpp, solid two-color square matching
+  `app/icon.svg`), constructed with Python's `struct` module directly rather than an image tool — no
+  image-generation tooling (ImageMagick, PIL) was available in this environment. Fine for its only job
+  (stop the browser's automatic `/favicon.ico` probe from 404ing); replace with a designed asset
+  whenever the product gets real brand treatment.
+
 ---
 
 ## Next task
 
-**Checkpoint F — Quality + hardening** (`docs/IMPLEMENTATION_PLAN.md` §30, budget 45m). Build the
-Quality tab on Run Detail (`MetricGrid` + `GuardrailPanel`, each metric with a computation tooltip) —
-`GET /runs/{id}/evaluation` already exists and is tested (Checkpoint C); the Run Detail page currently
-renders a placeholder string in that tab (`app/runs/[id]/page.tsx`, the `tab === "quality"` branch) —
-replace it, don't restructure the Board tab beside it. Also in scope: `test_run_integration.py`
-already exists (Checkpoint B) so re-verify rather than rewrite; `make demo-reset`; loading/empty/error
-states on all three screens (New Play, Run Detail, Prospect Detail — Prospect Detail's are largely
-done from this checkpoint, see below); `README.md`; `docs/DEMO_SCRIPT.md` filled with the §4 narrative
-and §32 checklist; one full rehearsal; a 90-second fallback screen recording. Acceptance: fresh clone
-→ `make dev` → the full §32 checklist passes; full test suite green; every Quality-tab number
-reconciles by hand against the run; recording saved.
+**P0 is complete.** All six checkpoints (A–F) are done, the full §32 founder-demo checklist passes
+against the real running stack, and both rehearsals were reproducible from a clean `make demo-reset`.
+There is no required next task — a future session should not start P1 work without the user explicitly
+asking for it (per this file's own instructions and `CLAUDE.md`'s checkpoint protocol).
 
-Prospect Detail's own loading/error states (this checkpoint): "Loading prospect…" while the aggregate
-fetch is in flight, a dedicated error card with the RFC-7807 detail on a failed/missing id — matches
-the pattern `app/runs/[id]/page.tsx` already uses. Empty/degraded states per section (score not
-computed, no evidence, contact not reached, etc.) are also already done — see "What Checkpoint E
-added" above — so Checkpoint F's "empty/error states on all three screens" item is really about New
-Play and Run Detail, if either still needs one.
+If/when P1 is authorized, `docs/IMPLEMENTATION_PLAN.md` §5 gives the order: **OpenAI provider → live
+search → deployment → MCP shim → polish** (waterfall trace, standalone eval page, cancellation,
+draft edit/regenerate, LLM tone advisor). Concretely, in priority order:
+
+1. **OpenAI provider** (`providers/live/`) — implement `LLMProvider`/`SearchProvider` for real, behind
+   the same Protocols `providers/demo/` already satisfies. `providers/registry.py`'s `NotImplementedError`
+   for `Mode.LIVE` is the exact seam; the API layer already rejects `mode: "live"` at the door
+   (`PlayCreateRequest.mode: Literal["demo"]`), so this is additive, not a rewrite.
+2. **Live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url` handling
+   to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently untriggerable
+   (every evidence row in the repo today is `DEMO_FIXTURE`).
+3. **Deployment** — currently local-only by design (§27); optional.
+4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
+5. **Polish backlog** (not required, noted for completeness):
+   - A graphical trace waterfall instead of `TraceTable` (explicitly cut from P0, §5/§34).
+   - A standalone cross-run evaluation page (the Quality tab is the P0 scope; §16 names a standalone
+     page as P1).
+   - `POST /runs/{id}/cancel` (explicitly cut from P0, §5).
+   - Draft edit/regenerate on outreach.
+   - Frontend automated tests — `apps/web/package.json` has no test runner configured; every checkpoint
+     from D onward has verified via build/lint gates and browser rehearsal instead. Worth adding
+     Playwright/component tests as first P1-adjacent hardening if this project continues past the
+     interview.
+   - Expose `max_concurrent_prospects` via `GET /settings/providers` so
+     `lib/constants.ts::MAX_CONCURRENT_PROSPECTS` stops needing to be hand-kept in sync with
+     `config.py`.
+   - A real per-run `plan.created` event / rendered plan panel, if a future checkpoint wants the DAG
+     itself surfaced in the UI (currently `RunRow.plan` stays `[]` since the pipeline is the same fixed
+     7-step list every run).
 
 ---
 
@@ -720,3 +916,14 @@ Play and Run Detail, if either still needs one.
   makes sense rather than assuming it does. `ApprovalBar`'s client-side decidable-status gate
   (`{PASS, NEEDS_REVIEW, REJECTED}`) must stay in sync with `routers/prospects.py`'s
   `_DECIDABLE_STATUSES` — if that set changes on the backend, update both.
+- **Checkpoint F's own do-not-touch:** `app/plays/new/page.tsx`'s `overrides()` default ICP fields
+  (`excluded_industries`, `adjacent_industries`, `target_funding_stages`, `target_technologies`,
+  `persona_titles`, `min_confidence`, and the `sizeMin`/`sizeMax`/`industries` `useState` defaults) must
+  keep matching `demo_pack.yaml`'s own `play_spec` / `tests/api_helpers.py::DEMO_ICP_OVERRIDES` exactly
+  — this is what makes the canonical demo run through the real UI reproduce the documented reference
+  scores. If the fixture pack's `play_spec` or any company's `industry`/`employee_count` ever changes,
+  re-verify this default set and the numbers in `docs/DEMO_SCRIPT.md` together, in the same change —
+  they drifted apart once already (see "What Checkpoint F added") and it was silent until someone
+  actually ran the product. `PlaySpec.target_count`'s default of `7` must keep matching the fixture
+  pack's real company count for the same reason. `MetricGrid.tsx`/`GuardrailPanel.tsx` read `null` as
+  "no data yet", never a fabricated placeholder — keep that contract if either is extended.

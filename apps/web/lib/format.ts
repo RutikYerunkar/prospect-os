@@ -30,6 +30,24 @@ export function formatStatus(status: string): string {
   return status.replaceAll("_", " ");
 }
 
+const RUN_STATUS_LABEL: Record<string, string> = {
+  RUNNING: "Running",
+  COMPLETED: "Completed",
+  PARTIAL: "Completed with issues",
+  INTERRUPTED: "Interrupted",
+};
+
+/**
+ * Human-readable run status for display — e.g. PARTIAL (a real backend
+ * status meaning "run finished, at least one prospect didn't reach a clean
+ * terminal outcome") reads as "Completed with issues" rather than sounding
+ * like a bug. The raw backend value is never discarded — callers should
+ * still surface it unobtrusively (e.g. a `title` tooltip).
+ */
+export function formatRunStatus(status: string): string {
+  return RUN_STATUS_LABEL[status] ?? formatStatus(status);
+}
+
 export function formatScore(score: number | null | undefined): string {
   return score === null || score === undefined ? "—" : String(score);
 }
@@ -41,4 +59,12 @@ export function formatConfidence(confidence: number | null | undefined): string 
 export function formatDateOnly(iso: string | null | undefined): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+export function formatPercent(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : `${Math.round(value * 100)}%`;
+}
+
+export function formatCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : String(value);
 }

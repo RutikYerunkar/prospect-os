@@ -5,6 +5,7 @@ import type {
   ProspectSummary,
   RunCreateRequest,
   RunCreateResponse,
+  RunEvaluation,
   RunResponse,
 } from "@/lib/types";
 
@@ -80,6 +81,10 @@ export function getRun(runId: string): Promise<RunResponse> {
 
 export function listRunProspects(runId: string): Promise<ProspectSummary[]> {
   return apiGet<ProspectSummary[]>(`/api/runs/${runId}/prospects`);
+}
+
+export function getRunEvaluation(runId: string): Promise<RunEvaluation> {
+  return apiGet<RunEvaluation>(`/api/runs/${runId}/evaluation`);
 }
 
 export function getProspect(prospectId: string): Promise<ProspectAggregate> {

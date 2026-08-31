@@ -174,7 +174,7 @@ function ApprovalBar({
         </p>
       ) : (
         <div className="flex flex-col gap-2">
-          <p className="text-xs text-zinc-600">
+          <p className="text-xs text-zinc-500">
             Approve or reject transitions state via the existing audit trail only. Nothing is sent externally.
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -231,7 +231,7 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
           <p className="text-sm text-rose-400">
             Prospect <span className="font-mono">{id}</span> could not be loaded.
           </p>
-          <p className="mt-2 font-mono text-xs text-zinc-600">{loadError}</p>
+          <p className="mt-2 font-mono text-xs text-zinc-500">{loadError}</p>
           <Link href="/plays/new" className="mt-4 inline-block text-sm text-indigo-400 hover:text-indigo-300">
             ← Start a new play
           </Link>

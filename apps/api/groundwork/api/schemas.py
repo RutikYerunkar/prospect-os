@@ -22,7 +22,9 @@ class PlayCreateRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=2000)
     icp_overrides: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["demo"] = "demo"
-    target_count: int = Field(default=6, ge=1, le=25)
+    # 7 matches the demo fixture pack's own company count (§23) — see
+    # groundwork/models/schemas.py::PlaySpec.target_count for why.
+    target_count: int = Field(default=7, ge=1, le=25)
 
 
 class RunSummary(BaseModel):

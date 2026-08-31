@@ -159,6 +159,22 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
         end = run_row.finished_at or datetime.utcnow()
         wall_clock_ms = (end - run_row.started_at).total_seconds() * 1000
 
+    # Per-step success rate — a step "succeeds" if any attempt for it reached
+    # OK (a step that retried then succeeded still counts as a success for
+    # that prospect, same as the engine's own outcome), computed over the
+    # distinct (prospect, step) pairs rather than raw attempt rows so a
+    # 3-attempt retry sequence doesn't dilute the rate.
+    step_pairs_total: dict[str, set[str]] = {}
+    step_pairs_ok: dict[str, set[str]] = {}
+    for t in task_rows:
+        step_pairs_total.setdefault(t.step_name, set()).add(t.prospect_id)
+        if t.status == "OK":
+            step_pairs_ok.setdefault(t.step_name, set()).add(t.prospect_id)
+    per_step_success_rate = {
+        step: len(step_pairs_ok.get(step, set())) / len(prospect_ids)
+        for step, prospect_ids in step_pairs_total.items()
+    }
+
     reliability = {
         "step_status_counts": step_status_counts,
         "total_retries": step_status_counts.get("RETRY", 0),
@@ -166,6 +182,7 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
         "p95_step_duration_ms": _percentile(durations, 0.95),
         "run_wall_clock_ms": wall_clock_ms,
         "provider_error_counts": error_counts,
+        "per_step_success_rate": per_step_success_rate,
     }
 
     # --- guardrails ---

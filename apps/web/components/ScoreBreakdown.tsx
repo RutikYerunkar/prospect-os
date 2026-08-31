@@ -17,6 +17,14 @@ function formatPoints(value: number): string {
   return `${points >= 0 ? "+" : ""}${points.toFixed(1)}`;
 }
 
+// industry_fit and size_fit are read straight off the company's structural
+// profile (CompanySeed) at scoring time — not a claim that needs a citation
+// — so they're never evidence-gated (domain/scoring.py's own
+// `_STRUCTURAL_DIMENSIONS`). Presentation-only mirror of that fact: it lets
+// the table show "supported · from profile" instead of a Support badge that
+// looks contradicted by an Evidence column reading 0.
+const STRUCTURAL_DIMENSIONS = new Set(["industry_fit", "size_fit"]);
+
 /**
  * The deterministic ICP rubric, rendered as arithmetic: dimension, raw,
  * weight, contribution, evidence count, supported/unsupported — reconciled
@@ -61,22 +69,37 @@ export function ScoreBreakdown({ score }: { score: ProspectScore | null }) {
           </TR>
         </THead>
         <TBody>
-          {score.dimensions.map((d) => (
-            <TR key={d.name}>
-              <TD className="font-medium text-zinc-100">{d.name.replaceAll("_", " ")}</TD>
-              <TD className="font-mono tabular-nums text-zinc-300">{formatRaw(d.raw)}</TD>
-              <TD className="font-mono tabular-nums text-zinc-400">{formatWeight(d.weight)}</TD>
-              <TD className="font-mono tabular-nums text-zinc-100">{formatPoints(d.contribution)}</TD>
-              <TD className="font-mono tabular-nums text-zinc-400">{d.evidence_ids.length}</TD>
-              <TD>
-                {d.unsupported ? (
-                  <Badge tone="rose">unsupported</Badge>
-                ) : (
-                  <Badge tone="emerald">supported</Badge>
-                )}
-              </TD>
-            </TR>
-          ))}
+          {score.dimensions.map((d) => {
+            const isStructural = STRUCTURAL_DIMENSIONS.has(d.name) && !d.unsupported;
+            return (
+              <TR key={d.name}>
+                <TD className="font-medium text-zinc-100">{d.name.replaceAll("_", " ")}</TD>
+                <TD className="font-mono tabular-nums text-zinc-300">{formatRaw(d.raw)}</TD>
+                <TD className="font-mono tabular-nums text-zinc-400">{formatWeight(d.weight)}</TD>
+                <TD className="font-mono tabular-nums text-zinc-100">{formatPoints(d.contribution)}</TD>
+                <TD className="font-mono tabular-nums text-zinc-400">
+                  {isStructural ? (
+                    <span title="Read from the company's structural profile, not a citable claim — never evidence-gated.">
+                      profile
+                    </span>
+                  ) : (
+                    d.evidence_ids.length
+                  )}
+                </TD>
+                <TD>
+                  {d.unsupported ? (
+                    <Badge tone="rose">unsupported</Badge>
+                  ) : isStructural ? (
+                    <span title="Supported by company profile data (industry/size), which doesn't require an evidence citation — not a contradiction with the 0 above.">
+                      <Badge tone="emerald">supported · profile</Badge>
+                    </span>
+                  ) : (
+                    <Badge tone="emerald">supported</Badge>
+                  )}
+                </TD>
+              </TR>
+            );
+          })}
           <TR className="border-t border-zinc-700">
             <TD className="font-medium text-zinc-400">Σ weight × raw × 100</TD>
             <TD />

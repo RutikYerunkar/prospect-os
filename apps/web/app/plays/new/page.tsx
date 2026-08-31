@@ -78,11 +78,23 @@ export default function NewPlayPage() {
   const router = useRouter();
 
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE);
-  const [industries, setIndustries] = useState<string[]>(["AI Infrastructure"]);
-  const [sizeMin, setSizeMin] = useState(1);
-  const [sizeMax, setSizeMax] = useState(500);
+  // "ai_infrastructure" is the exact industry slug the fixture pack's
+  // companies and its own canonical PlaySpec use (domain/scoring.py matches
+  // industry_fit by exact string, not a fuzzy label) — a human-readable
+  // "AI Infrastructure" chip here would silently downgrade every fixture
+  // company's industry_fit from a full 1.0 match to a 0.6 adjacent-match.
+  const [industries, setIndustries] = useState<string[]>(["ai_infrastructure"]);
+  // 50-250 matches the fixture pack's own canonical size band — running the
+  // default form reproduces the exact, documented score for every company
+  // (e.g. Northwind Labs at 92), not a number that drifts with whatever the
+  // form's placeholder bounds happened to be.
+  const [sizeMin, setSizeMin] = useState(50);
+  const [sizeMax, setSizeMax] = useState(250);
   const [minScore, setMinScore] = useState(60);
-  const [targetCount, setTargetCount] = useState(6);
+  // 7 matches the demo fixture pack's own company count (6 required + the
+  // optional Sable Compute) — the discovered count on the run this creates
+  // will equal this number exactly, never a surprise +1.
+  const [targetCount, setTargetCount] = useState(7);
 
   const [parsedPlay, setParsedPlay] = useState<PlayResponse | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -94,12 +106,26 @@ export default function NewPlayPage() {
 
   const signature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount });
 
+  // The form only exposes four ICP controls (§18) — the rest of the
+  // canonical demo ICP (exclusions, funding stage, tech, persona,
+  // confidence floor) isn't user-editable here, but still has to be sent so
+  // the fixture pack's exclude-list disqualifier (Cobalt Retail Systems'
+  // `retail_pos`) actually fires. Without this, a play created from this
+  // form never sends `excluded_industries` and Cobalt silently scores PASS
+  // instead of the fixture's intended REJECTED — a real demo-consistency
+  // bug, not a hypothetical one.
   function overrides() {
     return {
       target_industries: industries,
+      excluded_industries: ["retail_pos"],
+      adjacent_industries: { data_tooling: ["ai_infrastructure"] },
       size_band_min: sizeMin,
       size_band_max: sizeMax,
+      target_funding_stages: ["series_a", "series_b"],
+      target_technologies: ["kubernetes", "pytorch", "triton"],
+      persona_titles: ["VP of Sales", "Head of Sales", "VP of Revenue"],
       min_score: minScore,
+      min_confidence: 0.6,
     };
   }
 
@@ -249,7 +275,7 @@ export default function NewPlayPage() {
             <Button onClick={handleRunAgents} disabled={!canSubmit} className="w-full">
               {phase === "starting" ? "Starting run…" : "Run Agents"}
             </Button>
-            <p className="text-xs text-zinc-600">
+            <p className="text-xs text-zinc-500">
               Mode: <span className="font-mono text-zinc-400">demo</span> — objective parsing is
               deterministic in this checkpoint, not an LLM call.
             </p>
