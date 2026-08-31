@@ -12,18 +12,17 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 |---|---|---|
 | **A — Foundation** | `6fafaa2414b2f3b75f8d0e9f2c36fe4003da9d09` (merged to `master` via PR #1) | Repo scaffolding, project-memory docs, FastAPI + Next.js health-check loop, CORS. |
 | **B — Core engine** | `5edff10` (merged to `master` via PR #2) | Domain layer, fixtures, engine, demo providers, tracing/events, tests, headless demo. |
-| **C — API / SSE** | *this commit* (branch `claude/checkpoint-c-api-sse-1fki7i`) | FastAPI routers for every P0 endpoint, async run launch (202), resumable SSE over `run_events`, computed-on-read evaluation metrics, approve/reject as state transitions, tests. |
+| **C — API / SSE** | `21a615e` (merged to `master` via PR #3) | FastAPI routers for every P0 endpoint, async run launch (202), resumable SSE over `run_events`, computed-on-read evaluation metrics, approve/reject as state transitions, tests. |
+| **D — Hero product UI** | *this commit* (branch `claude/checkpoint-d-hero-ui-tit3fz`) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
 
 ---
 
 ## Current checkpoint
 
-**C — API / SSE.** Status: **complete**, ready to stop per the checkpoint protocol.
+**D — Hero product UI.** Status: **complete**, ready to stop per the checkpoint protocol.
 
-Next session should start **Checkpoint D — Hero product UI** (see `docs/IMPLEMENTATION_PLAN.md` §30),
-after reading `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file. **Do not build any React until
-this session's SSE curl verification below has been read** — it already is; the API is proven from
-the outside without a UI.
+Next session should start **Checkpoint E — Depth UI** (see `docs/IMPLEMENTATION_PLAN.md` §30), after
+reading `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file.
 
 ---
 
@@ -211,6 +210,84 @@ check and CORS setup are untouched.
 
 ---
 
+## What Checkpoint D added
+
+Frontend only — zero backend files touched (verified: `git status` on this branch shows only
+`apps/web/**` and this doc changed). All API/SSE behavior consumed as-is from Checkpoint C.
+
+**`apps/web/components/ui/`** (8 hand-rolled primitives, no shadcn) — `Card`, `Panel` (titled section
+container), `Badge` (semantic tone map: emerald/amber/rose/sky/indigo/neutral), `Button`
+(primary/secondary/ghost), `Table`/`THead`/`TBody`/`TR`/`TH`/`TD`, `Progress`, `Tabs`/`Tab`, `Stat`.
+Visual language locked once in `app/globals.css` + `app/layout.tsx`: `zinc-950` ground, `zinc-900`
+surfaces, `zinc-800` hairline borders, one accent (`indigo-400`), JetBrains Mono (via
+`next/font/google`) for identifiers/scores/durations, system sans for prose, no gradients/glows.
+
+**`apps/web/lib/`**
+- `types.ts` — hand-mirrored wire types for every DTO in `groundwork/api/schemas.py` (`PlaySpec`,
+  `PlayResponse`, `RunResponse`, `ProspectSummary`, `RunEvent`, etc.) plus `PIPELINE_STAGES` (the
+  7-stage order for the board's stage track). No codegen, per §18.
+- `format.ts` — duration/elapsed/time/stage/status/score/confidence formatting helpers.
+- `constants.ts` — `MAX_CONCURRENT_PROSPECTS = 3`, documented as mirroring
+  `Settings.max_concurrent_prospects` in `config.py` (not returned by any Checkpoint C endpoint — the
+  concurrency *bound* shown next to "Agents active" is this constant; the numerator is always computed
+  live from real prospect stage data, never hardcoded).
+- `api.ts` — extended with `apiPost`, `eventStreamUrl`, and typed wrappers (`createPlay`, `startRun`,
+  `getRun`, `listRunProspects`) over the existing `apiGet`/`ApiError`.
+- `useRunStream.ts` — the SSE client. Bootstraps via `Promise.all([getRun, listRunProspects])` (REST,
+  authoritative) before opening `EventSource(.../events?after_seq=<lastSeq>)`. Listens for each of the
+  11 documented event types individually (`addEventListener` per type, since the backend names the SSE
+  `event:` field), applies lightweight reducer updates for immediate feedback (stage advances, retry
+  badges, terminal status), and schedules a debounced authoritative `GET /runs/{id}/prospects` refetch
+  on `prospect.scored`/`prospect.reviewed`/`prospect.completed`/`run.completed`/`run.failed` — fields
+  like score/contact/review only ever land through the aggregate read, never invented from an event
+  payload. **Reconnect is manual, not the browser's built-in `EventSource` retry**: on `error` the
+  client closes the socket itself and reopens with `after_seq=<lastSeqRef>` (exponential backoff,
+  capped at 8s) — relying on the native retry would replay from the original `after_seq` and duplicate
+  every event already applied. `run.completed`/`run.failed` set the known-terminal ref *synchronously*
+  from the event payload (not from the async `GET /runs/{id}` refetch) specifically so the clean
+  server-side stream close that follows isn't mistaken for a drop and doesn't trigger a pointless
+  reconnect — this raced in early manual testing before the fix.
+
+**Pages**
+- `app/plays/new/page.tsx` — objective textarea (seeded with the plan's own §4 demo objective) + chip
+  input for target industries + size band min/max + minimum ICP score + prospect count. Debounces
+  (600ms) a live call to the real `POST /api/plays` as the form changes, rendering the returned
+  `PlaySpec` read-only via `PlanPanel` beside the form — there is no separate parse-only endpoint, so
+  this *is* how the API parses an objective (§8's Objective Parser LLM agent still doesn't exist; the
+  UI states this plainly: "objective parsing is deterministic in this checkpoint, not an LLM call").
+  **Run Agents** re-parses only if the form changed since the last successful parse (tracked via a
+  signature ref, not a `useState` flag — the naive version tripped
+  `react-hooks/set-state-in-effect`), then calls `POST /plays/{id}/runs` and navigates to
+  `/runs/{run_id}` immediately on the 202.
+- `app/runs/[id]/page.tsx` — the hero screen. `RunSummary` header (run id, status, mode chip, SSE
+  connection-state chip, live elapsed timer, objective text fetched separately via `GET
+  /plays/{play_id}` since `RunResponse` doesn't carry it, progress bar, and the counter row: discovered
+  / **agents active N / 3** / completed / pass / needs review / rejected / duplicate / failed — all
+  derived from the live `prospects` array, never from `run.counters`, which is `{}` until the backend
+  finalizes the run). Board/Quality `Tabs` shell — Quality is the required placeholder string, no
+  metrics logic. `RunBoard` renders `ProspectRow`s in a `Table`; `ActivityStream` renders the newest
+  event first from real SSE payloads (`describeEvent()` switches on `event.type`, no manufactured
+  frontend-only events).
+- `app/prospects/[id]/page.tsx` — minimal placeholder per the explicit Checkpoint D scope restriction;
+  links back to New Play. Checkpoint E replaces this file's contents entirely.
+- `app/page.tsx` — now a server-side `redirect("/plays/new")` (was the Checkpoint A health-check demo
+  card); no global dashboard/prospects/settings pages were added, per scope.
+
+**Components** — `PlanPanel` (read-only `PlaySpec` grid, reused by New Play's preview), `RunSummary`,
+`RunBoard`, `ProspectRow` (per-row `StageTrack` — 7 dots across `PIPELINE_STAGES`, filled for
+done/current-pulsing-sky/upcoming-zinc; retry badge sourced from `useRunStream`'s live `retrying` map
+when a step is currently mid-retry, falling back to a persistent "↻ retried" badge from
+`prospect.had_retry` once it resolves so the retry stays visible without dev tools per the task spec),
+`ActivityStream`.
+
+**Concurrency legibility, concretely:** a prospect's row shows `queued` (grey, no stage dots lit) from
+creation until its coroutine actually acquires the semaphore slot and starts `Research` — the "Agents
+active" numerator counts only rows whose `stage !== DISCOVERED` and whose status isn't yet terminal.
+With `max_concurrent_prospects=3` and 6 fixture prospects, this reliably shows at most 3 rows advancing
+at once, which is the whole point of the board per §4's demo narrative.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -277,6 +354,45 @@ Quarry Systems (FAILED) exhausted all 3 research attempts (`ProviderUnavailable`
 any sibling prospect. Confirmed reproducible across repeated `make demo-reset && make demo` runs.
 **No outcome is hardcoded** — every status above is the runner's own `_derive_final_status()` reading
 `ctx.score.disqualified` and `ctx.review.verdict`, both computed from fixture evidence at run time.
+
+**Checkpoint D verification** — no frontend automated test suite was added (not in scope for this
+checkpoint); verified instead by build/lint gates plus headless-Chromium browser walkthroughs against
+the real running stack (`uv run uvicorn ... --port 8010` + `pnpm dev --port 3000`,
+`NEXT_PUBLIC_API_URL` pointed at 8010; port 3000 required to match `cors_origins` in `config.py` —
+running the web app on a different port 400s on CORS preflight, confirmed the hard way first).
+
+1. `cd apps/api && uv run pytest` — **63/63 still passing**, unchanged, confirming zero backend
+   regressions from this checkpoint (`git status` shows no `apps/api/**` diff).
+2. `cd apps/web && pnpm lint` — clean. `pnpm build` — compiles, typechecks, and prerenders `/` and
+   `/plays/new` static, `/runs/[id]` and `/prospects/[id]` dynamic, with no errors.
+3. Browser: filled New Play with the plan's own demo objective, watched the debounced `PlanPanel`
+   populate with real parsed criteria (industries chip, size band, score/confidence/count) from the
+   live `POST /api/plays` response. Clicked **Run Agents** → navigated to `/runs/{run_id}` immediately
+   on the 202, before the run had produced any prospects yet.
+4. Polled fresh page loads of the same run at ~150ms/400ms/700ms/2500ms after creation (simulating
+   repeated refreshes at different points in a run that completes in under 2s in Demo Mode): at 150ms,
+   two rows showed `queued` stage with a live retry badge (`research · retry 1`, `research · retry 2`)
+   while others had already reached terminal status — direct visual proof of bounded, independently-
+   paced concurrency and mid-pipeline retry visibility. By 700ms the run had reached `PARTIAL` with all
+   six rows terminal (`PASS` ×2, `NEEDS_REVIEW` ×2, `DUPLICATE` ×1, `FAILED` ×1) and stayed
+   byte-for-byte identical (no backward jumps, no duplicate rows beyond the intentional
+   `DUPLICATE`-status row) across every later reload through 2500ms.
+5. Reconnect resilience: routed `**/api/runs/*/events*` through Playwright to abort every request for
+   2.5s after page load, confirming the client's manual backoff loop kept retrying (4 attempts
+   observed, connection chip showing `reconnecting…`) rather than giving up; unblocked the route and
+   confirmed the client reopened the stream, the connection chip returned to a closed/live state
+   appropriately, and the board reconciled to the exact same fully-correct final state as an unblocked
+   run — proving the debounced `GET /runs/{id}/prospects` reconcile-on-reconnect path is what actually
+   repairs state, not the SSE frames alone.
+6. Direct nav to a nonexistent run id (`/runs/does-not-exist`) renders the friendly "Run … could not be
+   loaded" error state (RFC-7807 detail shown as secondary mono text, not a raw stack trace); direct nav
+   to `/prospects/{id}` renders this checkpoint's placeholder (Checkpoint E's real content) without a
+   broken-navigation dead end.
+7. Viewport check at 1440×900 (primary) and 1280×800: no horizontal overflow on either the board table
+   (`overflow-x-auto` wrapper) or the page body; `document.documentElement.scrollWidth <=
+   clientWidth` confirmed via `page.evaluate` at 1280px.
+8. Row navigation: clicking a `ProspectRow` calls `router.push('/prospects/{id}')` with the real
+   `ProspectSummary.id` from the reconciled board state, not a client-generated or stale id.
 
 ---
 
@@ -357,20 +473,57 @@ any sibling prospect. Confirmed reproducible across repeated `make demo-reset &&
   error message, same underlying constraint. `PlayCreateRequest.mode` is typed `Literal["demo"]`, so
   `mode: "live"` on `POST /plays` itself is already a 422 from Pydantic before the route body runs.
 
+**Checkpoint D's own deviations:**
+
+- **New Play's "live parsed spec" preview creates a real `Play` row on every debounced edit**, not
+  just on submit. There's no parse-only endpoint (§8's Objective Parser LLM agent doesn't exist yet,
+  Checkpoint C's own noted deviation) and inventing one wasn't in scope for this checkpoint, so the
+  form calls the real `POST /api/plays` 600ms after the user stops typing/adjusting controls, same as
+  clicking Run Agents would. This does leave extra unused `Play` rows in the DB from abandoned edits
+  (SQLite, resettable, `demo-reset` wipes them) — an accepted cost for showing the parser working
+  live "beside the form" per §18/§4, rather than only after commit.
+- **"Agents active N / 3" hardcodes the `3`** as `lib/constants.ts::MAX_CONCURRENT_PROSPECTS`, mirroring
+  `config.py`'s `Settings.max_concurrent_prospects` default. No Checkpoint C endpoint returns this
+  value (`GET /settings/providers` only reports `{mode, llm, search}`). The numerator is never
+  hardcoded — it's `prospects.filter(stage !== DISCOVERED && !terminal).length`, computed live every
+  render. If `max_concurrent_prospects` is ever changed from 3, this constant needs a matching edit (or
+  a future checkpoint adds it to `GET /settings/providers` and this reads it instead).
+- **`ActivityStream` never renders a `step.failed` event because the engine never emits one** — §19
+  lists `step.failed` as a documented event type, but Checkpoint B/C's engine raises straight through a
+  non-optional step's exhausted retries into `prospect.completed` with `status: FAILED` and the real
+  exception message (see `engine/runner.py`'s `except Exception` in `execute_run`'s inner `one()`).
+  This is a pre-existing gap, not something to paper over with a frontend-only event: the activity
+  stream's `"{company} · failed — {error}"` line for a `prospect.completed` failure uses that real
+  error string; no attempt count or synthetic wording is fabricated to match the plan's illustrative
+  `"failed after 3 attempts"` example text.
+- **No frontend automated tests added.** Checkpoint D's plan entry doesn't list a test file (unlike
+  every backend checkpoint); verification is build/lint gates plus the browser walkthroughs recorded
+  above. If a future checkpoint wants component/E2E tests, `apps/web/package.json` has no test runner
+  configured yet — that's a new dependency decision, not an oversight to silently fix.
+- **`app/page.tsx` (root `/`) redirects to `/plays/new`** rather than staying the Checkpoint A
+  health-check card — there is intentionally no dashboard/home page in P0 (§5), and an unreachable
+  root route would be a broken-feeling entry point for the founder demo.
+
 ---
 
 ## Next task
 
-**Checkpoint D — Hero product UI** (`docs/IMPLEMENTATION_PLAN.md` §30, budget 70m). The API is fully
-verified from curl (see this session's manual verification above) — build `components/ui/*` (8
-hand-rolled primitives), `lib/{types,useRunStream,format}.ts`, `app/plays/new/page.tsx`,
-`app/runs/[id]/page.tsx`, and `components/{RunBoard,ProspectRow,ActivityStream,PlanPanel}.tsx`.
-`lib/useRunStream.ts` should mirror exactly what `test_api_sse.py` proved: keep `lastSeq`, reduce over
-event `type`, and on reconnect or `run.completed` do one authoritative `GET /runs/{id}/prospects`
-refetch to reconcile (§19). Acceptance is demo checklist items 1–5 (§32): rows advance independently
-at different rates, the retry and the failure are visible, refresh mid-run is correct, counters
-reconcile at completion. **Do not build**: dashboard home, prospects table, settings UI, animations
-beyond a stage-change transition, the Quality tab's contents (that's Checkpoint F).
+**Checkpoint E — Depth UI** (`docs/IMPLEMENTATION_PLAN.md` §30, budget 60m). Files:
+`app/prospects/[id]/page.tsx` (replaces the Checkpoint D placeholder entirely) and `components/
+{ScoreBreakdown,EvidenceCard,SignalList,ContactPanel,OutreachViewer,ReviewPanel,TraceTable}.tsx`. The
+full aggregate is already served by `GET /prospects/{id}` (`ProspectAggregate` in
+`groundwork/api/schemas.py` — company, evidence, signals, score+dimensions+modifiers, contact, drafts,
+review, `agent_tasks` trace, approval state); nothing new needed on the backend. Reuse
+`components/ui/*` from this checkpoint rather than inventing parallel primitives — `Panel`/`Card`/
+`Badge`/`Table`/`Tabs` already carry the visual language. Approve/reject wire to `POST
+/prospects/{id}/approve|reject` (already implemented and tested in Checkpoint C) and should refetch the
+aggregate afterward rather than optimistically mutating local state, matching this checkpoint's
+"REST is authoritative" pattern in `useRunStream.ts`. Acceptance is demo checklist items 6–12 (§32):
+the score table's contributions sum to the displayed overall, no synthetic evidence renders a clickable
+external link (enforce this in `EvidenceCard`, not just trust the backend validator), all seven review
+checks render including passes, the trace table shows retries, approve/reject transitions state and
+visibly sends nothing external. **Do not build**: outreach editing, regeneration, the graphical
+waterfall.
 
 ---
 
@@ -399,6 +552,15 @@ beyond a stage-change transition, the Quality tab's contents (that's Checkpoint 
   from `routers/prospects.py`, and do not wire any email/LinkedIn/webhook provider behind
   approve/reject without the user explicitly asking for that scope change — it's the one invariant
   Checkpoint C exists partly to demonstrate is *absent*.
-- Checkpoint A's `do not touch` list (`main.py`/`config.py`/`db.py`'s pre-existing shape, `apps/web/`)
-  still applies; `config.py`/`db.py` grew as anticipated (WAL pragma already existed from Checkpoint A
-  and is unchanged; added `create_all()`/`drop_all()` only).
+- Checkpoint A's `do not touch` list for `main.py`/`config.py`/`db.py`'s pre-existing shape still
+  applies (`config.py`/`db.py` grew as anticipated: WAL pragma already existed and is unchanged, added
+  `create_all()`/`drop_all()` only). Its original note about `apps/web/` is superseded — Checkpoint D
+  is exactly the session that was supposed to build there.
+- **Checkpoint D's own do-not-touch:** the visual language locked in `app/globals.css`/`app/layout.tsx`
+  (zinc/indigo/JetBrains Mono, no gradients/glows) — §18 says commit once, don't revisit; `lib/
+  useRunStream.ts`'s manual-reconnect-over-native-EventSource-retry design and its synchronous
+  terminal-status handling for `run.completed`/`run.failed` (removing either reintroduces the
+  duplicate-replay-on-reconnect bug and the false-positive-reconnect-on-clean-close race respectively,
+  both hit and fixed during this checkpoint's own testing); `lib/constants.ts::MAX_CONCURRENT_PROSPECTS`
+  should track `config.py` by hand until/unless a future checkpoint exposes it via `GET
+  /settings/providers`, not be silently guessed at a different value.
