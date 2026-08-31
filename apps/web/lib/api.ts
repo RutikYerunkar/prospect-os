@@ -1,6 +1,7 @@
 import type {
   PlayCreateRequest,
   PlayResponse,
+  ProspectAggregate,
   ProspectSummary,
   RunCreateRequest,
   RunCreateResponse,
@@ -79,4 +80,20 @@ export function getRun(runId: string): Promise<RunResponse> {
 
 export function listRunProspects(runId: string): Promise<ProspectSummary[]> {
   return apiGet<ProspectSummary[]>(`/api/runs/${runId}/prospects`);
+}
+
+export function getProspect(prospectId: string): Promise<ProspectAggregate> {
+  return apiGet<ProspectAggregate>(`/api/prospects/${prospectId}`);
+}
+
+export function approveProspect(prospectId: string, actor = "demo_user"): Promise<ProspectAggregate> {
+  return apiPost<ProspectAggregate>(`/api/prospects/${prospectId}/approve`, { actor });
+}
+
+export function rejectProspect(
+  prospectId: string,
+  reason: string,
+  actor = "demo_user",
+): Promise<ProspectAggregate> {
+  return apiPost<ProspectAggregate>(`/api/prospects/${prospectId}/reject`, { reason, actor });
 }

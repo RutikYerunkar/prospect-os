@@ -153,6 +153,162 @@ export interface RunEvent {
   payload: Record<string, unknown>;
 }
 
+// --- prospect aggregate (GET /api/prospects/{id}) ---
+
+export type EvidenceOrigin = "DEMO_FIXTURE" | "LIVE_FETCH" | "LLM_INFERENCE";
+
+export interface EvidenceItem {
+  id: string;
+  source_url: string | null;
+  source_ref: string | null;
+  source_provider: string;
+  title: string;
+  claim: string;
+  snippet: string;
+  signal_type: SignalType | null;
+  retrieved_at: string | null;
+  confidence: number;
+  origin: EvidenceOrigin;
+}
+
+export type SignalType = "FUNDING" | "HIRING" | "TECH" | "LEADERSHIP" | "PRODUCT";
+
+export interface SignalItem {
+  id: string;
+  type: SignalType;
+  summary: string;
+  occurred_at: string | null;
+  confidence: number;
+  evidence_ids: string[];
+}
+
+export interface DimensionScore {
+  name: string;
+  raw: number;
+  weight: number;
+  contribution: number;
+  evidence_ids: string[];
+  unsupported: boolean;
+}
+
+export interface ScoreModifier {
+  name: string;
+  reason: string;
+  detail: string;
+}
+
+export interface ProspectScore {
+  overall: number;
+  dimensions: DimensionScore[];
+  modifiers: ScoreModifier[];
+  disqualified: boolean;
+  explanation: string;
+  confidence: number;
+  rubric_version: string;
+  computed_at: string;
+}
+
+export interface ProspectContact {
+  full_name: string | null;
+  title: string | null;
+  persona: string | null;
+  linkedin_url: string | null;
+  email: string | null;
+  verification: ContactVerification;
+  evidence_ids: string[];
+}
+
+export interface ClaimMapEntry {
+  sentence: string;
+  evidence_ids: string[];
+}
+
+export interface OutreachDraft {
+  id: string;
+  channel: string;
+  step_index: number;
+  subject: string | null;
+  body: string;
+  claim_map: ClaimMapEntry[];
+  version: number;
+  status: string;
+}
+
+export type ReviewSeverity = "hard" | "soft";
+
+export interface ReviewCheck {
+  id: string;
+  passed: boolean;
+  severity: ReviewSeverity;
+  detail: string;
+  evidence_refs: string[];
+}
+
+export type ReviewVerdict = "PASS" | "NEEDS_REVIEW" | "FAIL";
+
+export interface ReviewResult {
+  verdict: ReviewVerdict;
+  checks: ReviewCheck[];
+  reasons: string[];
+  reviewed_at: string;
+}
+
+export interface AgentTaskTrace {
+  id: string;
+  step_name: string;
+  attempt: number;
+  status: string;
+  started_at: string;
+  duration_ms: number | null;
+  model: string | null;
+  provider: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  error_type: string | null;
+  error_message: string | null;
+  evidence_count: number | null;
+}
+
+export type ApprovalState = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface ApprovalInfo {
+  state: ApprovalState;
+  actor: string | null;
+  reason: string | null;
+  decided_at: string | null;
+}
+
+export interface ProspectCompany {
+  id?: string;
+  canonical_domain?: string;
+  display_name?: string;
+  industry?: string;
+  size_band?: string;
+  employee_count?: number;
+  hq_country?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface ProspectAggregate {
+  id: string;
+  run_id: string;
+  company: ProspectCompany;
+  dedupe_key: string;
+  duplicate_of: string | null;
+  stage: ProspectStage;
+  status: ProspectStatus;
+  error: string | null;
+  evidence: EvidenceItem[];
+  signals: SignalItem[];
+  score: ProspectScore | null;
+  contact: ProspectContact | null;
+  drafts: OutreachDraft[];
+  review: ReviewResult | null;
+  trace: AgentTaskTrace[];
+  approval: ApprovalInfo;
+}
+
 // --- settings ---
 
 export interface ProviderInfo {
