@@ -55,6 +55,7 @@ async def get_run(run_id: str, repos: ReposDep) -> RunResponse:
         finished_at=row.finished_at,
         duration_ms=_run_duration_ms(row),
         error=row.error,
+        provider_profile=row.provider_profile or {},
     )
 
 

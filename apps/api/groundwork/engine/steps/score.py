@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from groundwork.domain.scoring import ScoringInputs, compute_score
 from groundwork.engine.context import ProspectContext
+from groundwork.engine.llm import call_structured
 from groundwork.engine.step import StepResult
 from groundwork.models.llm_io import ScoreExplanationOutput
-from groundwork.providers.base import PromptEnvelope
+from groundwork.prompts import score_explanation as prompt
+from groundwork.providers.base import LLMOperation
 
 
 async def score(ctx: ProspectContext) -> StepResult:
@@ -27,20 +29,23 @@ async def score(ctx: ProspectContext) -> StepResult:
 
     ctx_key = ctx.step_key("score")
     top_dimensions = sorted(computed.dimensions, key=lambda d: d.contribution, reverse=True)[:3]
-    envelope = PromptEnvelope(
-        ctx_key=ctx_key,
-        system="Write one sentence explaining this ICP score from the numbers given. Do not invent numbers.",
-        user=f"{ctx.company.name} scored {computed.overall}/100.",
-        metadata={
-            "overall": computed.overall,
-            "disqualified": computed.disqualified,
-            "top_dimensions": [
-                {"name": d.name, "contribution": d.contribution} for d in top_dimensions
-            ],
-        },
+    disqualifier = next((m for m in computed.modifiers if m.name == "hard_disqualifier"), None)
+    prompt_input = prompt.ScoreExplanationInput(
+        company_name=ctx.company.name,
+        overall=computed.overall,
+        disqualified=computed.disqualified,
+        disqualifier_reason=disqualifier.detail if disqualifier else None,
+        top_dimensions=[
+            prompt.TopDimensionInput(name=d.name, raw=d.raw, weight=d.weight, contribution=d.contribution)
+            for d in top_dimensions
+        ],
     )
-    llm_result = await ctx.providers.llm.structured(envelope, ScoreExplanationOutput, ctx_key=ctx_key)
-    explanation = ScoreExplanationOutput.model_validate(llm_result.data)
+    envelope = prompt.build_envelope(ctx_key, prompt_input)
+    llm_result = await call_structured(
+        ctx, envelope, ScoreExplanationOutput,
+        operation=LLMOperation.SCORE_EXPLANATION, step_name="score", prompt_version=prompt.PROMPT_VERSION,
+    )
+    explanation = llm_result.parsed
 
     computed.explanation = explanation.explanation
     ctx.score = computed

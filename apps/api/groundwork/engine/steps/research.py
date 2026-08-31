@@ -8,11 +8,13 @@ from __future__ import annotations
 import uuid
 
 from groundwork.engine.context import ProspectContext
+from groundwork.engine.llm import call_structured
 from groundwork.engine.step import StepResult
 from groundwork.models.enums import EvidenceOrigin, SignalType
 from groundwork.models.llm_io import ResearchExtractionOutput
 from groundwork.models.schemas import Evidence
-from groundwork.providers.base import PromptEnvelope
+from groundwork.prompts import research_extraction as prompt
+from groundwork.providers.base import LLMOperation
 
 
 async def research(ctx: ProspectContext) -> StepResult:
@@ -38,14 +40,15 @@ async def research(ctx: ProspectContext) -> StepResult:
     ]
     ctx.evidence.extend(evidence)
 
-    envelope = PromptEnvelope(
-        ctx_key=ctx_key,
-        system="Extract structured research facts (funding, hiring, tech, leadership) from the provided sources.",
-        user=f"Extract facts for {ctx.company.name} from {len(docs)} source document(s).",
-        metadata={"company_slug": ctx.company.slug, "reference_date": ctx.reference_date.isoformat()},
+    prompt_input = prompt.ResearchExtractionInput.from_context(
+        company=ctx.company, reference_date=ctx.reference_date, docs=docs
     )
-    llm_result = await ctx.providers.llm.structured(envelope, ResearchExtractionOutput, ctx_key=ctx_key)
-    output = ResearchExtractionOutput.model_validate(llm_result.data)
+    envelope = prompt.build_envelope(ctx_key, prompt_input)
+    llm_result = await call_structured(
+        ctx, envelope, ResearchExtractionOutput,
+        operation=LLMOperation.RESEARCH_EXTRACTION, step_name="research", prompt_version=prompt.PROMPT_VERSION,
+    )
+    output = llm_result.parsed
 
     # Naive structural link only — source_ref -> this prospect's own evidence
     # id. Grounding (does the claim's text actually occur in that evidence's

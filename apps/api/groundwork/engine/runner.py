@@ -17,14 +17,17 @@ from pydantic import BaseModel
 
 from groundwork.domain.dedupe import dedupe_key as compute_dedupe_key
 from groundwork.domain.dedupe import find_duplicate, normalize_domain, normalize_name
+from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.pipeline import build_prospect_pipeline
 from groundwork.models.enums import ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
 from groundwork.models.schemas import CompanySeed, PlaySpec, ProspectOutcome
 from groundwork.observability.events import EventEmitter
+from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.trace import TraceRecorder
 from groundwork.providers.base import ProviderBundle
 from groundwork.repositories.events import EventRepository
+from groundwork.repositories.llm_calls import LLMCallRepository
 from groundwork.repositories.prospect_data import ProspectDataRepository
 from groundwork.repositories.prospects import CompanyRepository, ProspectRepository
 from groundwork.repositories.runs import RunRepository
@@ -39,6 +42,7 @@ class Repos:
     prospect_data: ProspectDataRepository
     tasks: TaskRepository
     events: EventRepository
+    llm_calls: LLMCallRepository
 
     @classmethod
     def build(cls, session_factory) -> "Repos":
@@ -49,6 +53,7 @@ class Repos:
             prospect_data=ProspectDataRepository(session_factory),
             tasks=TaskRepository(session_factory),
             events=EventRepository(session_factory),
+            llm_calls=LLMCallRepository(session_factory),
         )
 
 
@@ -112,6 +117,7 @@ async def execute_run(
     repos: Repos,
     max_concurrent_prospects: int,
     run_wall_clock_timeout_s: float,
+    budget: PipelineBudget = DEMO_BUDGET,
 ) -> RunSummary:
     prospect_seeds, all_identifiers = await discover_and_dedupe(run_id, play_spec, providers, repos)
     other_dedupe_keys_by_prospect = {
@@ -144,13 +150,16 @@ async def execute_run(
             reference_date=reference_date,
             trace=TraceRecorder(run_id=run_id, prospect_id=prospect_id, tasks=repos.tasks),
             events=events,
+            llm_calls=LLMCallRecorder(
+                run_id=run_id, prospect_id=prospect_id, provider=providers.llm.name, repo=repos.llm_calls
+            ),
             other_dedupe_keys=frozenset(other_dedupe_keys_by_prospect[prospect_id]),
             other_company_identifiers=frozenset(all_identifiers - own_identifiers),
         )
 
         async with gate:
             try:
-                await build_prospect_pipeline().execute(ctx)
+                await build_prospect_pipeline(budget).execute(ctx)
             except Exception as exc:  # noqa: BLE001 — isolate this prospect's failure only
                 await repos.prospects.finalize(prospect_id, status=ProspectStatus.FAILED.value, error=str(exc))
                 await events.emit("prospect.completed", prospect_id=prospect_id, status=ProspectStatus.FAILED.value, error=str(exc))

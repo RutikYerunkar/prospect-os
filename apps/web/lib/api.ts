@@ -3,6 +3,7 @@ import type {
   PlayResponse,
   ProspectAggregate,
   ProspectSummary,
+  ProviderSettingsResponse,
   RunCreateRequest,
   RunCreateResponse,
   RunEvaluation,
@@ -101,4 +102,8 @@ export function rejectProspect(
   actor = "demo_user",
 ): Promise<ProspectAggregate> {
   return apiPost<ProspectAggregate>(`/api/prospects/${prospectId}/reject`, { reason, actor });
+}
+
+export function getProviderSettings(): Promise<ProviderSettingsResponse> {
+  return apiGet<ProviderSettingsResponse>("/api/settings/providers");
 }

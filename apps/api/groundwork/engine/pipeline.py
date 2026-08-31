@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.step import Step, StepResult
 from groundwork.engine.steps.contact import contact
@@ -16,7 +17,7 @@ from groundwork.engine.steps.review import review
 from groundwork.engine.steps.score import score
 from groundwork.engine.steps.signals import signals
 from groundwork.models.enums import ProspectStage
-from groundwork.providers.base import ProviderTimeout, ProviderUnavailable
+from groundwork.providers.base import STEP_RETRYABLE
 
 STAGE_BY_STEP: dict[str, ProspectStage] = {
     "research": ProspectStage.RESEARCH,
@@ -76,25 +77,33 @@ class Pipeline:
             )
 
 
-_RETRYABLE = (ProviderTimeout, ProviderUnavailable)
-
-
-def build_prospect_pipeline() -> Pipeline:
+def build_prospect_pipeline(budget: PipelineBudget = DEMO_BUDGET) -> Pipeline:
     """Research -> Signals -> Enrich -> Score -> Contact -> Personalize ->
     Review (§2). Research is the only step with real retries in the base
     fixtures — Contact and Personalize are `optional` so a degraded buyer
-    lookup or a failed draft never sinks the whole prospect."""
+    lookup or a failed draft never sinks the whole prospect.
+
+    Every timeout/retry/backoff constant comes from `budget` — never
+    hardcoded here — so `execute_run(budget=...)` can hand Live Mode its own
+    `PipelineBudget` (built from `Settings` outside `engine/`) while
+    `DEMO_BUDGET`'s defaults reproduce Checkpoint B–F's literals exactly.
+    """
+    d = budget.default_step_timeout_s
     return Pipeline(
         steps=[
-            Step(name="research", run_fn=research, timeout_s=2.0, max_retries=2, retry_on=_RETRYABLE),
-            Step(name="signals", run_fn=signals, depends_on=("research",), timeout_s=2.0),
-            Step(name="enrich", run_fn=enrich, depends_on=("signals",), timeout_s=2.0),
-            Step(name="score", run_fn=score, depends_on=("enrich",), timeout_s=2.0),
-            Step(name="contact", run_fn=contact, depends_on=("score",), timeout_s=2.0, optional=True),
             Step(
-                name="personalize", run_fn=personalize, depends_on=("contact",), timeout_s=2.0,
-                max_retries=1, retry_on=_RETRYABLE, optional=True,
+                name="research", run_fn=research, timeout_s=budget.research_timeout_s,
+                max_retries=budget.research_max_retries, retry_on=STEP_RETRYABLE, backoffs_s=budget.backoffs_s,
             ),
-            Step(name="review", run_fn=review, depends_on=("personalize",), timeout_s=2.0),
+            Step(name="signals", run_fn=signals, depends_on=("research",), timeout_s=d),
+            Step(name="enrich", run_fn=enrich, depends_on=("signals",), timeout_s=d),
+            Step(name="score", run_fn=score, depends_on=("enrich",), timeout_s=d),
+            Step(name="contact", run_fn=contact, depends_on=("score",), timeout_s=d, optional=True),
+            Step(
+                name="personalize", run_fn=personalize, depends_on=("contact",), timeout_s=budget.personalize_timeout_s,
+                max_retries=budget.personalize_max_retries, retry_on=STEP_RETRYABLE, optional=True,
+                backoffs_s=budget.backoffs_s,
+            ),
+            Step(name="review", run_fn=review, depends_on=("personalize",), timeout_s=d),
         ]
     )

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from pydantic import BaseModel
 
@@ -22,9 +22,14 @@ from groundwork.models.llm_io import PersonalizationOutput, ResearchExtractionOu
 from groundwork.models.schemas import ClaimMapEntry, FundingEvent, HiringRole, LeadershipCandidate, ResearchFacts, TechMention
 from groundwork.providers.base import (
     FAILURE_TYPES,
+    LLMAttemptKind,
+    LLMAttemptStatus,
+    LLMAttemptTelemetry,
+    LLMOperation,
     LLMResult,
     PromptEnvelope,
     ProviderUnavailable,
+    digest_of,
     parse_ctx_key,
     stable_seed,
 )
@@ -64,8 +69,11 @@ class DemoLLMProvider:
             exc_cls = FAILURE_TYPES.get(failure.error, ProviderUnavailable)
             raise exc_cls(f"scripted {failure.error} for {slug}/{step_name}, attempt {attempt}")
 
-    async def structured(self, envelope: PromptEnvelope, schema: type[BaseModel], *, ctx_key: str) -> LLMResult:
-        _, _, step_name = parse_ctx_key(ctx_key)
+    async def structured(
+        self, envelope: PromptEnvelope, schema: type[BaseModel], *, ctx_key: str, operation: LLMOperation
+    ) -> LLMResult:
+        _, _, step_name = parse_ctx_key(ctx_key) if ctx_key.count(":") >= 2 else (None, None, ctx_key)
+        started = datetime.now(timezone.utc)
         await asyncio.sleep(self._jitter(ctx_key))
 
         if schema is ResearchExtractionOutput:
@@ -77,12 +85,36 @@ class DemoLLMProvider:
         else:
             raise ValueError(f"DemoLLMProvider has no handler for schema {schema!r}")
 
+        finished = datetime.now(timezone.utc)
+        tokens_in = len(envelope.user.split())
+        tokens_out = len(str(output).split())
+        # DemoLLMProvider produces exactly one INITIAL/OK attempt per
+        # logical call (Phase 3) — there is nothing to retry or repair
+        # against a fixture-derived response.
+        attempt = LLMAttemptTelemetry(
+            attempt=1,
+            attempt_kind=LLMAttemptKind.INITIAL,
+            schema_round=0,
+            transport_retry_index=0,
+            status=LLMAttemptStatus.OK,
+            started_at=started,
+            finished_at=finished,
+            latency_ms=(finished - started).total_seconds() * 1000,
+            model=self.model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_total=tokens_in + tokens_out,
+            input_digest=digest_of(envelope.user),
+            output_digest=digest_of(output.model_dump(mode="json")),
+        )
         return LLMResult(
-            data=output.model_dump(mode="json"),
+            parsed=output,
+            raw=output.model_dump(mode="json"),
+            operation=operation,
             model=self.model,
             provider=self.name,
-            tokens_in=len(envelope.user.split()),
-            tokens_out=len(str(output).split()),
+            prompt_version="demo-v1",
+            attempts=[attempt],
         )
 
     def _claim_for(self, fixture: FixtureCompany, source_ref: str | None) -> str:

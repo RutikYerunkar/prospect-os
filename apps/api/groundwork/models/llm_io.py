@@ -42,3 +42,27 @@ class ScoreExplanationOutput(BaseModel):
     """
 
     explanation: str
+
+
+class ObjectiveParseOutput(BaseModel):
+    """Objective Parser output (Checkpoint G Phase 9): NL objective ->
+    inferred `PlaySpec` *criteria only*. Deliberately does not ask the model
+    to echo `objective_text` or `target_count` — those are never ambiguous,
+    so there is nothing for a model to add by restating them, and echoing
+    them would just be another surface for drift between what the user
+    typed and what a model claims they typed.
+
+    Every field is optional/defaultable: a field the model omits keeps the
+    caller's own default or explicit user override — `parse_objective()`
+    layers this output *under* user overrides, never on top of them.
+    """
+
+    target_industries: list[str] = Field(default_factory=list)
+    excluded_industries: list[str] = Field(default_factory=list)
+    target_funding_stages: list[str] = Field(default_factory=list)
+    target_technologies: list[str] = Field(default_factory=list)
+    persona_titles: list[str] = Field(default_factory=list)
+    size_band_min: int | None = None
+    size_band_max: int | None = None
+    min_score: int | None = None
+    min_confidence: float | None = None

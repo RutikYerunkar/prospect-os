@@ -209,10 +209,61 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
         for cid, total in check_total_counts.items()
     ]
 
+    llm_usage = await _compute_llm_usage(run_id, repos)
+
     return {
         "run_id": run_id,
         "volume": volume,
         "quality": quality,
         "reliability": reliability,
         "guardrails": guardrails,
+        "llm_usage": llm_usage,
+    }
+
+
+async def _compute_llm_usage(run_id: str, repos: Any) -> dict[str, Any]:
+    """Computed-on-read from `llm_calls` (Checkpoint G Phase 8) — one row
+    per provider *attempt*; a "logical call" is a distinct `call_group_id`.
+    `estimated_cost_usd` is `None` whenever ANY contributing attempt lacks a
+    computed cost (i.e. pricing wasn't configured for at least part of the
+    run) — never a partially-summed number presented as complete."""
+    calls = await repos.llm_calls.for_run(run_id)
+    if not calls:
+        return {
+            "logical_calls": 0, "provider_attempts": 0, "tokens_in": 0, "tokens_out": 0, "tokens_total": 0,
+            "reasoning_tokens": None, "estimated_cost_usd": None, "by_operation": {}, "by_status": {},
+            "transport_retries": 0, "schema_repairs": 0, "budget_tripped": False,
+        }
+
+    call_groups = {c.call_group_id for c in calls}
+    tokens_in = sum(c.tokens_in for c in calls)
+    tokens_out = sum(c.tokens_out for c in calls)
+    reasoning = [c.reasoning_tokens for c in calls if c.reasoning_tokens is not None]
+    costs = [c.cost_usd for c in calls]
+    estimated_cost = sum(costs) if costs and all(c is not None for c in costs) else None
+
+    by_operation: dict[str, dict[str, int]] = {}
+    for c in calls:
+        bucket = by_operation.setdefault(c.operation, {"attempts": 0, "tokens_in": 0, "tokens_out": 0})
+        bucket["attempts"] += 1
+        bucket["tokens_in"] += c.tokens_in
+        bucket["tokens_out"] += c.tokens_out
+
+    by_status: dict[str, int] = {}
+    for c in calls:
+        by_status[c.status] = by_status.get(c.status, 0) + 1
+
+    return {
+        "logical_calls": len(call_groups),
+        "provider_attempts": len(calls),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tokens_total": tokens_in + tokens_out,
+        "reasoning_tokens": sum(reasoning) if reasoning else None,
+        "estimated_cost_usd": estimated_cost,
+        "by_operation": by_operation,
+        "by_status": by_status,
+        "transport_retries": sum(1 for c in calls if c.attempt_kind == "transport_retry"),
+        "schema_repairs": sum(1 for c in calls if c.attempt_kind == "schema_repair"),
+        "budget_tripped": any(c.status == "NOT_ATTEMPTED_BUDGET" for c in calls),
     }

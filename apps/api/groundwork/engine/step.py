@@ -38,6 +38,7 @@ class Step:
     max_retries: int = 0
     retry_on: tuple[type[Exception], ...] = ()
     optional: bool = False
+    backoffs_s: tuple[float, ...] = BACKOFFS_S
 
     async def execute(self, ctx: ProspectContext) -> StepResult:
         if await ctx.trace.has_succeeded(self.name):
@@ -59,9 +60,12 @@ class Step:
                 error, retryable = exc, False
             else:
                 duration_ms = (time.monotonic() - started) * 1000
+                rollup = ctx.llm_rollup.pop(self.name, None) or {}
                 await ctx.trace.record(
                     step_name=self.name, attempt=attempt, status="OK", duration_ms=duration_ms,
                     evidence_count=len(ctx.evidence),
+                    model=rollup.get("model"), provider=rollup.get("provider"),
+                    tokens_in=rollup.get("tokens_in", 0), tokens_out=rollup.get("tokens_out", 0),
                 )
                 return result
 
@@ -74,7 +78,7 @@ class Step:
             )
 
             if can_retry:
-                backoff = BACKOFFS_S[min(attempt - 1, len(BACKOFFS_S) - 1)]
+                backoff = self.backoffs_s[min(attempt - 1, len(self.backoffs_s) - 1)]
                 jitter = random.Random(
                     stable_seed(ctx.run_id, ctx.prospect_id, self.name, str(attempt))
                 ).uniform(0, 0.1)

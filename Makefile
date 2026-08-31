@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo
+.PHONY: dev api web test seed demo-reset demo live-smoke
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -24,3 +24,8 @@ demo-reset:
 # Runs the full Demo Mode engine headlessly — no FastAPI, no React.
 demo:
 	cd apps/api && uv run python -m groundwork.scripts.run_demo
+
+# Runs ONE real prospect through the real OpenAI API. Costs real money.
+# Requires OPENAI_API_KEY and explicit confirmation — see scripts/live_smoke.py.
+live-smoke:
+	cd apps/api && uv run python -m groundwork.scripts.live_smoke --i-understand-this-costs-money

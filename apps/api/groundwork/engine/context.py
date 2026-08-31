@@ -26,8 +26,9 @@ from groundwork.models.schemas import (
     Signal,
 )
 from groundwork.observability.events import EventEmitter
+from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.trace import TraceRecorder
-from groundwork.providers.base import ProviderBundle, make_ctx_key
+from groundwork.providers.base import LLMResult, ProviderBundle, make_ctx_key
 
 
 @dataclass
@@ -41,6 +42,7 @@ class ProspectContext:
     reference_date: date
     trace: TraceRecorder
     events: EventEmitter
+    llm_calls: LLMCallRecorder
 
     # Read-only awareness of the *other* prospects in this run — company
     # names/domains and dedupe keys only, never their evidence, facts, score
@@ -63,8 +65,22 @@ class ProspectContext:
     status: ProspectStatus = ProspectStatus.RUNNING
     error: str | None = None
 
+    # step_name -> {model, provider, tokens_in, tokens_out} for the most
+    # recent LLM call that step made this attempt. `engine/step.py` folds
+    # this onto the step's `agent_tasks` OK row, then clears it — see
+    # `engine/llm.py::call_structured`.
+    llm_rollup: dict[str, dict] = field(default_factory=dict)
+
     def step_key(self, step_name: str) -> str:
         return make_ctx_key(self.run_id, self.prospect_id, step_name)
 
     def evidence_by_id(self, evidence_id: str) -> Evidence | None:
         return next((e for e in self.evidence if e.id == evidence_id), None)
+
+    def note_llm_call(self, step_name: str, result: LLMResult) -> None:
+        self.llm_rollup[step_name] = {
+            "model": result.model,
+            "provider": result.provider,
+            "tokens_in": sum(a.tokens_in for a in result.attempts),
+            "tokens_out": sum(a.tokens_out for a in result.attempts),
+        }

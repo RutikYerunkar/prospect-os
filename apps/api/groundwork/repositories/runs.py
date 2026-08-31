@@ -13,10 +13,17 @@ class RunRepository:
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
 
-    async def create(self, *, play_id: str, mode: str, seed: int) -> str:
+    async def create(
+        self, *, play_id: str, mode: str, seed: int, provider_profile: dict[str, Any] | None = None
+    ) -> str:
         run_id = str(uuid.uuid4())
         async with self._session_factory() as session:
-            session.add(RunRow(id=run_id, play_id=play_id, status="RUNNING", mode=mode, seed=seed))
+            session.add(
+                RunRow(
+                    id=run_id, play_id=play_id, status="RUNNING", mode=mode, seed=seed,
+                    provider_profile=provider_profile or {},
+                )
+            )
             await session.commit()
         return run_id
 

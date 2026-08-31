@@ -15,19 +15,20 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **C — API / SSE** | `21a615e` (merged to `master` via PR #3) | FastAPI routers for every P0 endpoint, async run launch (202), resumable SSE over `run_events`, computed-on-read evaluation metrics, approve/reject as state transitions, tests. |
 | **D — Hero product UI** | `aa41f97` (merged to `master` via PR #4) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
 | **E — Depth UI** | `a1f9190` (merged to `master` via PR #5) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
-| **F — Quality + hardening** | *this commit* (branch `claude/eager-wright-pvdo5h`) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
+| **F — Quality + hardening** | `41883be` (merged to `master` via PR #6) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
+| **G — Live Mode LLM provider** | *this commit* (branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
 
 ---
 
 ## Current checkpoint
 
-**F — Quality + hardening. P0 COMPLETE.** All six checkpoints (A–F) are done; the full §32
-founder-demo checklist passes against the real running stack, rehearsed twice from a clean
-`make demo-reset`.
+**G — Live Mode LLM provider.** Demo Mode (Checkpoints A–F) remains P0-complete and untouched at the
+domain/output level. Checkpoint G adds real OpenAI execution behind the existing provider seam — see
+"What Checkpoint G added" below for the full implementation, and "Next task" for what's explicitly
+*not* started (Checkpoint H — live web search).
 
 A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-P1 work (§5 of `docs/IMPLEMENTATION_PLAN.md`, in order: OpenAI provider → live search → deployment →
-MCP shim → polish). See "Next task" below for what's actually next.
+further work. **Do not begin Checkpoint H** without the user explicitly asking.
 
 ---
 
@@ -470,6 +471,212 @@ above and the exact reproducible numbers.
 
 ---
 
+## What Checkpoint G added
+
+**Goal:** real LLM execution in Live Mode while keeping fixture-backed search — `LIVE LLM · FIXTURE
+SEARCH`. No live web search (Checkpoint H). Demo Mode's domain/output-level behavior is unchanged;
+verified byte-identical at every phase gate (see Verification below).
+
+**Phase 1 — provider-neutral telemetry/error seam** (`groundwork/providers/base.py`, rewritten):
+`LLMOperation` (`research_extraction`/`score_explanation`/`personalization`/`objective_parse`),
+`LLMAttemptKind` (`initial`/`transport_retry`/`schema_repair`), `LLMAttemptStatus` (12 values per the
+spec), `LLMAttemptTelemetry` (one provider attempt — timing, tokens, reasoning tokens, cost, HTTP
+status, provider request id, incomplete reason, redacted error/validation text, digests), generic
+`LLMResult[T]` (`.parsed: T` — callers never re-`model_validate()` a raw dict; kept `.data`/
+`.tokens_in`/`.tokens_out` as backward-compatible properties collapsed from the final attempt). Typed
+errors: `ProviderTimeout`/`ProviderUnavailable`/`ProviderRateLimited` (step-retryable — `STEP_RETRYABLE`
+tuple), `SchemaViolation`/`ProviderRefusal`/`ProviderOutputTruncated`/`ProviderContentFiltered`/
+`ProviderAuthError`/`ProviderNotConfigured`/`ProviderBudgetExceeded` (permanent). Every `ProviderError`
+carries `.attempts: list[LLMAttemptTelemetry]` accumulated up to the point of failure.
+`ProviderBundle.provider_semaphores` — confirmed dead (only ever written in `registry.py`, never read
+by any step) — **deleted**, not preserved.
+
+`groundwork/engine/budget.py` (new): `PipelineBudget` — the injectable set of per-step
+timeout/retry/backoff constants `build_prospect_pipeline()`/`Step` used to hardcode.
+`DEMO_BUDGET = PipelineBudget()` reproduces Checkpoint B–F's literals exactly (`timeout_s=2.0`,
+research `max_retries=2`, personalize `max_retries=1`, `backoffs_s=(0.4, 0.8, 1.6)`). `Step` gained a
+`backoffs_s` field (default `BACKOFFS_S`, unchanged); `build_prospect_pipeline(budget=DEMO_BUDGET)` now
+threads every timeout/retry/backoff from `budget` instead of hardcoding. `execute_run(..., budget:
+PipelineBudget = DEMO_BUDGET)` — the existing `max_concurrent_prospects`/`run_wall_clock_timeout_s`
+params (already injected since Checkpoint B) are unchanged and still authoritative for those two;
+`budget` only supplies the per-step values `build_prospect_pipeline` needs. `api/run_service.py`
+builds a `live_budget_from_settings()` (`LIVE_STEP_TIMEOUT_S=45`, `LIVE_RUN_WALL_CLOCK_TIMEOUT_S=600`)
+entirely outside `engine/`.
+
+**Phase 2 — real prompts** (`groundwork/prompts/`, new package): `base.py` (token-minimization
+constants + `delimit_untrusted()`/`UNTRUSTED_SOURCE_NOTICE` — the prompt-injection mitigation: source
+content is wrapped in `<source ref="...">` blocks with an explicit "evidence, not instructions"
+notice), `research_extraction.py`/`score_explanation.py`/`personalization.py`/`objective_parse.py` —
+each with a typed input (`ResearchExtractionInput`/`ScoreExplanationInput`/`PersonalizationInput`/
+`ObjectiveParseInput`, all constructed only from a `ProspectContext` or, for `objective_parse`, the raw
+objective text), a `PROMPT_VERSION` string, and `build_envelope()`. Token minimization: research
+sources bounded to 600 chars/snippet; score explanation sees only the top 3 dimensions, never all
+eight; personalization sees at most 4 grounded signals. `engine/steps/{research,score,personalize}.py`
+now build envelopes via these prompt modules instead of constructing `PromptEnvelope` inline; metadata
+is still populated identically so `DemoLLMProvider` remains byte-identical.
+`models/llm_io.py::ObjectiveParseOutput` added (criteria-only — deliberately never asked to echo
+`objective_text`/`target_count`).
+
+**Phase 3 — LLM call persistence** (`llm_calls` table, additive; `run_events` untouched):
+`models/tables.py::LLMCallRow` — one row per provider *attempt*, `UNIQUE(call_group_id, attempt)`.
+`objective_parse` rows set `play_id`, leave `run_id`/`prospect_id` null; pipeline-operation rows set
+`run_id`/`prospect_id`/`step_name`, leave `play_id` null. `repositories/llm_calls.py::LLMCallRepository`
+— `record_attempts()` (the hot path) and `create_play_with_attempts()` (Phase 9's one-transaction
+Play+telemetry write). `observability/llm_calls.py::LLMCallRecorder` — pre-bound to
+`(run_id, prospect_id)` like `TraceRecorder`/`EventEmitter`; catches and logs persistence failures
+rather than letting them fail a successful model operation (`engine/llm.py`'s docstring names this
+explicitly). `engine/llm.py::call_structured()` — the CRITICAL BOUNDARY: the only thing that persists
+attempt telemetry; `providers/*` never import a repository or SQLAlchemy (enforced by
+`tests/test_provider_purity.py`, static source inspection). Also rolls model/provider/token totals onto
+`ctx.llm_rollup[step_name]`, which `engine/step.py`'s OK branch folds into that step's `agent_tasks`
+row — confirmed live: the TraceTable's Provider/model column now shows `demo_llm · demo-llm-v1` for
+every LLM-driven step (see the Prospect Detail screenshot). `DemoLLMProvider` produces exactly one
+INITIAL/OK attempt per logical call. `evaluation/metrics.py` gained `llm_usage` (Phase 8, see below).
+
+**Phase 4 — OpenAI SDK / strict schema / output cap spike**: pinned `openai==3.6.0` (current major at
+build time; this environment's `httpx` dependency, notably, has a `httpx2` major-version successor that
+`openai` 3.6.0 depends on directly — the SDK and the rest of this repo import two *different* httpx
+packages, confirmed by inspecting the installed package, not assumed). Verified against the actually
+installed SDK (`site-packages/openai/types/responses/response.py` et al.), not stale plan pseudocode:
+Responses API request via `client.responses.create(model=, input=[...], reasoning={"effort": ...} |
+omitted, text={"format": {...}}, max_output_tokens=, store=False, timeout=)`; response fields
+`.status` (`completed`/`failed`/`incomplete`/...), `.incomplete_details.reason`
+(`max_output_tokens`/`content_filter`), `.output` (message items with `.content` of
+`output_text`/`refusal` blocks), `.output_text` convenience, `.usage.{input_tokens,output_tokens,
+output_tokens_details.reasoning_tokens,total_tokens}`, `.id` (provider request id), `.error`
+(`ResponseError{code, message}`). Exceptions: `AuthenticationError`(401) < `RateLimitError`(429) <
+`APITimeoutError` < `APIConnectionError` < `APIStatusError`(everything else incl. 5xx as
+`InternalServerError`) — caught most-specific-first. `max_retries=0` set on `AsyncOpenAI` construction.
+
+`providers/live/schemas.py::to_strict_json_schema()` — mechanically tightens Pydantic's own
+`model_json_schema()` output: every object node gets `additionalProperties: false` and **every**
+property forced into `required` (optionality is expressed by the property's own nullable type, which
+Pydantic already generates correctly for `Optional[X] = None` fields — this is a schema *view*
+transform, never a domain-model weakening). `is_strict_compatible()` walks the result and flags
+violations; `tests/test_strict_schema_compat.py` runs it over all four operations.
+
+**Output cap measurement** (the actual numbers, not guesses): serialized worst-case padded instances of
+all four output schemas (fixture-derived facts, `'x' * N` padding for text fields) —
+`research_extraction` (largest, across every fixture company): **3,048 chars**; `objective_parse`:
+1,427 chars; `personalization`: 2,746 chars; `score_explanation`: 519 chars. At a conservative
+~3.5 chars/token, the worst case is **~871 visible tokens**. `LLM_MAX_OUTPUT_TOKENS=2048` selected —
+comfortably >1.5× that worst case (headroom for real-model verbosity above the synthetic padding, plus
+low-effort reasoning tokens, which count toward the same budget) while staying <6× it (not preserving
+the plan's provisional 3000 "merely because the plan mentioned it" — regression-tested by
+`tests/test_output_cap_sizing.py`, which fails if the configured cap drifts outside that band).
+
+**Phase 5 — process-scoped live runtime** (`providers/live/runtime.py::LiveProviderRuntime`):
+`AsyncOpenAI` client + `asyncio.Semaphore(LLM_MAX_CONCURRENCY)` + resolved model/reasoning/pricing,
+created ONCE in `main.py`'s `lifespan` (only when `OPENAI_API_KEY` is configured — a public clone with
+no key never touches live-provider machinery) and closed ONCE at shutdown. `api/deps.py::get_live_runtime`
+reads it off `request.app.state.live_runtime`; tests override the FastAPI dependency, or construct a
+`LiveProviderRuntime` directly with `http_client=httpx2.AsyncClient(transport=ScriptedTransport(...))`
+(`tests/live_helpers.py`) — no automated test ever makes a real network call.
+`tests/test_run_budget_and_runtime.py::test_process_scoped_semaphore_bounds_concurrent_calls` proves two
+independent `OpenAILLMProvider`s referencing the same runtime (standing in for two simultaneous runs)
+genuinely serialize through one semaphore.
+
+**Phase 6 — live OpenAI provider** (`providers/live/openai_llm.py::OpenAILLMProvider`): the flat retry
+loop — ONE `while True` loop, counters (`transport_retries_consumed`, `schema_round`,
+`schema_repair_used`, `flat_attempt`) initialized once, ONE outbound-request call site (`_issue()`).
+`transport_retry_index` is a single counter for the whole call that is never reset by a schema-repair
+attempt; `schema_round` flips 0→1 exactly once, the moment the one allowed repair attempt is issued,
+and stays 1 for any transport retries after that. Max attempts with `T=2, S=1` is `1+T+S=4`, verified
+never `(1+T)*(1+S)=6` by both deterministic worked-sequence tests and a 60-iteration randomized property
+test (`tests/test_live_openai_provider.py::test_property_attempt_count_never_exceeds_budget`).
+Response classification: `TRUNCATED` (permanent, even with empty visible output, per spec) and
+`REFUSED`/`CONTENT_FILTERED`/`AUTH_ERROR` (permanent) raise immediately with zero retry/repair;
+`INVALID_JSON`/`SCHEMA_MISMATCH`/genuine `NO_OUTPUT` get exactly one schema-repair attempt (a follow-up
+user turn naming the validation error and the previous output, asking for schema-conformant JSON only);
+`TIMEOUT`/`RATE_LIMITED`/5xx `PROVIDER_ERROR` consume the shared transport budget. Every attempt is
+gated through `runtime.semaphore` individually (not once per logical call), so
+`LLM_MAX_CONCURRENCY` bounds real concurrent HTTP requests, not logical calls.
+
+**Phase 7 — cost control / config / registry**: `config.py` gained
+`LIVE_MAX_PROSPECTS_PER_RUN=5`, `LLM_MAX_CONCURRENCY=2`, `LLM_MAX_TRANSPORT_RETRIES=2`,
+`LLM_MAX_SCHEMA_RETRIES=1`, `LIVE_STEP_TIMEOUT_S=45`, `LIVE_RUN_WALL_CLOCK_TIMEOUT_S=600`,
+`LLM_CALL_DEADLINE_S=30`, `LLM_MAX_OUTPUT_TOKENS=2048`, `OPENAI_MODEL=gpt-5.6-terra` (config-only —
+no application code branches on this string; `gpt-5.6-luna` is the named lower-cost profile),
+`OPENAI_REASONING_EFFORT=low` (empty string omits the `reasoning` field from the request entirely —
+verified by `tests/test_live_openai_provider.py::test_reasoning_effort_omitted_when_empty`),
+`OPENAI_PRICE_{INPUT,OUTPUT}_USD_PER_MTOK` (unset → `cost_usd` stays `null` everywhere, never guessed),
+`LIVE_RUN_SOFT_BUDGET_USD` (soft, never a hard cap). `engine/run_budget.py::RunBudget` — lock-protected
+async accounting; gate-before-call, charge-after-completion; `is_tripped()`/`charge()` are the only
+mutating operations, both behind an `asyncio.Lock`, verified race-safe under 10 concurrent coroutines ×
+200 charges each with zero lost updates. A blocked call never makes an HTTP request — it synthesizes
+one `NOT_ATTEMPTED_BUDGET` telemetry row and raises `ProviderBudgetExceeded` immediately.
+`providers/registry.py::build_provider_bundle(mode, ..., live_runtime=None, run_budget=None)` — Live
+without a configured runtime raises `ProviderNotConfigured`, **never** a silent `DemoLLMProvider`
+fallback; the live branch imports `providers/live/openai_llm` lazily (inside the function), so the
+`openai` SDK is never even imported on a pure-Demo-Mode request path.
+`providers/profile.py::build_provider_profile()` — the truthful, no-secrets snapshot (LLM
+provider/model/reasoning effort, prompt versions, search provider, `synthetic_search: true`,
+evidence origin, output/call/prospect bounds, soft budget + its enforceability, `deterministic: false`
+for Live / `true` for Demo) persisted onto `RunRow.provider_profile` at run creation.
+
+**Phase 8 — API**: `PlayCreateRequest.mode`/`RunCreateRequest.mode` widened to `Literal["demo",
+"live"]` (was `Literal["demo"]` — the old `test_create_play_rejects_live_mode` test is now
+`test_start_run_rejects_live_mode_without_configured_runtime`, since Live Mode is real). `PlayResponse`
+gained `parse_source: "llm" | "deterministic"`; `RunResponse` gained `provider_profile`.
+`GET /settings/providers` extended with a `live: LiveAvailability` block (availability computed from
+the real runtime, never assumed; model, reasoning effort, prompt versions, search provider, hard
+bounds, `pricing_configured`, soft budget + enforceability — no secret values). `evaluation/metrics.py`
+gained `llm_usage` (computed on read from `llm_calls`): logical call count (distinct `call_group_id`),
+provider-attempt count, token totals, reasoning tokens (null if none exposed), `estimated_cost_usd`
+(null unless *every* contributing attempt has a non-null cost — never a partial sum presented as
+complete), per-operation and per-status breakdowns, transport-retry/schema-repair counts, and whether
+the run's soft budget tripped. No token/cost frames were added to `run_events` (stays the resumable SSE
+progress log, per the invariant).
+
+**Phase 9 — objective parser** (`engine/objective_parser.py::parse_objective()`): runs before any
+`Play` row exists — zero DB writes, at most one LLM call, attempt telemetry held in memory. On ANY
+`ProviderError` (refusal/truncation/schema exhaustion/timeout/budget/etc.) it falls back
+deterministically to the exact construction Demo Mode has always used — never an exception, never a
+500. `ObjectiveParseOutput` is criteria-only (no `objective_text`/`target_count` echo — enforced by a
+schema-shape test). User `icp_overrides` are applied **after** LLM inference, so they always win.
+`api/routers/plays.py::create_play` is the only caller: it invokes `parse_objective()`, then creates the
+`Play` row and its `objective_parse` `llm_calls` rows in **one transaction**
+(`LLMCallRepository.create_play_with_attempts`) — an `llm_calls` row can never reference a nonexistent
+`Play`, and a failed transaction rolls both back together (verified by
+`tests/test_objective_parser.py::test_play_and_llm_calls_created_in_one_transaction`, which runs the
+real `OpenAILLMProvider` against a scripted transport end-to-end into real DB rows).
+`PlayCreateRequest.use_live_objective_parser: bool = False` — the explicit, deliberate flag; the New
+Play form's 600ms debounce never sets it (see Phase 10), so there is no paid-request-per-keystroke path.
+
+**Phase 10 — frontend** (minimal, no redesign): `app/plays/new/page.tsx` — Demo/Live segmented toggle
+(Live disabled + explained when `!live.available`, confirmed live via the real UI: see screenshots);
+selecting Live shows the model, reasoning effort, `LIVE LLM · FIXTURE SEARCH` explanation, capped
+prospect count, the hard worst-case attempt/token bound computed from `GET /settings/providers` (never
+hardcoded), the soft budget only when `soft_budget_enforceable`, and an explicit pre-spend confirmation
+checkbox gating Run Agents. A separate **"Parse with model"** button is the only path that ever sets
+`use_live_objective_parser: true` — the 600ms debounce still renders a deterministic preview immediately
+in Live Mode (free, no LLM call) but never triggers the live parser. `parsedPlay.parse_source` renders
+next to the parsed spec when in Live mode. `components/RunSummary.tsx` — the run-mode badge now reads
+`LIVE LLM · FIXTURE SEARCH · <model>` for live runs (was a bare `LIVE`), `DEMO` unchanged.
+`components/ModelUsagePanel.tsx` (new) — Model Usage & Cost on the Quality tab, backed only by
+`/evaluation`'s `llm_usage`; renders `—` for null tokens/cost rather than fabricating. `TraceTable`
+required zero changes — it already renders `agent_tasks.model`/`.provider`, which Phase 3's rollup now
+actually populates.
+
+**Phase 11 — security**: `observability/redact.py::redact()` — the central choke point every
+error-to-string path routes through before persistence (`LLMCallRepository`'s row-builder calls it on
+both `error_message` and `validation_error`). Strips any configured `OPENAI_API_KEY`/`TAVILY_API_KEY`
+value plus any generic `sk-...`/`Bearer ...`-shaped token, and truncates long payloads. Verified with a
+sentinel secret deliberately echoed by a fake provider error, end-to-end through
+`LLMCallRepository.record_attempts()` into a real DB row (`tests/test_redaction.py`) — the sentinel
+appears nowhere in the persisted row. `.env.example` documents every new setting with empty secrets;
+Demo Mode's tests explicitly monkeypatch `openai_api_key = None` and still fully complete.
+
+`scripts/live_smoke.py` (new, `make live-smoke`) — the OPTIONAL real-live smoke test. Requires
+`--i-understand-this-costs-money` AND a configured key; runs exactly one fixture prospect through the
+real API; prints configured model/effort/hard bounds (and a dollar bound only if pricing is
+configured) before the request, full per-attempt telemetry/tokens/cost/score/outreach/verdict after;
+exits nonzero if any attempt was `TRUNCATED`. **Not run this session** — no `OPENAI_API_KEY` was
+provided and none was requested from the user, per the task's own instruction to run it "only if
+credentials are available and I explicitly provide/approve them."
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -691,6 +898,67 @@ to the repository.
 
 ---
 
+**Checkpoint G verification.**
+
+1. **Baseline first** (Phase 0): `uv run pytest` — 63/63 — and `make demo-reset && make demo` recorded
+   verbatim to a scratch file before any change, matching this file's documented reference numbers
+   exactly (Northwind Labs 92, Riverbend Analytics 35, Cobalt Retail Systems 25, Ferrous Grid 58, Sable
+   Compute 79; `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`, 3 retries, `run status: PARTIAL`).
+2. `cd apps/api && uv run pytest` — **114/114 passing** (63 original + 51 new: 20
+   `test_live_openai_provider.py`, 9 `test_strict_schema_compat.py`, 1 `test_output_cap_sizing.py`, 1
+   `test_provider_purity.py`, 5 `test_redaction.py`, 6 `test_objective_parser.py`, 6
+   `test_run_budget_and_runtime.py`, 1 `test_live_pipeline_integration.py`, 1
+   `test_demo_llm_calls_additive.py`, plus a net +1 in `test_api_plays_runs.py` — a stale
+   Live-Mode-is-rejected test replaced with two that reflect Live Mode now being real). Re-run after
+   every phase gate, not just once at the end — zero regressions the whole way.
+3. `make demo-reset && make demo` re-run after every phase — **byte-identical to the Phase 0 baseline
+   at every gate**, confirmed both by direct text diff of the reference numbers and, separately, through
+   the real browser UI (see screenshot below): Northwind Labs 92, Riverbend Analytics 35, Cobalt Retail
+   Systems 25, Ferrous Grid 58, Sable Compute 79, `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1
+   FAILED:1`.
+4. `llm_calls` additive persistence confirmed directly against a real headless demo run's SQLite file
+   (`SELECT operation, provider, model, status, attempt, step_name FROM llm_calls`): 14 rows, one
+   `INITIAL`/`OK` attempt per logical call, `provider=demo_llm`, `model=demo-llm-v1` — and the
+   `agent_tasks` rollup confirmed on the same run (`SELECT step_name, model, provider, tokens_in,
+   tokens_out FROM agent_tasks WHERE model IS NOT NULL`), non-null for every research/score/personalize
+   row.
+5. **Fake-Live end-to-end** (`tests/test_live_pipeline_integration.py`): one prospect through the REAL
+   `execute_run`, REAL rendered prompts, and a fake Responses transport — completed to a terminal
+   status, exactly 2 `llm_calls` rows (research + score; personalize skipped, no contact — the
+   sable-compute fixture has no leadership fact), both `provider=openai`/`status=OK`, evidence still
+   100% `DEMO_FIXTURE`/`source_url=None` (confirms search stays fixture-backed in Live Mode).
+6. Retry/schema/refusal/truncation/content-filter/auth/rate-limit/5xx behavior — all individually
+   proven in `tests/test_live_openai_provider.py` against a scripted `httpx2.MockTransport`, plus the
+   flat-retry-loop invariants specifically: `test_transport_budget_never_resets_after_schema_repair`
+   (a hand-worked 4-attempt sequence: timeout, timeout, invalid_json→schedules repair, repair itself
+   times out — budget already exhausted, raised immediately, never a 5th attempt) and
+   `test_property_attempt_count_never_exceeds_budget` (60 randomized failure sequences up to length 7,
+   every one resolving in 1–4 attempts, `transport_retry_index` monotonic and capped at `T=2`, at most
+   one `schema_repair` attempt ever).
+7. `cd apps/web && pnpm install && pnpm lint` — clean (one real `react-hooks/set-state-in-effect`
+   violation was hit and fixed during this checkpoint: an effect that reset `mode` back to `"demo"` when
+   Live became unavailable was replaced with a derived `effectiveMode` value, since the Live toggle
+   button is already disabled in that state and nothing needs syncing). `pnpm build` — compiles,
+   typechecks, prerenders `/`/`/plays/new` static and `/prospects/[id]`/`/runs/[id]` dynamic, no errors.
+8. **Real browser walkthrough** (`make demo-reset`, API on `:8010`, web on `:3000`, headless Chromium
+   via Playwright — not curl): New Play renders the Demo/Live toggle with Live correctly disabled and
+   its explanation shown (no `OPENAI_API_KEY` configured in this environment); clicked Run Agents in
+   Demo Mode; the run reached `PARTIAL` with the exact canonical distribution and per-company scores,
+   confirmed on-screen; Quality tab's new Model Usage & Cost panel rendered real data (14 logical
+   calls, 14 provider attempts, 919 tokens in / 834 out, reasoning tokens `—`, estimated cost `—` — both
+   correctly null since Demo Mode's provider never sets them); Prospect Detail's execution trace now
+   shows `demo_llm · demo-llm-v1` in the Provider/model column for every LLM-driven step attempt (was
+   blank before this checkpoint). Zero browser console/page errors across the whole walkthrough.
+   Screenshots sent to the user in-session (New Play Demo, Run Detail board, Quality tab, Prospect
+   Detail); per instructions, not committed to the repository.
+9. **Live smoke test: not run.** No `OPENAI_API_KEY` was provided or requested from the user this
+   session, and the task instructions are explicit that it only runs "if credentials are available and
+   I explicitly provide/approve them." `scripts/live_smoke.py` was manually verified to refuse safely
+   without the flag and without a configured key (both checked, both correctly exit 1 with no network
+   call attempted).
+
+---
+
 ## Known issues / deviations from plan
 
 - **`stable_seed()` instead of `hash()`** for seeded jitter (see `providers/base.py`) — Python's
@@ -830,29 +1098,79 @@ to the repository.
   (stop the browser's automatic `/favicon.ico` probe from 404ing); replace with a designed asset
   whenever the product gets real brand treatment.
 
+**Checkpoint G's own deviations:**
+
+- **The test suite is a representative subset of the exhaustive list in the task instructions, not a
+  literal one-test-per-bullet mapping.** 51 new tests cover every named invariant (flat retry-loop
+  composition and its property test, strict schema compatibility, output cap sizing, provider-layer
+  purity, objective-parse transaction/fallback, redaction, concurrent `RunBudget` accounting, the
+  process-wide semaphore, a fake-live end-to-end run, additive demo `llm_calls`, no-credentials Demo
+  Mode) but several listed items (e.g. "invented/foreign citation grounding rejection",
+  "outbound request prospect isolation") are exercised by *existing*, unmodified Checkpoint B–E tests
+  (`test_isolation.py`, `test_review.py`) rather than a new Checkpoint-G-specific duplicate, since the
+  underlying grounding/review/isolation code is untouched by this checkpoint. Flagged explicitly rather
+  than silently claiming a new named test exists for every bullet.
+- **`httpx2` is a genuinely separate installed package from `httpx`**, not a typo or an alias — the
+  pinned `openai==3.6.0` SDK depends on it directly (confirmed by inspecting
+  `site-packages/openai/_client.py`'s own imports). `tests/live_helpers.py` and
+  `providers/live/runtime.py` import `httpx2` specifically for the OpenAI-facing mock transport;
+  everything else in the repo (FastAPI, the existing `httpx` test client in `conftest.py`) keeps using
+  plain `httpx`. Not a decision — a fact about the installed environment, verified rather than assumed.
+- **Live Mode's per-step budget does not reuse `DEMO_BUDGET`'s literal timeout/retry values** —
+  `LIVE_STEP_TIMEOUT_S=45` (vs. Demo's `2.0`) and `LIVE_RUN_WALL_CLOCK_TIMEOUT_S=600` (vs. Demo's
+  `180.0`), matching the plan's own named hard bounds for real network calls. Research/personalize
+  retry *counts* stay the same shape (2/1) as Demo — only the timeouts differ, since a real OpenAI call
+  can legitimately take much longer than a fixture-derived one.
+- **`RunRow.provider_profile` is computed once, at run creation, and persisted** (a new JSON column)
+  rather than recomputed live from a `RunBudget` instance on every read — a per-run `RunBudget` is
+  in-process state that doesn't survive past the run's own coroutine, so "reconstruct what actually ran"
+  has to be a snapshot taken when the run starts, not a live query. `soft_budget_usd`/
+  `soft_budget_enforceable` in that snapshot reflect the threshold *configured* at run start, not a
+  live "amount spent so far" figure — `evaluation/metrics.py`'s `llm_usage.estimated_cost_usd` is the
+  field for actual spend, computed on read from `llm_calls` like everything else in that endpoint.
+- **The objective parser's fallback path is exercised with a direct `LLMProvider` fake in
+  `tests/test_objective_parser.py`** (not always the real `OpenAILLMProvider` against a scripted
+  transport) for the pure-function unit tests (`parse_objective()` zero-DB-writes,
+  fallback-on-error, user-overrides-win) — faster and more direct for testing `parse_objective()`'s own
+  logic in isolation. The one transactional-persistence test
+  (`test_play_and_llm_calls_created_in_one_transaction`) does use the real `OpenAILLMProvider` against
+  `httpx2.MockTransport`, so the actual wire-shaped path is still proven end-to-end at least once.
+- **No screenshots of a completed Live run** (Run Detail/Quality/Prospect Detail in Live Mode) — this
+  environment has no `OPENAI_API_KEY` configured and none was provided by the user this session, so
+  there is no way to produce a *real* live screenshot without either fabricating one (not done) or
+  standing up a second mocked HTTP layer behind the actual running dev server (out of scope for this
+  checkpoint's verification budget). The fake-live path is instead proven at the test level
+  (`test_live_pipeline_integration.py`, full `execute_run` through a scripted transport into real DB
+  rows) and the *unavailable* Live UI state is shown in a real screenshot (New Play, Live disabled with
+  its explanation).
+- **`Panel`/`Badge`/`Button` UI primitives were reused as-is** for the New Play Live controls and the
+  new `ModelUsagePanel` — no new primitive was added, per §18's "commit once, don't revisit" on the
+  visual language.
+
 ---
 
 ## Next task
 
-**P0 is complete.** All six checkpoints (A–F) are done, the full §32 founder-demo checklist passes
-against the real running stack, and both rehearsals were reproducible from a clean `make demo-reset`.
-There is no required next task — a future session should not start P1 work without the user explicitly
-asking for it (per this file's own instructions and `CLAUDE.md`'s checkpoint protocol).
+**Checkpoint G is complete. Do not begin Checkpoint H without the user explicitly asking.**
+All Checkpoint A–F (P0) behavior remains unchanged and verified byte-identical; Checkpoint G adds real
+OpenAI LLM execution (fixture-backed search) behind the existing provider seam, fully tested against a
+scripted transport, with zero live network calls made by any automated test.
 
-If/when P1 is authorized, `docs/IMPLEMENTATION_PLAN.md` §5 gives the order: **OpenAI provider → live
-search → deployment → MCP shim → polish** (waterfall trace, standalone eval page, cancellation,
-draft edit/regenerate, LLM tone advisor). Concretely, in priority order:
+If/when Checkpoint H (live web search) is authorized, the seams are already in place:
+`providers/registry.py::build_provider_bundle` is where a `TavilySearchProvider` (or similar) would be
+wired in for Live Mode instead of the current `DemoSearchProvider`; `models/schemas.py::Evidence`'s
+`origin=LIVE_FETCH` path (with a real `source_url`) is built and tested
+(`test_fixture_provenance.py`) but currently untriggerable — every evidence row in the repo today is
+still `DEMO_FIXTURE`, in both Demo and Live Mode, because Checkpoint G is explicitly "LIVE LLM · FIXTURE
+SEARCH." `providers/profile.py`'s `synthetic_search: true` / `evidence_origin: "DEMO_FIXTURE"` fields
+would flip once a real search provider lands. Beyond Checkpoint H, `docs/IMPLEMENTATION_PLAN.md` §5's
+remaining order still applies: **deployment → MCP shim → polish**. Concretely:
 
-1. **OpenAI provider** (`providers/live/`) — implement `LLMProvider`/`SearchProvider` for real, behind
-   the same Protocols `providers/demo/` already satisfies. `providers/registry.py`'s `NotImplementedError`
-   for `Mode.LIVE` is the exact seam; the API layer already rejects `mode: "live"` at the door
-   (`PlayCreateRequest.mode: Literal["demo"]`), so this is additive, not a rewrite.
-2. **Live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url` handling
-   to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently untriggerable
-   (every evidence row in the repo today is `DEMO_FIXTURE`).
-3. **Deployment** — currently local-only by design (§27); optional.
-4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
-5. **Polish backlog** (not required, noted for completeness):
+1. **Live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url` handling
+   to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently untriggerable.
+2. **Deployment** — currently local-only by design (§27); optional.
+3. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
+4. **Polish backlog** (not required, noted for completeness):
    - A graphical trace waterfall instead of `TraceTable` (explicitly cut from P0, §5/§34).
    - A standalone cross-run evaluation page (the Quality tab is the P0 scope; §16 names a standalone
      page as P1).
@@ -927,3 +1245,24 @@ draft edit/regenerate, LLM tone advisor). Concretely, in priority order:
   actually ran the product. `PlaySpec.target_count`'s default of `7` must keep matching the fixture
   pack's real company count for the same reason. `MetricGrid.tsx`/`GuardrailPanel.tsx` read `null` as
   "no data yet", never a fabricated placeholder — keep that contract if either is extended.
+- **Checkpoint G's own do-not-touch:** the flat retry loop in
+  `providers/live/openai_llm.py::OpenAILLMProvider.structured()` — ONE `while True` loop, ONE outbound
+  call site (`_issue()`), counters initialized once. Do not "simplify" this into nested retry helpers or
+  a `tenacity`-style decorator — that reintroduces the `(1+T)*(1+S)` explosion the plan explicitly
+  rejects, and `transport_retry_index`/`schema_round` must keep the exact semantics documented at the
+  top of that file (index never resets on repair; round flips 0→1 exactly once) or
+  `test_transport_budget_never_resets_after_schema_repair` and the randomized property test will start
+  lying. `providers/base.py`'s `STEP_RETRYABLE = (ProviderTimeout, ProviderUnavailable,
+  ProviderRateLimited)` is the complete, exhaustive step-level-retryable set — do not add a fourth type
+  without updating both the constant and its docstring. `engine/llm.py::call_structured()` is the ONLY
+  place attempt telemetry is persisted; do not add a second write path, and do not let `providers/*`
+  import a repository or SQLAlchemy (`test_provider_purity.py` enforces this by source inspection, not
+  just convention). `observability/redact.py::redact()` must stay the single choke point every
+  error-to-string path routes through before persistence — do not add a new `error_message`/
+  `validation_error` write site that bypasses it. `DEMO_BUDGET` in `engine/budget.py` must keep
+  reproducing Checkpoint B–F's literal constants exactly (`2.0`s timeouts, `2`/`1` retries,
+  `(0.4, 0.8, 1.6)` backoffs) — it's what keeps the canonical demo byte-identical; Live-only bounds
+  belong in a *separate* budget (`api/run_service.py::live_budget_from_settings()`), never by mutating
+  `DEMO_BUDGET`'s defaults. `LLM_MAX_OUTPUT_TOKENS=2048` is measurement-selected (see "What Checkpoint G
+  added" → Phase 4) — if any operation's prompt or schema changes meaningfully, re-measure with
+  `tests/test_output_cap_sizing.py`'s methodology rather than bumping the number by feel.

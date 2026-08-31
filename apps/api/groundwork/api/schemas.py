@@ -21,10 +21,14 @@ from pydantic import BaseModel, Field
 class PlayCreateRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=2000)
     icp_overrides: dict[str, Any] = Field(default_factory=dict)
-    mode: Literal["demo"] = "demo"
+    mode: Literal["demo", "live"] = "demo"
     # 7 matches the demo fixture pack's own company count (§23) — see
     # groundwork/models/schemas.py::PlaySpec.target_count for why.
     target_count: int = Field(default=7, ge=1, le=25)
+    # Checkpoint G Phase 9: explicit, deliberate action only — never fired on
+    # the New Play form's debounce. Ignored (and free) in Demo Mode, where
+    # objective parsing has always been deterministic.
+    use_live_objective_parser: bool = False
 
 
 class RunSummary(BaseModel):
@@ -44,6 +48,7 @@ class PlayResponse(BaseModel):
     icp_spec: dict[str, Any]
     mode: str
     created_at: datetime
+    parse_source: Literal["llm", "deterministic"] = "deterministic"
     runs: list[RunSummary] = Field(default_factory=list)
 
 
@@ -51,7 +56,7 @@ class PlayResponse(BaseModel):
 
 
 class RunCreateRequest(BaseModel):
-    mode: Literal["demo"] | None = None
+    mode: Literal["demo", "live"] | None = None
     seed: int | None = None
 
 
@@ -72,6 +77,7 @@ class RunResponse(BaseModel):
     finished_at: datetime | None
     duration_ms: float | None
     error: str | None
+    provider_profile: dict[str, Any] = Field(default_factory=dict)
 
 
 # --- prospects ---
@@ -137,7 +143,29 @@ class ProviderInfo(BaseModel):
     configured: bool
 
 
+class LiveAvailability(BaseModel):
+    """§21/Phase 8: enough truth for the New Play screen to disable Live and
+    explain why, or show real bounds — never a secret value."""
+
+    available: bool
+    model: str
+    reasoning_effort: str | None
+    prompt_versions: dict[str, str]
+    search_provider: str = "demo_fixture"
+    synthetic_search: bool = True
+    live_max_prospects_per_run: int
+    llm_max_output_tokens: int
+    llm_max_transport_retries: int
+    llm_max_schema_retries: int
+    llm_call_deadline_s: float
+    live_step_timeout_s: float
+    pricing_configured: bool
+    soft_budget_usd: float | None
+    soft_budget_enforceable: bool
+
+
 class ProviderSettingsResponse(BaseModel):
     mode: str
     llm: ProviderInfo
     search: ProviderInfo
+    live: LiveAvailability
