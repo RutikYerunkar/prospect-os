@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset
+.PHONY: dev api web test seed demo-reset demo
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -13,12 +13,14 @@ web:
 test:
 	cd apps/api && uv run pytest
 
-# Populates the demo fixture pack. Lands in Checkpoint B.
+# Ensures the schema exists and the fixture pack is valid.
 seed:
-	@echo "make seed is not implemented yet — it lands in Checkpoint B (fixtures + seed script)."
-	@exit 1
+	cd apps/api && uv run python -m groundwork.scripts.seed
 
-# Wipes the local SQLite DB and reseeds from fixtures. Lands in Checkpoint B.
+# Wipes the local SQLite DB and reseeds the schema from fixtures.
 demo-reset:
-	@echo "make demo-reset is not implemented yet — it lands in Checkpoint B."
-	@exit 1
+	cd apps/api && uv run python -m groundwork.scripts.reset
+
+# Runs the full Demo Mode engine headlessly — no FastAPI, no React.
+demo:
+	cd apps/api && uv run python -m groundwork.scripts.run_demo

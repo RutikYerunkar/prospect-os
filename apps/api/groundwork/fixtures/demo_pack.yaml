@@ -1,0 +1,375 @@
+# Groundwork Demo Mode fixture pack (§23 of IMPLEMENTATION_PLAN.md).
+#
+# Six fictional B2B companies. Every entry here is EVIDENCE, not a verdict —
+# no company has a `score` or `status` field. The engine computes every
+# score, status, duplicate flag and review verdict at run time from the
+# sources, structured facts and (for Northwind/Quarry) scripted provider
+# failures below.
+#
+# DEMO_FIXTURE evidence never carries an http(s) source_url — structurally
+# enforced by groundwork.models.schemas.Evidence, and asserted for every
+# fixture row in tests/test_fixture_provenance.py.
+
+play_spec:
+  objective_text: >
+    Find AI infrastructure startups that recently raised funding or are
+    expanding their GTM teams. Identify the most relevant sales leader,
+    score each company against our ICP, explain the evidence, and draft
+    personalized outreach.
+  target_industries: [ai_infrastructure]
+  excluded_industries: [retail_pos]
+  adjacent_industries:
+    data_tooling: [ai_infrastructure]
+  size_band_min: 50
+  size_band_max: 250
+  target_funding_stages: [series_a, series_b]
+  target_technologies: [kubernetes, pytorch, triton]
+  persona_titles: ["VP of Sales", "Head of Sales", "VP of Revenue"]
+  min_score: 60
+  min_confidence: 0.6
+  target_count: 7
+
+companies:
+  # 1. Northwind Labs — the happy path, in full depth, plus a transient
+  #    research-provider retry that succeeds on the second attempt.
+  - slug: northwind-labs
+    name: Northwind Labs
+    domain: northwindlabs.com
+    industry: ai_infrastructure
+    size_band: "51-200"
+    employee_count: 140
+    hq_country: US
+    description: Real-time inference infrastructure for production ML models.
+    sources:
+      - ref: funding-note
+        title: Northwind Labs closes Series B
+        claim: "Northwind Labs raised a $42M Series B"
+        snippet: >
+          Northwind Labs today announced it has closed a $42M Series B
+          financing round led by Alluvium Partners to scale its real-time
+          inference infrastructure.
+        signal_type: FUNDING
+        confidence: 0.92
+      - ref: hiring-note
+        title: Northwind Labs GTM hiring surge
+        claim: "Northwind Labs is hiring a VP of Sales, an Enterprise Account Executive, and an SDR Team Lead"
+        snippet: >
+          Northwind Labs has posted openings for a VP of Sales, an Enterprise
+          Account Executive, and an SDR Team Lead as it builds out its
+          go-to-market organization.
+        signal_type: HIRING
+        confidence: 0.88
+      - ref: tech-note
+        title: Northwind Labs engineering stack
+        claim: "Northwind Labs' inference stack runs on Kubernetes, PyTorch, and Triton"
+        snippet: >
+          Northwind Labs' inference platform is built on Kubernetes, PyTorch,
+          and NVIDIA Triton Inference Server.
+        signal_type: TECH
+        confidence: 0.83
+      - ref: leadership-note
+        title: Northwind Labs names VP of Sales
+        claim: "Priya Natarajan is Northwind Labs' VP of Sales"
+        snippet: >
+          Priya Natarajan joined Northwind Labs as VP of Sales to lead its
+          enterprise go-to-market motion.
+        signal_type: LEADERSHIP
+        confidence: 0.90
+    funding_events:
+      - stage: series_b
+        amount_usd: 42000000
+        announced_days_ago: 60
+        source_ref: funding-note
+    hiring_roles:
+      - title: VP of Sales
+        is_gtm: true
+        posted_days_ago: 20
+        source_ref: hiring-note
+      - title: Enterprise Account Executive
+        is_gtm: true
+        posted_days_ago: 18
+        source_ref: hiring-note
+      - title: SDR Team Lead
+        is_gtm: true
+        posted_days_ago: 15
+        source_ref: hiring-note
+    tech_mentions:
+      - name: kubernetes
+        source_ref: tech-note
+      - name: pytorch
+        source_ref: tech-note
+      - name: triton
+        source_ref: tech-note
+    leadership:
+      - full_name: Priya Natarajan
+        title: VP of Sales
+        is_persona_match: true
+        source_ref: leadership-note
+    failure_script:
+      research: { fail_attempts: 1, error: ProviderTimeout }
+
+  # 2. Riverbend Analytics — a funding claim that cannot be grounded (the
+  #    snippet only hints at capital, never confirming round/amount), plus
+  #    no hiring or tech evidence at all. Three-plus unsupported dimensions
+  #    trip the score_support soft check.
+  - slug: riverbend-analytics
+    name: Riverbend Analytics
+    domain: riverbendanalytics.io
+    industry: data_tooling
+    size_band: "51-200"
+    employee_count: 90
+    hq_country: US
+    description: Self-serve analytics tooling for mid-market data teams.
+    sources:
+      - ref: market-note
+        title: Riverbend Analytics platform update
+        claim: "Riverbend Analytics continues to expand its self-serve analytics platform"
+        snippet: >
+          Riverbend Analytics continues to expand its self-serve analytics
+          platform for mid-market data teams.
+        confidence: 0.70
+      - ref: funding-note
+        title: Riverbend Analytics funding chatter
+        claim: "Riverbend Analytics raised a $15M Series A round"
+        snippet: >
+          Riverbend Analytics is reportedly exploring new capital as it
+          scales its analytics platform, according to people familiar with
+          the matter.
+        signal_type: FUNDING
+        confidence: 0.55
+      - ref: leadership-note
+        title: Riverbend Analytics go-to-market team
+        claim: "Riverbend Analytics' go-to-market team is led by a Head of Sales"
+        snippet: >
+          Riverbend Analytics' go-to-market efforts are led by its Head of
+          Sales function, according to the company's team page.
+        signal_type: LEADERSHIP
+        confidence: 0.60
+    funding_events:
+      - stage: series_a
+        amount_usd: 15000000
+        announced_days_ago: 45
+        source_ref: funding-note
+    hiring_roles: []
+    tech_mentions: []
+    leadership:
+      - full_name: null
+        title: Head of Sales
+        is_persona_match: true
+        source_ref: leadership-note
+
+  # 3. Northwind Labs Inc. — a duplicate of #1 (same normalized domain).
+  #    Caught by dedupe before the pipeline runs; shown, not hidden.
+  - slug: northwind-labs-inc
+    name: Northwind Labs Inc.
+    domain: www.northwindlabs.com
+    industry: ai_infrastructure
+    size_band: "51-200"
+    employee_count: 140
+    hq_country: US
+    description: Duplicate listing of Northwind Labs from a secondary source.
+    sources: []
+
+  # 4. Cobalt Retail Systems — otherwise strong-looking evidence, but the
+  #    industry is on the exclude list: the hard disqualifier caps the score
+  #    regardless of how good the rest of the picture is.
+  - slug: cobalt-retail-systems
+    name: Cobalt Retail Systems
+    domain: cobaltretailsystems.com
+    industry: retail_pos
+    size_band: "51-200"
+    employee_count: 180
+    hq_country: US
+    description: Point-of-sale and inventory systems for regional retail chains.
+    sources:
+      - ref: funding-note
+        title: Cobalt Retail Systems raises Series B
+        claim: "Cobalt Retail Systems raised a $30M Series B"
+        snippet: >
+          Cobalt Retail Systems announced a $30M Series B round to expand
+          its point-of-sale platform into new regional markets.
+        signal_type: FUNDING
+        confidence: 0.85
+      - ref: hiring-note
+        title: Cobalt Retail Systems GTM roles
+        claim: "Cobalt Retail Systems is hiring a VP of Sales, an Enterprise Account Executive, and an SDR"
+        snippet: >
+          Cobalt Retail Systems has posted openings for a VP of Sales, an
+          Enterprise Account Executive, and an SDR to grow its retail
+          accounts.
+        signal_type: HIRING
+        confidence: 0.85
+      - ref: tech-note
+        title: Cobalt Retail Systems tech stack
+        claim: "Cobalt Retail Systems runs on Kubernetes and PyTorch"
+        snippet: >
+          Cobalt Retail Systems' backend services run on Kubernetes with
+          PyTorch used for demand-forecasting models.
+        signal_type: TECH
+        confidence: 0.80
+      - ref: leadership-note
+        title: Cobalt Retail Systems names VP of Sales
+        claim: "Dana Whitfield is Cobalt Retail Systems' VP of Sales"
+        snippet: >
+          Dana Whitfield joined Cobalt Retail Systems as VP of Sales to lead
+          its regional expansion.
+        signal_type: LEADERSHIP
+        confidence: 0.85
+    funding_events:
+      - stage: series_b
+        amount_usd: 30000000
+        announced_days_ago: 50
+        source_ref: funding-note
+    hiring_roles:
+      - title: VP of Sales
+        is_gtm: true
+        posted_days_ago: 25
+        source_ref: hiring-note
+      - title: Enterprise Account Executive
+        is_gtm: true
+        posted_days_ago: 22
+        source_ref: hiring-note
+      - title: SDR
+        is_gtm: true
+        posted_days_ago: 20
+        source_ref: hiring-note
+    tech_mentions:
+      - name: kubernetes
+        source_ref: tech-note
+      - name: pytorch
+        source_ref: tech-note
+    leadership:
+      - full_name: Dana Whitfield
+        title: VP of Sales
+        is_persona_match: true
+        source_ref: leadership-note
+
+  # 5. Ferrous Grid — good funding evidence, but no discoverable buyer at
+  #    all. Contact resolves UNAVAILABLE (never fabricated), personalization
+  #    is skipped, and unsupported dimensions trip score_support.
+  - slug: ferrous-grid
+    name: Ferrous Grid
+    domain: ferrousgrid.ai
+    industry: ai_infrastructure
+    size_band: "1-50"
+    employee_count: 70
+    hq_country: US
+    description: Distributed GPU scheduling for AI training workloads.
+    sources:
+      - ref: funding-note
+        title: Ferrous Grid closes seed extension
+        claim: "Ferrous Grid raised a Series A round"
+        snippet: >
+          Ferrous Grid closed a Series A round to expand its distributed
+          GPU scheduling platform for AI training workloads.
+        signal_type: FUNDING
+        confidence: 0.85
+    funding_events:
+      - stage: series_a
+        amount_usd: 18000000
+        announced_days_ago: 40
+        source_ref: funding-note
+    hiring_roles: []
+    tech_mentions: []
+    leadership: []
+
+  # 6. Quarry Systems — a scripted, unrecoverable provider failure. Research
+  #    exhausts its retries; the prospect ends FAILED while its five
+  #    siblings complete normally.
+  - slug: quarry-systems
+    name: Quarry Systems
+    domain: quarrysystems.com
+    industry: ai_infrastructure
+    size_band: "51-200"
+    employee_count: 110
+    hq_country: US
+    description: Vector database infrastructure for retrieval-augmented generation.
+    sources:
+      - ref: funding-note
+        title: Quarry Systems funding note
+        claim: "Quarry Systems raised a Series A round"
+        snippet: >
+          Quarry Systems raised a Series A round to expand its vector
+          database infrastructure.
+        signal_type: FUNDING
+        confidence: 0.80
+    funding_events:
+      - stage: series_a
+        amount_usd: 12000000
+        announced_days_ago: 70
+        source_ref: funding-note
+    hiring_roles: []
+    tech_mentions: []
+    leadership: []
+    failure_script:
+      research: { fail_attempts: 99, error: ProviderUnavailable }
+
+  # 7. Sable Compute — optional second PASS (§23), added because the base
+  #    six landed comfortably. A solid but less overwhelming fit than
+  #    Northwind: fewer GTM hires, an older funding round, partial tech
+  #    overlap — still a clean, unambiguous PASS.
+  - slug: sable-compute
+    name: Sable Compute
+    domain: sablecompute.dev
+    industry: ai_infrastructure
+    size_band: "51-200"
+    employee_count: 200
+    hq_country: US
+    description: Managed training clusters for foundation model teams.
+    sources:
+      - ref: funding-note
+        title: Sable Compute closes Series A
+        claim: "Sable Compute raised a $20M Series A"
+        snippet: >
+          Sable Compute announced a $20M Series A round to expand its
+          managed training cluster offering.
+        signal_type: FUNDING
+        confidence: 0.85
+      - ref: hiring-note
+        title: Sable Compute GTM roles
+        claim: "Sable Compute is hiring a VP of Sales and an Enterprise Account Executive"
+        snippet: >
+          Sable Compute has posted openings for a VP of Sales and an
+          Enterprise Account Executive to grow its enterprise pipeline.
+        signal_type: HIRING
+        confidence: 0.82
+      - ref: tech-note
+        title: Sable Compute tech stack
+        claim: "Sable Compute runs on Kubernetes and PyTorch"
+        snippet: >
+          Sable Compute's training orchestration runs on Kubernetes with
+          PyTorch as the primary framework.
+        signal_type: TECH
+        confidence: 0.80
+      - ref: leadership-note
+        title: Sable Compute names VP of Sales
+        claim: "Marcus Webb is Sable Compute's VP of Sales"
+        snippet: >
+          Marcus Webb joined Sable Compute as VP of Sales to build out its
+          enterprise go-to-market function.
+        signal_type: LEADERSHIP
+        confidence: 0.85
+    funding_events:
+      - stage: series_a
+        amount_usd: 20000000
+        announced_days_ago: 100
+        source_ref: funding-note
+    hiring_roles:
+      - title: VP of Sales
+        is_gtm: true
+        posted_days_ago: 45
+        source_ref: hiring-note
+      - title: Enterprise Account Executive
+        is_gtm: true
+        posted_days_ago: 42
+        source_ref: hiring-note
+    tech_mentions:
+      - name: kubernetes
+        source_ref: tech-note
+      - name: pytorch
+        source_ref: tech-note
+    leadership:
+      - full_name: Marcus Webb
+        title: VP of Sales
+        is_persona_match: true
+        source_ref: leadership-note
