@@ -33,7 +33,7 @@ export function ReviewPanel({ review }: { review: ReviewResult | null }) {
         <span className="text-xs uppercase tracking-wide text-zinc-500">Deterministic verdict</span>
         <Badge tone={VERDICT_TONE[review.verdict] ?? "neutral"}>{review.verdict}</Badge>
       </div>
-      <p className="text-xs text-zinc-600">
+      <p className="text-xs text-zinc-500">
         Seven policy checks over already-validated structured data — a pass here is a join, not a
         model&apos;s opinion.
       </p>

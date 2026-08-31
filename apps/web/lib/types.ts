@@ -309,6 +309,56 @@ export interface ProspectAggregate {
   approval: ApprovalInfo;
 }
 
+// --- evaluation (GET /api/runs/{id}/evaluation) ---
+
+export interface VolumeMetrics {
+  discovered: number;
+  duplicated: number;
+  researched: number;
+  qualified: number;
+  needs_review: number;
+  rejected: number;
+  failed: number;
+  by_status: Record<string, number>;
+}
+
+export interface QualityMetrics {
+  evidence_coverage: number | null;
+  grounded_claim_rate: number | null;
+  dimension_support_rate: number | null;
+  unsupported_claim_count: number;
+  contact_verification_breakdown: Record<string, number>;
+  mean_icp_score: number | null;
+  mean_confidence: number | null;
+  provenance_mix: Record<string, number>;
+}
+
+export interface ReliabilityMetrics {
+  step_status_counts: Record<string, number>;
+  total_retries: number;
+  p50_step_duration_ms: number | null;
+  p95_step_duration_ms: number | null;
+  run_wall_clock_ms: number | null;
+  provider_error_counts: Record<string, number>;
+  per_step_success_rate: Record<string, number>;
+}
+
+export interface GuardrailMetric {
+  id: string;
+  passed: number;
+  total: number;
+  pass_rate: number;
+  failed_prospect_ids: string[];
+}
+
+export interface RunEvaluation {
+  run_id: string;
+  volume: VolumeMetrics;
+  quality: QualityMetrics;
+  reliability: ReliabilityMetrics;
+  guardrails: GuardrailMetric[];
+}
+
 // --- settings ---
 
 export interface ProviderInfo {

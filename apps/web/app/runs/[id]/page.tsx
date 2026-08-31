@@ -9,6 +9,7 @@ import { Tab, Tabs } from "@/components/ui/Tabs";
 import { RunSummary } from "@/components/RunSummary";
 import { RunBoard } from "@/components/RunBoard";
 import { ActivityStream } from "@/components/ActivityStream";
+import { QualityTab } from "@/components/QualityTab";
 
 export default function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -39,7 +40,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
           <p className="text-sm text-rose-400">
             Run <span className="font-mono">{id}</span> could not be loaded.
           </p>
-          <p className="mt-2 font-mono text-xs text-zinc-600">{loadError}</p>
+          <p className="mt-2 font-mono text-xs text-zinc-500">{loadError}</p>
         </div>
       </main>
     );
@@ -71,10 +72,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
             {tab === "board" ? (
               <RunBoard prospects={prospects} retrying={retrying} />
             ) : (
-              <p className="p-6 text-sm text-zinc-500">
-                Quality metrics available after completion — the full evaluation dashboard lands in
-                Checkpoint F.
-              </p>
+              <QualityTab runId={run.id} runStatus={run.status} prospects={prospects} />
             )}
           </Panel>
 

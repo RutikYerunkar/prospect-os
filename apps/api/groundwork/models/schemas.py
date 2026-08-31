@@ -49,7 +49,12 @@ class PlaySpec(BaseModel):
     persona_titles: list[str] = Field(default_factory=list)
     min_score: int = 60
     min_confidence: float = 0.6
-    target_count: int = Field(default=6, le=25)
+    # Default of 7 mirrors the demo fixture pack's own canonical size
+    # (6 required companies + the optional Sable Compute fixture, §23) so a
+    # play created with no override discovers the same set the fixture pack
+    # documents — never a UI/backend count that silently disagrees with what
+    # Demo Mode actually returns.
+    target_count: int = Field(default=7, le=25)
 
 
 class Evidence(BaseModel):

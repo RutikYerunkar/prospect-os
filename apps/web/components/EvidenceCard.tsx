@@ -16,6 +16,7 @@ const ORIGIN_LABEL: Record<string, string> = {
 export function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
   const isLive = evidence.origin === "LIVE_FETCH" && !!evidence.source_url;
   const isInferred = evidence.origin === "LLM_INFERENCE";
+  const isSynthetic = evidence.origin === "DEMO_FIXTURE";
 
   return (
     <div
@@ -28,6 +29,13 @@ export function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
         <span className="font-medium text-zinc-100">{evidence.title}</span>
         <div className="flex items-center gap-1.5">
           {evidence.signal_type && <Badge tone="indigo">{evidence.signal_type}</Badge>}
+          {isSynthetic && (
+            <span title="Demo Mode fixture data — generated for this prototype, not fetched from a real source.">
+              <Badge tone="indigo" mono>
+                SYNTHETIC
+              </Badge>
+            </span>
+          )}
           <Badge tone="neutral" mono>
             {Math.round(evidence.confidence * 100)}% conf.
           </Badge>
@@ -48,7 +56,7 @@ export function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
             {evidence.source_url} ↗
           </a>
         ) : (
-          <span className="inline-flex items-center gap-1 text-xs text-zinc-600">
+          <span className="inline-flex items-center gap-1 text-xs text-zinc-500">
             {ORIGIN_LABEL[evidence.origin] ?? evidence.origin}
             {evidence.retrieved_at && ` · ${evidence.retrieved_at}`}
           </span>
