@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from groundwork.models.tables import PlayRow
@@ -20,3 +21,12 @@ class PlayRepository:
             )
             await session.commit()
         return play_id
+
+    async def get(self, play_id: str) -> PlayRow | None:
+        async with self._session_factory() as session:
+            return await session.get(PlayRow, play_id)
+
+    async def list(self) -> list[PlayRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(select(PlayRow).order_by(PlayRow.created_at.desc()))
+            return list(result.scalars())

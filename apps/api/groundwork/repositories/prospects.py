@@ -36,6 +36,17 @@ class CompanyRepository:
             await session.commit()
             return row.id
 
+    async def get(self, company_id: str) -> CompanyRow | None:
+        async with self._session_factory() as session:
+            return await session.get(CompanyRow, company_id)
+
+    async def get_many(self, company_ids: list[str]) -> dict[str, CompanyRow]:
+        if not company_ids:
+            return {}
+        async with self._session_factory() as session:
+            result = await session.execute(select(CompanyRow).where(CompanyRow.id.in_(company_ids)))
+            return {row.id: row for row in result.scalars()}
+
 
 class ProspectRepository:
     def __init__(self, session_factory) -> None:
@@ -73,3 +84,14 @@ class ProspectRepository:
             row.error = error
             row.completed_at = datetime.utcnow()
             await session.commit()
+
+    async def get(self, prospect_id: str) -> ProspectRow | None:
+        async with self._session_factory() as session:
+            return await session.get(ProspectRow, prospect_id)
+
+    async def list_for_run(self, run_id: str) -> list[ProspectRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ProspectRow).where(ProspectRow.run_id == run_id).order_by(ProspectRow.created_at)
+            )
+            return list(result.scalars())
