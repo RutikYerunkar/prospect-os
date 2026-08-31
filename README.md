@@ -226,6 +226,19 @@ make live-smoke   # OPTIONAL — one real, billed OpenAI call. Requires OPENAI_A
 `make demo-reset && make dev` is the reliable way to get back to a rehearsal-ready state before a
 walkthrough — see `docs/DEMO_SCRIPT.md`.
 
+### Upgrading an existing local checkout past Checkpoint G
+
+Checkpoint G added a column (`runs.provider_profile`) and a table (`llm_calls`) to the schema.
+`create_all()` only creates *missing* tables — it never alters an existing one to add a new column —
+so a local `groundwork.db` created before Checkpoint G will make the API crash on the first run with a
+`sqlite3.OperationalError: table runs has no column named provider_profile`.
+
+**Fix: run `make demo-reset` once** after pulling Checkpoint G (or any change to `models/tables.py`
+going forward). This deletes and recreates the local SQLite file — nothing else is affected, and
+nothing in this repo needs your old local runs to survive; it's designed to be resettable in under a
+second. `make live-smoke` checks for this automatically and refuses (before making any paid API call)
+with a message telling you to reset, rather than a raw stack trace mid-run.
+
 ---
 
 ## What's real vs. synthetic, explicitly

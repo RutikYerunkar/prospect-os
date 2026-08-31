@@ -951,11 +951,178 @@ to the repository.
    blank before this checkpoint). Zero browser console/page errors across the whole walkthrough.
    Screenshots sent to the user in-session (New Play Demo, Run Detail board, Quality tab, Prospect
    Detail); per instructions, not committed to the repository.
-9. **Live smoke test: not run.** No `OPENAI_API_KEY` was provided or requested from the user this
-   session, and the task instructions are explicit that it only runs "if credentials are available and
-   I explicitly provide/approve them." `scripts/live_smoke.py` was manually verified to refuse safely
-   without the flag and without a configured key (both checked, both correctly exit 1 with no network
-   call attempted).
+9. **Live smoke test: not run in this session.** No `OPENAI_API_KEY` was provided or requested from the
+   user this session, and the task instructions were explicit that it only runs "if credentials are
+   available and I explicitly provide/approve them." `scripts/live_smoke.py` was manually verified to
+   refuse safely without the flag and without a configured key (both checked, both correctly exit 1
+   with no network call attempted). **The user ran it for real after PR #7 was opened** — see
+   "Post-smoke hardening pass" immediately below for the result and what it surfaced.
+
+---
+
+## Post-smoke hardening pass (after PR #7, before merge)
+
+The user ran `make live-smoke` for real, against the actual OpenAI API, after PR #7 was opened. It
+succeeded — the first genuinely real execution of Live Mode. This section records the result and the
+four issues that first real run surfaced, all fixed in the same PR before merge (not a new checkpoint —
+Checkpoint G was not redesigned, only hardened).
+
+**The successful real run:**
+
+- Model `gpt-5.6-terra`, `reasoning_effort=low`, `llm_max_output_tokens=2048`, pricing intentionally
+  left unconfigured (so cost stayed `null`, as designed).
+- Three real logical LLM calls (research_extraction, score_explanation, personalization — objective
+  parse was not yet wired into `live_smoke.py` at the time of this run; see Issue 4 below), every one
+  `attempt=1, kind=initial, status=OK` — **zero transport retries, zero schema repairs, zero TRUNCATED
+  responses** across the whole run. Total tokens: 1,889 in / 699 out.
+- Final prospect (Sable Compute): `score=56`, `status=REJECTED`, `review verdict=FAIL`,
+  `claim_map entries=3`.
+
+This is a genuinely clean real-provider result on the success axis: the strict Structured Outputs
+schema validated on the first attempt for all three operations, at real API latency, with a real model.
+The `REJECTED` outcome is analyzed separately below (Issue 3) — it is not a failure of the smoke test
+itself.
+
+### Issue 1 — blank optional `.env` floats crashed `Settings()`
+
+**Root cause, confirmed by reproduction:** `.env.example` documents `OPENAI_PRICE_INPUT_USD_PER_MTOK=`,
+`OPENAI_PRICE_OUTPUT_USD_PER_MTOK=`, and `LIVE_RUN_SOFT_BUDGET_USD=` as blank-by-default (`float | None`
+fields, intentionally optional per §7). Pydantic's own float parsing rejects an empty string outright —
+`Settings()` raised a 3-field `ValidationError` on construction for anyone who copied `.env.example` to
+`.env` verbatim, before the API could even start. Reproduced directly:
+`OPENAI_PRICE_INPUT_USD_PER_MTOK="" uv run python -c "from groundwork.config import Settings; Settings()"`
+raised `pydantic_core._pydantic_core.ValidationError: ... Input should be a valid number ... input_value=''`.
+
+**Fix:** `config.py::Settings` gained a `field_validator(mode="before")` on all three fields that
+normalizes a blank/whitespace-only string to `None` before Pydantic's type coercion runs — the
+documented "unset -> `None` -> cost stays null / threshold unenforceable" semantics now hold for a
+blank string exactly like a genuinely absent env var. No typing was weakened — the fields are still
+`float | None`; only what counts as "absent" widened from "key not present" to "key present but blank."
+`tests/test_settings_blank_env.py` (6 tests): blank strings, whitespace-only strings, real numeric
+values, and the key-absent-entirely case all produce the documented semantics.
+
+### Issue 2 — a pre-Checkpoint-G local SQLite DB crashed with a raw stack trace
+
+**Root cause:** Checkpoint G added `runs.provider_profile` (a column) and `llm_calls` (a table).
+`create_all()` only creates tables that don't exist yet — it never alters an existing table to add a
+new column — so a developer's local `groundwork.db` predating this checkpoint hit
+`sqlite3.OperationalError: table runs has no column named provider_profile` on the first write, with no
+explanation of what to do about it. `uv run python -m groundwork.scripts.reset` fixed it, but nothing
+told the user that was the fix.
+
+**Fix (no Alembic/Postgres — explicitly out of scope):**
+- `db.py::schema_upgrade_problems(engine)` (new, read-only, never mutates or resets anything) inspects
+  the live DB for exactly the two things this checkpoint added and returns a human-readable problem
+  list — empty for a current or brand-new (no tables yet) database.
+- `scripts/live_smoke.py` calls it immediately after `create_all()`, **before constructing
+  `LiveProviderRuntime` or making any paid call**, and aborts with
+  `"Local Groundwork DB predates Checkpoint G: ... Run make demo-reset ... Aborting BEFORE making any
+  paid API call — your existing local data was not touched."` if it finds a problem.
+- `README.md` gained an explicit "Upgrading an existing local checkout past Checkpoint G" section
+  documenting the one-time `make demo-reset` requirement.
+- `tests/test_schema_upgrade_check.py` (4 tests): a hand-built pre-Checkpoint-G schema is correctly
+  flagged on both counts; the current full schema (via the existing `session_factory` fixture) reports
+  no problems; a brand-new empty database reports no problems (not "stale," just uninitialized); the
+  check function never mutates the database it inspects.
+
+### Issue 3 — why Sable Compute landed `REJECTED`/`review verdict=FAIL`
+
+**What this section can and can't claim:** the actual run's `review_results`/`llm_calls` rows live in
+the user's own local SQLite file from their own environment, not in this session — there is no database
+here to query directly. What follows is code-level analysis plus a reproducible demonstration against
+the real, unmodified `token_overlap` function and the real Sable Compute fixture text; it is the
+best-supported explanation available without that row, not a claim of having read it.
+
+**Ruled out mechanically, not by guessing:** `score=56` with `review verdict=FAIL` means
+`_derive_final_status` took the review-FAIL branch, not the hard-disqualifier branch (that requires
+`score.disqualified`, which caps the score at 25 the way Cobalt Retail Systems' fixture does — 56 isn't
+a capped number, and Sable Compute isn't on any exclude list). With `target_count=1`, the single
+prospect has no siblings in the run — `other_dedupe_keys`/`other_company_identifiers` are both empty
+sets — so `cross_prospect_leak` and `duplicate_account` (both membership checks against those sets)
+cannot fail. `no_fabricated_contact` only fails if `contact.email`/`contact.linkedin_url` is set without
+`VERIFIED`; nothing in `engine/steps/enrich.py::resolve_contact` ever sets either field anywhere in this
+codebase, so that check cannot fail either, live or demo. That leaves exactly two candidates:
+`claim_grounding` and `no_placeholders`.
+
+**Most likely: `claim_grounding`.** `domain/review.py::_claim_grounding` re-verifies each
+`claim_map` sentence's token overlap against the ORIGINAL evidence snippet (`domain/grounding.py`,
+threshold `0.5`) — not against the intermediate signal summary the personalization model was actually
+shown. `prompts/personalization.py` (pre-fix) told the model to cite grounded signals but never told it
+this citation would be checked against source wording it never saw, nor asked it to echo that wording —
+so a real model, asked to "write a short, personalized outreach email," very plausibly wrote natural
+marketing prose instead of a close paraphrase. Demonstrated directly against Sable Compute's actual
+fixture snippet ("Sable Compute announced a $20M Series A round to expand its managed training cluster
+offering."): a natural-marketing-style sentence ("Congrats on closing your Series A — sounds like an
+exciting phase of growth for the team.") scores `token_overlap ≈ 0.10`, while a close-echo sentence
+("Congrats on the $20M Series A round for Sable Compute.") scores `≈ 0.83` — a 5–8× gap, comfortably
+either side of the `0.5` threshold. `tests/test_personalization_prompt_grounding_alignment.py` makes
+this mechanism a permanent, reproducible test.
+
+**This is correct behavior, not a guardrail defect, and the guardrail was NOT weakened.**
+`domain/review.py`/`domain/grounding.py` are byte-for-byte unchanged. If the live model in fact wrote a
+citation whose wording drifted too far from its source, `claim_grounding` doing exactly its documented
+job — catching an insufficiently-grounded claim before it reaches a human reviewer — is the guardrail
+working, not failing. That is a real safety demonstration: real-provider prose is measurably harder to
+keep tightly grounded than deterministic Demo Mode templating, and the deterministic gate caught it
+without needing an LLM to grade itself.
+
+**What was fixed — the actual prompt/wiring gap, not the gate:** `prompts/personalization.py`'s system
+prompt (bumped `personalization-v1` -> `personalization-v2`) now explicitly tells the model that each
+`claim_map` citation is checked against the original source text and instructs it to echo the cited
+signal's key nouns/numbers/phrases rather than paraphrase loosely. This narrows the paraphrase gap at
+the one layer that's actually fixable (what the model is told to do) without touching the verification
+layer (what counts as grounded) at all.
+
+**Made observable going forward, not just explained once:** `scripts/live_smoke.py` now prints every
+one of the seven guardrail checks with its pass/fail state and detail string (`_print_review()`), not
+just the verdict — the next real smoke run will show, unambiguously, exactly which check failed and
+why, with no inference required.
+
+**Why Sable Compute, not Northwind Labs:** intentional, not a bug and not an accident — `--company`
+defaults to `sable-compute` specifically *because* Northwind Labs' fixture carries a scripted research
+failure (`fail_attempts=1, error=ProviderTimeout`, used to exercise Demo Mode's retry path). Running
+that company live would burn an extra real, billed attempt reproducing a fixture artifact that a real
+API essentially never triggers on its own. This was a deliberate choice made when `live_smoke.py` was
+first written (see its own module docstring, updated this pass to state the reasoning explicitly), not
+a discovery-ranking behavior or a target-count side effect. Per the instruction not to force a PASS
+company merely to obtain a nicer smoke result, the default was left as `sable-compute` — `--company
+northwind-labs` remains available for anyone who wants to see the retry path exercised against the real
+API instead.
+
+### Issue 4 — `objective_parse` wasn't exercised by the smoke
+
+**Confirmed: intentional-by-omission, not a documented design choice.** `live_smoke.py` (as written for
+the original PR) called `PlayRepository.create()` directly with the fixture pack's own canonical
+`PlaySpec`, bypassing `parse_objective()` entirely — nothing ever claimed this was deliberate coverage
+scoping; it was simply not wired in.
+
+**Fixed:** `live_smoke.py` now calls `engine.objective_parser.parse_objective(..., use_llm=True)` as a
+real, billed operation before creating the `Play` — the same live-parser path
+`POST /plays` takes with `use_live_objective_parser=True` — and persists the `Play` plus its
+`objective_parse` telemetry in the same one-transaction call the API uses
+(`LLMCallRepository.create_play_with_attempts`). `icp_overrides` passed to `parse_objective()` is
+deliberately the fixture's own canonical `PlaySpec` (not empty) — "user overrides always win" means
+whatever the model infers, the pipeline still scores against the exact, well-understood fixture
+criteria, so the smoke's score/review output stays interpretable regardless of what the live model
+happens to infer from the objective text; the real inference call still runs, is still billed, and its
+attempts are still fully persisted and printed. This adds exactly one more real logical call (bringing
+the smoke to all four Live LLM operations, matching the actual Live Mode user path), not a redundant
+one. The preamble's conservative dollar-bound estimate was updated from 3 to 4 operations to match.
+
+**Post-smoke verification:** `cd apps/api && uv run pytest` — **129/129 passing** (114 + 15 new: 6
+`test_settings_blank_env.py`, 4 `test_schema_upgrade_check.py`, 5
+`test_personalization_prompt_grounding_alignment.py`). `make demo-reset && make demo` re-confirmed
+byte-identical to every prior gate (the personalization prompt version bump does not touch
+`DemoLLMProvider`, which hardcodes `prompt_version="demo-v1"` regardless of the real prompt's version
+string). `cd apps/web && pnpm lint && pnpm build` — clean, unchanged (no frontend files touched this
+pass). **Another real live smoke was not run** — nothing in this hardening pass changes the shape of a
+live request in a way that needs re-proving against the real API; the fixes are (1) a config-parsing
+guard that only affects malformed `.env` values, (2) a pre-flight read-only DB check, (3) a prompt-text
+instruction change that the existing per-attempt telemetry printing already proves is wired correctly
+end-to-end via the fake-live integration test, and (4) an additional real LLM call whose wiring is
+identical to the already-proven per-prospect pipeline calls. The next genuinely necessary real smoke is
+whenever the user wants to specifically confirm `claim_grounding` now passes more often with
+`personalization-v2`'s wording, or before considering Checkpoint G fully done for a real deployment.
 
 ---
 

@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,6 +60,25 @@ class Settings(BaseSettings):
     # Soft threshold only — never described as a cap/ceiling. None disables
     # budget enforcement entirely (no threshold configured).
     live_run_soft_budget_usd: float | None = None
+
+    @field_validator(
+        "openai_price_input_usd_per_mtok", "openai_price_output_usd_per_mtok", "live_run_soft_budget_usd",
+        mode="before",
+    )
+    @classmethod
+    def _blank_optional_float_is_none(cls, value: object) -> object:
+        """`.env.example` documents these as optional and blank by default
+        (`OPENAI_PRICE_INPUT_USD_PER_MTOK=`) — copying it to `.env` verbatim
+        must never crash Settings construction. Pydantic's own float parsing
+        rejects `""` outright; this normalizes a blank/whitespace-only
+        string to `None` *before* type coercion runs, preserving the
+        documented "unset -> None -> cost stays null / threshold
+        unenforceable" semantics rather than requiring the user to notice
+        and manually delete the line.
+        """
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
 
 settings = Settings()

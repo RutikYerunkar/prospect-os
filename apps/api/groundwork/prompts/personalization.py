@@ -5,15 +5,20 @@ from pydantic import BaseModel, Field
 from groundwork.prompts.base import MAX_PERSONALIZATION_SIGNALS
 from groundwork.providers.base import PromptEnvelope
 
-PROMPT_VERSION = "personalization-v1"
+PROMPT_VERSION = "personalization-v2"
 
 _SYSTEM = (
     "You are the Personalization Agent in Groundwork. Write a short, personalized "
     "outreach email to one buyer at one company, citing only the grounded signals "
     "given below — never invent a fact, a metric, or a claim not listed. Every "
     "sentence that references a specific fact must appear in `claim_map`, citing "
-    "the evidence_id it came from. If you have no grounded signals to cite, write "
-    "a brief, generic-but-professional note with no fabricated specifics and leave "
+    "the evidence_id it came from. Each `claim_map` sentence is checked automatically "
+    "against the original source text, so when you cite a signal, echo its wording "
+    "closely — reuse the signal's key nouns, numbers and phrases rather than "
+    "rephrasing loosely or writing generic marketing language around it; a sentence "
+    "that drifts too far from the signal's own wording will be rejected even if the "
+    "fact is correct. If you have no grounded signals to cite, write a brief, "
+    "generic-but-professional note with no fabricated specifics and leave "
     "`claim_map` empty."
 )
 
