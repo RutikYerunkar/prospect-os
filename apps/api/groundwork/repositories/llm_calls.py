@@ -95,10 +95,30 @@ class LLMCallRepository:
     ) -> str:
         """Phase 9: `Play` creation and its `objective_parse` telemetry in
         ONE transaction — if either insert fails, both roll back, so no
-        `llm_calls` row can ever reference a nonexistent `Play`."""
+        `llm_calls` row can ever reference a nonexistent `Play`.
+
+        `models/tables.py` has no ORM `relationship()` between `PlayRow` and
+        `LLMCallRow` (this codebase uses raw FK columns + manual joins
+        throughout, never `relationship()`) — which means SQLAlchemy's
+        unit-of-work has no dependency processor telling it `plays` must be
+        INSERTed before `llm_calls`, and a single `session.add()` for each
+        followed by one `commit()` does NOT guarantee that order. Under
+        `PRAGMA foreign_keys=ON` this surfaced as a real
+        `sqlite3.IntegrityError: FOREIGN KEY constraint failed` on the
+        `llm_calls` INSERT (confirmed by reproduction — the real live
+        smoke's second run hit exactly this). The fix is an explicit
+        `flush()` after adding the `Play`: `flush()` sends the pending
+        INSERT to the database *within the current transaction* (not a
+        commit — nothing is durable yet, and everything still rolls back
+        together on any later failure or an uncaught exception exiting this
+        `async with` block), so `plays.id` genuinely exists by the time the
+        `llm_calls` rows are flushed, and the final `commit()` makes both
+        durable together, atomically.
+        """
         play_id = str(uuid.uuid4())
         async with self._session_factory() as session:
             session.add(PlayRow(id=play_id, **play_kwargs))
+            await session.flush()  # INSERT the Play now, same transaction — see docstring above
             for attempt in attempts:
                 session.add(
                     LLMCallRow(

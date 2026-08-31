@@ -1126,6 +1126,85 @@ whenever the user wants to specifically confirm `claim_grounding` now passes mor
 
 ---
 
+## Second post-smoke fix: `create_play_with_attempts` FK-ordering bug
+
+The user re-ran `make live-smoke` after the first hardening pass. **The real `OBJECTIVE_PARSE` LLM call
+itself succeeded** (`objective_parse: parse_source=llm, attempts=1`) — the live provider path, the
+prompt, and the strict schema all worked correctly against the real API a second time. Persistence then
+failed:
+
+```
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+[SQL: INSERT INTO llm_calls (...) ]
+```
+
+**Root cause, confirmed by direct reproduction (not assumed):** `models/tables.py` defines `LLMCallRow.
+play_id` as a raw `ForeignKey("plays.id")` column — and, checked directly, **zero ORM `relationship()`
+mappings exist anywhere in that file**; this codebase uses raw FK columns plus manual joins throughout
+(consistent with every other repository). SQLAlchemy's unit-of-work only knows to order one table's
+INSERT before another's via a `relationship()`-derived dependency processor — a `ForeignKeyConstraint`
+on the `Table` alone is not enough to order *DML* (insert order within a flush), only *DDL* (schema
+creation order, which is a separate mechanism `create_all()` already uses correctly). `repositories/
+llm_calls.py::create_play_with_attempts` was doing `session.add(PlayRow(...))` then
+`session.add(LLMCallRow(...))` in a loop, then one `session.commit()` — nothing told SQLAlchemy the
+`Play` insert had to happen first, and under real `PRAGMA foreign_keys=ON` it didn't reliably. Reproduced
+directly against a real FK-enforced SQLite file with the exact unmodified pre-fix code before touching
+anything: `sqlite3.IntegrityError: FOREIGN KEY constraint failed` on the `llm_calls` INSERT, byte-for-byte
+the same failure shape the user reported.
+
+**Fix:** one line — `await session.flush()` immediately after `session.add(PlayRow(...))`, before the
+`llm_calls` rows are added. `flush()` sends the `Play` INSERT to the database *within the current,
+still-open transaction* (not a commit — nothing is durable yet); the final `session.commit()` then makes
+both the `Play` and its `llm_calls` rows durable together. Re-reproduced with the fix in place: succeeds,
+and a direct row count confirms exactly one `plays` row and one correctly-linked `llm_calls` row.
+Rollback was verified too, not assumed: forcing a second `llm_calls` insert to violate
+`UNIQUE(call_group_id, attempt)` — which happens in the same flush as the Play was already
+flushed-but-not-committed in — leaves **zero** rows in both `plays` and `llm_calls` after the exception,
+proving the whole transaction (including the already-flushed Play) rolls back together.
+
+**Why 129 passing tests didn't catch this — a real, now-fixed test-infrastructure gap.**
+`tests/conftest.py`'s `_enable_wal` (the connect-event hook every test's `session_factory` fixture uses)
+had drifted from `db.py`'s real one: it set `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000` but
+**never `PRAGMA foreign_keys=ON`** — SQLite does not enforce foreign keys per connection unless that
+pragma is set explicitly, connection by connection. Every test in the suite, including
+`test_objective_parser.py::test_play_and_llm_calls_created_in_one_transaction` (which does call the real
+`create_play_with_attempts`), ran against a database that silently accepted the FK-violating insert
+order — the bug was real but structurally invisible to the whole suite. `conftest.py::_enable_wal` now
+mirrors `db.py::_enable_wal` exactly (with a docstring recording why this drift mattered, so it isn't
+repeated). Re-running the full suite with FK enforcement newly turned on for every test surfaced exactly
+one further problem, immediately: `test_redaction.py`'s end-to-end redaction test had been calling
+`record_attempts()` with made-up `run_id="run-1"`/`prospect_id="prospect-1"` strings that were never
+backed by real rows — it only ever passed because FK enforcement was off. Fixed by creating real
+Play/Run/Company/Prospect rows via the actual repositories first, so the test now exercises the real FK
+relationship instead of bypassing it.
+
+**New dedicated regression test** (`tests/test_llm_calls_atomicity.py`, 3 tests, real repository, real
+FK-enforced SQLite — no mocks): the SUCCESS case (Play + llm_calls both committed, `llm_calls.play_id`
+references the real Play, `run_id`/`prospect_id` both `NULL`), the ROLLBACK case (a forced UNIQUE
+violation on the second `llm_calls` insert, occurring after the Play's own flush, leaves zero rows in
+either table), and a same-process double-call case (two independent `create_play_with_attempts()` calls
+don't interfere with each other's Play/llm_calls linkage).
+
+**Confirmed: `POST /plays`'s Live path and `scripts/live_smoke.py` share the same corrected code.** Both
+call `repos.llm_calls.create_play_with_attempts(...)` — the single method fixed above. There is no
+separate implementation for either caller that could drift from the other.
+
+**No live-provider/request code changed in this fix.** `providers/live/openai_llm.py`,
+`providers/live/runtime.py`, `engine/objective_parser.py`, and the request-making parts of
+`scripts/live_smoke.py` are untouched — this was purely a persistence-layer bug, confirmed by the fact
+that the real `OBJECTIVE_PARSE` call itself succeeded both times before the write failed.
+
+**Post-fix verification:** `cd apps/api && uv run pytest` — **132/132 passing** (129 + 3 new
+`test_llm_calls_atomicity.py`, minus zero — the `test_redaction.py` fix modified an existing test rather
+than adding one). `make demo-reset && make demo` — byte-identical to every prior gate. `cd apps/web &&
+pnpm lint && pnpm build` — clean, unchanged (no frontend files touched). **No live OpenAI call was made
+to verify this fix** — the bug and its fix are entirely in the persistence layer below where the real API
+call already succeeded; the fix was proven by direct reproduction against a real FK-enforced SQLite file
+plus the new regression test, not by spending money to re-prove a provider-layer behavior that was never
+broken.
+
+---
+
 ## Known issues / deviations from plan
 
 - **`stable_seed()` instead of `hash()`** for seeded jitter (see `providers/base.py`) — Python's
@@ -1433,3 +1512,13 @@ remaining order still applies: **deployment → MCP shim → polish**. Concretel
   `DEMO_BUDGET`'s defaults. `LLM_MAX_OUTPUT_TOKENS=2048` is measurement-selected (see "What Checkpoint G
   added" → Phase 4) — if any operation's prompt or schema changes meaningfully, re-measure with
   `tests/test_output_cap_sizing.py`'s methodology rather than bumping the number by feel.
+- **Post-smoke addition:** `repositories/llm_calls.py::create_play_with_attempts`'s
+  `session.add(Play)` -> `await session.flush()` -> `session.add(LLMCallRow...)` -> `session.commit()`
+  ordering is load-bearing, not stylistic — removing the `flush()` reintroduces the real
+  `FOREIGN KEY constraint failed` bug the second live smoke test hit (`models/tables.py` has no ORM
+  `relationship()` anywhere, so nothing else orders the inserts). If any future method in this file
+  writes a new row that references an id created earlier in the same transaction, it needs the same
+  `flush()`-before-referencing-insert pattern — `tests/test_llm_calls_atomicity.py` guards this specific
+  method's contract but won't catch a new method repeating the mistake. `tests/conftest.py::_enable_wal`
+  must keep setting `PRAGMA foreign_keys=ON` (mirroring `db.py`'s real one exactly) — removing it would
+  silently make the whole test suite blind to foreign-key violations again, the way it already was once.

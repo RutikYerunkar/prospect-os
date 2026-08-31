@@ -37,13 +37,36 @@ def test_redact_none_passthrough():
 async def test_llm_calls_error_message_is_redacted_end_to_end(monkeypatch, session_factory):
     """A ProviderError whose message contains the sentinel must come out of
     `llm_calls.record_attempts` with the sentinel scrubbed — the real
-    end-to-end path a live provider's raw exception text would take."""
+    end-to-end path a live provider's raw exception text would take.
+
+    Uses real Play/Run/Company/Prospect rows (not made-up ids) so this
+    exercises `llm_calls.run_id`/`.prospect_id`'s actual foreign keys under
+    `PRAGMA foreign_keys=ON`, same as production — a made-up `run_id`/
+    `prospect_id` here previously passed only because the test fixture had
+    FK enforcement off (see `conftest.py::_enable_wal`'s docstring).
+    """
     from datetime import datetime, timezone
 
+    from groundwork.models.schemas import CompanySeed
     from groundwork.providers.base import LLMAttemptKind, LLMAttemptStatus, LLMAttemptTelemetry
     from groundwork.repositories.llm_calls import LLMCallRepository
+    from groundwork.repositories.plays import PlayRepository
+    from groundwork.repositories.prospects import CompanyRepository, ProspectRepository
+    from groundwork.repositories.runs import RunRepository
 
     monkeypatch.setattr("groundwork.config.settings.openai_api_key", SENTINEL)
+
+    plays = PlayRepository(session_factory)
+    runs = RunRepository(session_factory)
+    companies = CompanyRepository(session_factory)
+    prospects = ProspectRepository(session_factory)
+
+    play_id = await plays.create(name="t", objective_text="t", icp_spec={}, mode="live")
+    run_id = await runs.create(play_id=play_id, mode="live", seed=1)
+    company = CompanySeed(slug="acme", name="Acme", domain="acme.example", industry="x", size_band="1-10", employee_count=5)
+    company_id = await companies.get_or_create(company, canonical_domain="acme.example", normalized_name="acme")
+    prospect_id = await prospects.create(run_id=run_id, company_id=company_id, dedupe_key="acme.example", duplicate_of=None, status="RUNNING")
+
     repo = LLMCallRepository(session_factory)
     now = datetime.now(timezone.utc)
     attempt = LLMAttemptTelemetry(
@@ -55,9 +78,9 @@ async def test_llm_calls_error_message_is_redacted_end_to_end(monkeypatch, sessi
     )
     await repo.record_attempts(
         call_group_id="grp-1", operation="score_explanation", provider="openai", prompt_version="live-v1",
-        attempts=[attempt], run_id="run-1", prospect_id="prospect-1", step_name="score",
+        attempts=[attempt], run_id=run_id, prospect_id=prospect_id, step_name="score",
     )
-    rows = await repo.for_run("run-1")
+    rows = await repo.for_run(run_id)
     assert len(rows) == 1
     assert SENTINEL not in (rows[0].error_message or "")
     assert SENTINEL not in (rows[0].validation_error or "")

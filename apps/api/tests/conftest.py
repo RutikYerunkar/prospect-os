@@ -14,9 +14,20 @@ from groundwork.models.tables import Base
 
 
 def _enable_wal(dbapi_connection, connection_record) -> None:
+    """Mirrors `db.py::_enable_wal` exactly. Checkpoint G's first FK-ordering
+    bug (`create_play_with_attempts` — see `repositories/llm_calls.py`)
+    shipped past a 129-test suite specifically because this fixture had
+    drifted from production: SQLite does not enforce foreign keys per
+    connection unless `PRAGMA foreign_keys=ON` is set explicitly, and this
+    function never set it, while `db.py`'s real one always has. Every test
+    using `session_factory` ran against a DB that silently accepted
+    FK-violating insert order — the real bug was invisible here until a real
+    `PRAGMA foreign_keys=ON` connection (the live smoke test's actual
+    `groundwork.db`) hit it. Do not let this drift again."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 
