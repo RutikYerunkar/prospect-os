@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, getRunEvaluation } from "@/lib/api";
 import { MetricGrid } from "@/components/MetricGrid";
 import { GuardrailPanel } from "@/components/GuardrailPanel";
+import { ModelUsagePanel } from "@/components/ModelUsagePanel";
 import type { ProspectSummary, RunEvaluation, RunStatus } from "@/lib/types";
 
 const POLL_MS = 2000;
@@ -83,6 +84,7 @@ export function QualityTab({
         </p>
       </div>
       <MetricGrid volume={evaluation.volume} quality={evaluation.quality} reliability={evaluation.reliability} />
+      <ModelUsagePanel usage={evaluation.llm_usage} />
       <div>
         <h3 className="px-4 pt-4 text-xs font-medium uppercase tracking-wide text-zinc-500">
           Guardrails — all seven deterministic checks

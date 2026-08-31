@@ -167,6 +167,28 @@ answerable by pointing at a table, not by trusting a model's self-report.
 
 ---
 
+## Live Mode (Checkpoint G)
+
+**LIVE LLM · FIXTURE SEARCH.** `providers/live/openai_llm.py::OpenAILLMProvider` is a real OpenAI
+Responses-API client (strict Structured Outputs) behind the identical `LLMProvider` Protocol Demo Mode
+satisfies — same pipeline, same domain layer, same isolation. Search stays `DemoSearchProvider`; live
+web search is Checkpoint H, not built. No `OPENAI_API_KEY` configured → Live Mode 422s cleanly
+(`ProviderNotConfigured`), never a silent fallback to Demo.
+
+One logical LLM call is ONE flat retry loop (`engine/llm.py`/`providers/live/openai_llm.py`), never
+nested `(1+T)*(1+S)` retries: at most `1 + LLM_MAX_TRANSPORT_RETRIES + LLM_MAX_SCHEMA_RETRIES` provider
+attempts, each persisted to a new `llm_calls` table (one row per attempt, full telemetry, redacted of
+secrets). Hard bounds cap prospects/run, concurrency (a process-scoped `asyncio.Semaphore`, shared
+across simultaneous runs), and output tokens; a soft (never hard) per-run spend threshold only enforces
+once real pricing is configured. The Objective Parser is the fourth Live LLM operation — it runs before
+any `Play` row exists, falls back deterministically on any provider failure, and its telemetry is
+written in the same DB transaction as the `Play` it belongs to.
+
+Full detail, SDK facts verified against the installed `openai` package, and the output-token-cap
+measurement: `docs/PROGRESS.md`'s Checkpoint G section.
+
+---
+
 ## Where things live
 
 See `docs/IMPLEMENTATION_PLAN.md` §22 for the full folder structure. The load-bearing boundary:

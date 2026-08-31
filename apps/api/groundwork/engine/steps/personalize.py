@@ -9,11 +9,13 @@ nothing in scope for the provider to leak even if it wanted to.
 from __future__ import annotations
 
 from groundwork.engine.context import ProspectContext
+from groundwork.engine.llm import call_structured
 from groundwork.engine.step import StepResult
 from groundwork.models.enums import ContactVerification
 from groundwork.models.llm_io import PersonalizationOutput
 from groundwork.models.schemas import OutreachDraft
-from groundwork.providers.base import PromptEnvelope
+from groundwork.prompts import personalization as prompt
+from groundwork.providers.base import LLMOperation
 
 
 async def personalize(ctx: ProspectContext) -> StepResult:
@@ -23,21 +25,20 @@ async def personalize(ctx: ProspectContext) -> StepResult:
 
     grounded_signals = [s for s in ctx.signals if s.grounded and s.evidence_ids]
     ctx_key = ctx.step_key("personalize")
-    envelope = PromptEnvelope(
-        ctx_key=ctx_key,
-        system="Write a short, personalized outreach email citing only the grounded signals given.",
-        user=f"Draft outreach to {ctx.contact.full_name or ctx.contact.title} at {ctx.company.name}.",
-        metadata={
-            "company_name": ctx.company.name,
-            "persona_name": ctx.contact.full_name,
-            "persona_title": ctx.contact.title,
-            "signals": [
-                {"summary": s.summary, "evidence_id": s.evidence_ids[0]} for s in grounded_signals
-            ],
-        },
+    prompt_input = prompt.PersonalizationInput(
+        company_name=ctx.company.name,
+        persona_name=ctx.contact.full_name,
+        persona_title=ctx.contact.title,
+        signals=[
+            prompt.GroundedSignalInput(summary=s.summary, evidence_id=s.evidence_ids[0]) for s in grounded_signals
+        ],
     )
-    llm_result = await ctx.providers.llm.structured(envelope, PersonalizationOutput, ctx_key=ctx_key)
-    output = PersonalizationOutput.model_validate(llm_result.data)
+    envelope = prompt.build_envelope(ctx_key, prompt_input)
+    llm_result = await call_structured(
+        ctx, envelope, PersonalizationOutput,
+        operation=LLMOperation.PERSONALIZATION, step_name="personalize", prompt_version=prompt.PROMPT_VERSION,
+    )
+    output = llm_result.parsed
 
     draft = OutreachDraft(
         prospect_id=ctx.prospect_id,

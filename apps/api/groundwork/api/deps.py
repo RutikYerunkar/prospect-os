@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from groundwork.db import SessionLocal
 from groundwork.engine.runner import Repos
@@ -25,6 +25,18 @@ def get_session_factory():
 
 
 SessionFactory = Annotated[object, Depends(get_session_factory)]
+
+
+def get_live_runtime(request: Request):
+    """The process-scoped `LiveProviderRuntime` created once in `main.py`'s
+    lifespan, or `None` if no `OPENAI_API_KEY` is configured. Tests override
+    this the same way they override `get_session_factory` — via
+    `app.dependency_overrides` — to inject a runtime backed by
+    `httpx2.MockTransport` without touching global state."""
+    return getattr(request.app.state, "live_runtime", None)
+
+
+LiveRuntimeDep = Annotated[object, Depends(get_live_runtime)]
 
 
 def get_repos(session_factory: SessionFactory) -> Repos:

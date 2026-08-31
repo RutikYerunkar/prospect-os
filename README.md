@@ -178,8 +178,24 @@ failures, all driven from `groundwork/fixtures/demo_pack.yaml` — 7 fictional c
 produce a genuine mix of `PASS` / `NEEDS_REVIEW` / `REJECTED` / `DUPLICATE` / `FAILED` outcomes, computed
 by the real engine, not scripted per company.
 
-Live Mode (`providers/live/`) — a real search provider and OpenAI — is **not built**. Requesting it
-returns a clean `NotImplementedError`/422, not a silent fallback.
+**Live Mode (Checkpoint G) is real OpenAI LLM execution + fixture-backed search — `LIVE LLM · FIXTURE
+SEARCH`.** `providers/live/openai_llm.py::OpenAILLMProvider` calls the real OpenAI Responses API with
+strict Structured Outputs for the same four operations Demo Mode fakes (research extraction, score
+explanation, personalization, and objective parsing), behind the identical `LLMProvider` Protocol —
+same pipeline, same scoring, same review, same `ProspectContext` isolation. Search stays
+`DemoSearchProvider`; there is no live web search yet (that's Checkpoint H), so evidence in Live Mode is
+still `DEMO_FIXTURE`, not `LIVE_FETCH`.
+
+Requesting Live Mode without a configured `OPENAI_API_KEY` and a running process-scoped
+`LiveProviderRuntime` returns a clean 422 (`ProviderNotConfigured`) — **never** a silent fallback to
+`DemoLLMProvider`. Cost/safety are hard-bounded: capped prospects per run
+(`LIVE_MAX_PROSPECTS_PER_RUN=5`), a process-wide concurrency semaphore (`LLM_MAX_CONCURRENCY=2`), a flat
+(never nested) retry loop capped at `1 + LLM_MAX_TRANSPORT_RETRIES + LLM_MAX_SCHEMA_RETRIES = 4`
+provider attempts per logical call, and a soft (never hard) per-run spending threshold that only
+enforces once real pricing is configured — unset pricing means cost is always `null`, never guessed.
+Every provider attempt (not just every step) is persisted to `llm_calls`, with full retry/repair/token/
+cost telemetry, redacted of any secret before it's written. See `docs/PROGRESS.md`'s Checkpoint G
+section for the full implementation and measurement-selected `LLM_MAX_OUTPUT_TOKENS`.
 
 ---
 
@@ -203,10 +219,25 @@ make web          # web app only, :3000
 make test         # backend test suite (cd apps/api && uv run pytest)
 make demo-reset   # wipe the local SQLite DB and recreate the schema — deterministic clean slate
 make demo         # run the full Demo Mode engine headlessly (no FastAPI, no React) and print the trace
+make live-smoke   # OPTIONAL — one real, billed OpenAI call. Requires OPENAI_API_KEY and
+                  # --i-understand-this-costs-money. Never runs as part of make test/CI.
 ```
 
 `make demo-reset && make dev` is the reliable way to get back to a rehearsal-ready state before a
 walkthrough — see `docs/DEMO_SCRIPT.md`.
+
+### Upgrading an existing local checkout past Checkpoint G
+
+Checkpoint G added a column (`runs.provider_profile`) and a table (`llm_calls`) to the schema.
+`create_all()` only creates *missing* tables — it never alters an existing one to add a new column —
+so a local `groundwork.db` created before Checkpoint G will make the API crash on the first run with a
+`sqlite3.OperationalError: table runs has no column named provider_profile`.
+
+**Fix: run `make demo-reset` once** after pulling Checkpoint G (or any change to `models/tables.py`
+going forward). This deletes and recreates the local SQLite file — nothing else is affected, and
+nothing in this repo needs your old local runs to survive; it's designed to be resettable in under a
+second. `make live-smoke` checks for this automatically and refuses (before making any paid API call)
+with a message telling you to reset, rather than a raw stack trace mid-run.
 
 ---
 
@@ -216,7 +247,9 @@ walkthrough — see `docs/DEMO_SCRIPT.md`.
 |---|---|
 | Orchestrator, scoring, review, dedupe, grounding | Real code, real arithmetic, unit-tested |
 | Evidence, signals, scores, contacts, outreach, review verdicts on screen | Computed live from fixture evidence by the real engine — nothing precomputed |
-| Search results, LLM extraction | **Simulated** — `providers/demo/` implementations reading `demo_pack.yaml`, no network call |
+| Search results (both Demo and Live Mode) | **Simulated** — `providers/demo/` implementations reading `demo_pack.yaml`, no network call. Live web search is Checkpoint H, not built. |
+| LLM extraction/explanation/personalization in Demo Mode | **Simulated** — deterministic templating, no network call |
+| LLM extraction/explanation/personalization in Live Mode | **Real** — the actual OpenAI API, real tokens, real (optional) cost, persisted per-attempt in `llm_calls` |
 | Outbound email / LinkedIn / CRM | **Does not exist.** Approve/reject is a state transition in an audit table; there is no provider wired in to send anything |
 | SQLite, single process, `asyncio` fan-out | Real, and intentionally the right choice at this scale (see below) |
 
@@ -248,7 +281,9 @@ built the way a distributed system would need it to work anyway — not because 
 apps/api/groundwork/
   domain/        pure — scoring, dedupe, grounding, review. No I/O, no provider/repo imports.
   engine/        context, step, pipeline, runner — the isolation + concurrency + retry machinery.
-  providers/     LLMProvider / SearchProvider Protocols; demo/ implementation (live/ is P1).
+  providers/     LLMProvider / SearchProvider Protocols; demo/ (Checkpoints B–F) and live/ (Checkpoint G,
+                 real OpenAI LLM + fixture search) implementations.
+  prompts/       Real prompts + typed inputs for the four Live LLM operations (Checkpoint G).
   api/           FastAPI routers, service layer, evaluation metrics.
   models/        Pydantic schemas + SQLAlchemy tables.
   fixtures/      demo_pack.yaml — the 7-company deterministic evidence pack.

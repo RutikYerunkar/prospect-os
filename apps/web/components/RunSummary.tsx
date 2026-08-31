@@ -78,7 +78,16 @@ export function RunSummary({
           <span title={`raw backend status: ${run.status}`}>
             <Badge tone={RUN_STATUS_TONE[run.status] ?? "neutral"}>{formatRunStatus(run.status)}</Badge>
           </span>
-          <Badge tone="indigo">{run.mode.toUpperCase()}</Badge>
+          {run.mode === "live" ? (
+            <span title={run.provider_profile?.model ? `model: ${run.provider_profile.model}` : undefined}>
+              <Badge tone="indigo">
+                LIVE LLM · FIXTURE SEARCH
+                {run.provider_profile?.model ? ` · ${run.provider_profile.model}` : ""}
+              </Badge>
+            </span>
+          ) : (
+            <Badge tone="indigo">DEMO</Badge>
+          )}
           {!RUN_TERMINAL_STATUSES.has(run.status) && (
             <Badge tone={CONNECTION_TONE[connection]}>{CONNECTION_LABEL[connection]}</Badge>
           )}

@@ -60,8 +60,9 @@ export interface PlaySpec {
 export interface PlayCreateRequest {
   objective: string;
   icp_overrides?: Record<string, unknown>;
-  mode?: "demo";
+  mode?: Mode;
   target_count?: number;
+  use_live_objective_parser?: boolean;
 }
 
 export interface RunSummary {
@@ -81,14 +82,34 @@ export interface PlayResponse {
   icp_spec: PlaySpec;
   mode: Mode;
   created_at: string;
+  parse_source: "llm" | "deterministic";
   runs: RunSummary[];
 }
 
 // --- runs ---
 
 export interface RunCreateRequest {
-  mode?: "demo";
+  mode?: Mode;
   seed?: number;
+}
+
+export interface ProviderProfile {
+  mode: Mode;
+  llm_provider: string;
+  model: string;
+  reasoning_effort: string | null;
+  prompt_versions: Record<string, string>;
+  search_provider: string;
+  synthetic_search: boolean;
+  evidence_origin: string;
+  llm_max_output_tokens: number | null;
+  llm_max_transport_retries: number | null;
+  llm_max_schema_retries: number | null;
+  live_max_prospects_per_run: number | null;
+  soft_budget_usd: number | null;
+  soft_budget_enforceable: boolean;
+  pricing_configured: boolean;
+  deterministic: boolean;
 }
 
 export interface RunCreateResponse {
@@ -108,6 +129,9 @@ export interface RunResponse {
   finished_at: string | null;
   duration_ms: number | null;
   error: string | null;
+  // Empty object `{}` until the run's mode is known to populate it fully —
+  // never assume every field is present.
+  provider_profile: Partial<ProviderProfile>;
 }
 
 // --- prospects ---
@@ -351,12 +375,34 @@ export interface GuardrailMetric {
   failed_prospect_ids: string[];
 }
 
+export interface LLMUsageByOperation {
+  attempts: number;
+  tokens_in: number;
+  tokens_out: number;
+}
+
+export interface LLMUsage {
+  logical_calls: number;
+  provider_attempts: number;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_total: number;
+  reasoning_tokens: number | null;
+  estimated_cost_usd: number | null;
+  by_operation: Record<string, LLMUsageByOperation>;
+  by_status: Record<string, number>;
+  transport_retries: number;
+  schema_repairs: number;
+  budget_tripped: boolean;
+}
+
 export interface RunEvaluation {
   run_id: string;
   volume: VolumeMetrics;
   quality: QualityMetrics;
   reliability: ReliabilityMetrics;
   guardrails: GuardrailMetric[];
+  llm_usage: LLMUsage;
 }
 
 // --- settings ---
@@ -366,8 +412,27 @@ export interface ProviderInfo {
   configured: boolean;
 }
 
+export interface LiveAvailability {
+  available: boolean;
+  model: string;
+  reasoning_effort: string | null;
+  prompt_versions: Record<string, string>;
+  search_provider: string;
+  synthetic_search: boolean;
+  live_max_prospects_per_run: number;
+  llm_max_output_tokens: number;
+  llm_max_transport_retries: number;
+  llm_max_schema_retries: number;
+  llm_call_deadline_s: number;
+  live_step_timeout_s: number;
+  pricing_configured: boolean;
+  soft_budget_usd: number | null;
+  soft_budget_enforceable: boolean;
+}
+
 export interface ProviderSettingsResponse {
   mode: Mode;
   llm: ProviderInfo;
   search: ProviderInfo;
+  live: LiveAvailability;
 }

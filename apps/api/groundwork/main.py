@@ -16,7 +16,23 @@ async def lifespan(app: FastAPI):
     # Honest crash recovery (§17): any run left RUNNING from a prior process
     # is marked INTERRUPTED rather than silently left looking active.
     await RunRepository(SessionLocal).sweep_interrupted()
+
+    # PROCESS-scoped Live Mode runtime (Checkpoint G Phase 5): created once
+    # here, closed once at shutdown, never as a hidden module-global. Only
+    # constructed when an OpenAI key is actually configured — a public
+    # clone with no key runs Demo Mode with zero live-provider machinery
+    # touched. Multiple concurrent runs share this one `AsyncOpenAI` client
+    # and its `asyncio.Semaphore(LLM_MAX_CONCURRENCY)`.
+    app.state.live_runtime = None
+    if settings.openai_api_key:
+        from groundwork.providers.live.runtime import LiveProviderRuntime
+
+        app.state.live_runtime = LiveProviderRuntime.create(settings)
+
     yield
+
+    if app.state.live_runtime is not None:
+        await app.state.live_runtime.close()
     await engine.dispose()
 
 

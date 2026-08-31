@@ -15,8 +15,20 @@ async def test_create_play_builds_play_spec_from_objective_and_overrides(client)
     assert play["runs"] == []
 
 
-async def test_create_play_rejects_live_mode(client) -> None:
+async def test_create_play_accepts_live_mode_without_live_objective_parser(client) -> None:
+    # Checkpoint G: Play creation itself never requires live credentials
+    # unless the caller explicitly asks for the live objective parser.
+    # Objective parsing stays deterministic here (parse_source reflects it).
     r = await client.post("/api/plays", json={"objective": "test", "mode": "live"})
+    assert r.status_code == 201
+    assert r.json()["parse_source"] == "deterministic"
+
+
+async def test_start_run_rejects_live_mode_without_configured_runtime(client) -> None:
+    # No OPENAI_API_KEY is configured in tests, so `app.state.live_runtime`
+    # is None — Live Mode must 422 cleanly here, never fall back to Demo.
+    play = await create_play(client)
+    r = await client.post(f"/api/plays/{play['id']}/runs", json={"mode": "live"})
     assert r.status_code == 422
 
 
