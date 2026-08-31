@@ -13,16 +13,17 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **A — Foundation** | `6fafaa2414b2f3b75f8d0e9f2c36fe4003da9d09` (merged to `master` via PR #1) | Repo scaffolding, project-memory docs, FastAPI + Next.js health-check loop, CORS. |
 | **B — Core engine** | `5edff10` (merged to `master` via PR #2) | Domain layer, fixtures, engine, demo providers, tracing/events, tests, headless demo. |
 | **C — API / SSE** | `21a615e` (merged to `master` via PR #3) | FastAPI routers for every P0 endpoint, async run launch (202), resumable SSE over `run_events`, computed-on-read evaluation metrics, approve/reject as state transitions, tests. |
-| **D — Hero product UI** | *this commit* (branch `claude/checkpoint-d-hero-ui-tit3fz`) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
+| **D — Hero product UI** | `aa41f97` (merged to `master` via PR #4) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
+| **E — Depth UI** | *this commit* (branch `claude/prospect-detail-checkpoint-e-tqmiu5`) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
 
 ---
 
 ## Current checkpoint
 
-**D — Hero product UI.** Status: **complete**, ready to stop per the checkpoint protocol.
+**E — Depth UI.** Status: **complete**, ready to stop per the checkpoint protocol.
 
-Next session should start **Checkpoint E — Depth UI** (see `docs/IMPLEMENTATION_PLAN.md` §30), after
-reading `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file.
+Next session should start **Checkpoint F — Quality + hardening** (see `docs/IMPLEMENTATION_PLAN.md`
+§30), after reading `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file.
 
 ---
 
@@ -288,6 +289,80 @@ at once, which is the whole point of the board per §4's demo narrative.
 
 ---
 
+## What Checkpoint E added
+
+Frontend only — zero backend files touched (`git status`/`git diff --stat` on this branch shows only
+`apps/web/{app/prospects/[id]/page.tsx,lib/{api,format,types}.ts}` modified and seven new
+`components/*.tsx` files). The full `ProspectAggregate` served by `GET /api/prospects/{id}`
+(Checkpoint C) needed nothing new on the backend — every section below reads straight off it.
+
+**`apps/web/lib/types.ts`** — hand-mirrored wire types for the aggregate: `EvidenceItem`, `SignalItem`,
+`DimensionScore`, `ScoreModifier`, `ProspectScore`, `ProspectContact`, `ClaimMapEntry`,
+`OutreachDraft`, `ReviewCheck`/`ReviewResult`, `AgentTaskTrace`, `ApprovalInfo`, `ProspectCompany`,
+`ProspectAggregate`. Verified field-by-field against `groundwork/api/routers/prospects.py`'s
+`_evidence_dict`/`_signal_dict`/`_score_dict`/`_contact_dict`/`_draft_dict`/`_review_dict`/`_task_dict`
+and the underlying domain models (`DimensionScore`, `ScoreModifier`, `ReviewCheck` in
+`groundwork/models/schemas.py`) rather than guessed — e.g. `dimensions`/`modifiers`/`checks`/
+`claim_map` are `model_dump(mode="json")` lists of those exact shapes (confirmed in
+`repositories/prospect_data.py`).
+
+**`apps/web/lib/api.ts`** — `getProspect`, `approveProspect`, `rejectProspect` typed wrappers over
+`GET/POST /api/prospects/{id}[/approve|reject]`, following the existing `apiGet`/`apiPost` pattern.
+
+**`apps/web/lib/format.ts`** — added `formatDateOnly` for signal `occurred_at`.
+
+**`apps/web/components/`** (seven new files, per the checkpoint's own file list):
+- `ScoreBreakdown.tsx` — the arithmetic table (dimension/raw/weight/contribution/evidence/support),
+  a Σ row, and a reconciliation line computed **in the component itself** from the dimension array
+  (`Math.round(Σ contribution × 100)`) — not trusted from a separate backend field — so the "72 not
+  65" claim is checkable against the same numbers the table shows. When `score.disqualified` and the
+  rubric total differs from the displayed `overall`, it renders the cap explicitly
+  (`rubric total X → capped to Y`) instead of silently showing only the capped number. Confidence is
+  a separate `Stat`, never blended into the score.
+- `EvidenceCard.tsx` — origin decides the render, not a convention: only `origin === "LIVE_FETCH" &&
+  source_url` ever produces a clickable `<a>`; `DEMO_FIXTURE` renders "Synthetic evidence · demo
+  fixture", `LLM_INFERENCE` renders "Model inference · unsourced" with a dashed border so inferred
+  assertions read differently from sourced-but-synthetic evidence, per the task's explicit
+  requirement.
+- `SignalList.tsx` — groups signals sharing an identical `(type, summary)` pair into one row with a
+  `×N` badge. This is a rendering-only decision, not a data change: research extraction can produce
+  several structured facts (e.g. three separate GTM `HiringRole` entries) from one source sentence,
+  each persisted as its own `Signal` row with the same summary text — confirmed real via
+  `GET /api/prospects/{id}` on Northwind Labs (three identical `HIRING` rows, one `TECH` claim ×3).
+  The ICP score's own `hiring_signal`/`tech_fit` dimensions already dedupe evidence ids via a `set()`
+  in `domain/scoring.py`, so this UI grouping doesn't change what's scored — it just stops the page
+  from showing three copy-pasted lines. Ungrounded signals (`evidence_ids: []`, e.g. Riverbend's
+  demoted funding claim) render a `"ungrounded — demoted, does not score"` badge instead of a fabricated
+  evidence link.
+- `ContactPanel.tsx` — `UNAVAILABLE` renders explicit copy ("intentional outcome, not a missing
+  field") rather than empty space that could read as a bug.
+- `OutreachViewer.tsx` — renders every draft sorted by `step_index`, with its `claim_map` entries and
+  the evidence titles each grounded claim resolves to (or an `unsupported` badge if a claim carries no
+  evidence ids — the same condition `claim_grounding` checks).
+- `ReviewPanel.tsx` — all seven checks always rendered, including passes; verdict badge up top.
+- `TraceTable.tsx` — one row per `agent_tasks` attempt, sorted by `started_at`; a retry sequence
+  (`RETRY` → `RETRY` → `FAILED`, or `RETRY` → `OK`) stays as separate rows by construction, since the
+  backend already records one row per attempt — nothing here collapses them. A small inline bar scales
+  each row's duration against the max duration in that prospect's trace.
+
+**`apps/web/app/prospects/[id]/page.tsx`** — replaces the Checkpoint D placeholder. Header (company,
+domain, status badge, score/confidence/contact-verification at a glance, back-to-run link,
+duplicate-of link for `DUPLICATE`, pipeline error text for `FAILED`), then the seven sections in the
+task's suggested order (score → signals+evidence → contact → outreach → review → **approval** →
+trace — approval placed after review since a decision naturally follows the checks, not one of the
+seven content sections itself). `ApprovalBar` calls `approveProspect`/`rejectProspect` and sets page
+state directly from the POST response (the aggregate the backend just recomputed) rather than
+optimistically mutating — satisfies "update the UI from the authoritative backend response" without a
+second round-trip. Buttons disable/disappear once `approval.state !== "PENDING"` or the prospect's
+engine `status` isn't in `{PASS, NEEDS_REVIEW, REJECTED}`, mirroring the backend's own
+`_DECIDABLE_STATUSES` 409 boundary client-side so an invalid transition is never offered, not just
+rejected after the fact. Reject requires a non-empty reason (matches the backend's `min_length=1`).
+Loading/error states follow `app/runs/[id]/page.tsx`'s exact pattern (effect-only fetch with a
+`cancelled` guard, not a `useCallback`-wrapped function called synchronously in the effect body — the
+latter trips `react-hooks/set-state-in-effect`, hit and fixed during this checkpoint).
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -393,6 +468,77 @@ running the web app on a different port 400s on CORS preflight, confirmed the ha
    clientWidth` confirmed via `page.evaluate` at 1280px.
 8. Row navigation: clicking a `ProspectRow` calls `router.push('/prospects/{id}')` with the real
    `ProspectSummary.id` from the reconciled board state, not a client-generated or stale id.
+
+---
+
+**Checkpoint E verification** — no new backend tests (no backend files changed); no new frontend
+automated tests (matches Checkpoint D's precedent — `apps/web/package.json` still has no test runner
+configured). Verified by build/lint gates plus headless-Chromium (`playwright`, pre-installed in this
+environment) walkthroughs against the real running stack (`uv run uvicorn ... --port 8010` +
+`NEXT_PUBLIC_API_URL=http://localhost:8010 pnpm dev --port 3000`).
+
+1. `cd apps/api && uv run pytest` — **63/63 still passing**, confirming zero backend regressions
+   (`git status`/`git diff --stat` show no `apps/api/**` diff for this checkpoint).
+2. `cd apps/web && pnpm lint` — clean. `pnpm build` — compiles, typechecks, prerenders
+   `/`/`/plays/new` static, `/prospects/[id]`/`/runs/[id]` dynamic, no errors.
+3. Ran a real Demo Mode play + run against the live API (`POST /api/plays` with the fixture pack's own
+   ICP overrides, `POST /api/plays/{id}/runs`) → reached `PARTIAL` with the fixture's documented spread
+   (`PASS:2 NEEDS_REVIEW:2 DUPLICATE:1 REJECTED:1 FAILED:1`).
+4. Navigated Run Detail → clicked the Northwind Labs row → landed on
+   `/prospects/{northwind_id}`, confirming Checkpoint D's board-row navigation target (unmodified) is
+   now real content instead of the placeholder.
+5. **Score reconciliation, read off the rendered page, not asserted**: Northwind Labs — 8 dimension
+   contributions (`+20.0 +15.0 +10.7 +13.8 +10.0 +10.0 +8.5 +4.4`) sum to `+92.4` → rounds to **92**,
+   matching the displayed ICP score of **92**. Ferrous Grid (`NEEDS_REVIEW`, three dimensions
+   `unsupported`) — contributions sum to **58**, matching. Cobalt Retail Systems (`REJECTED`, hard
+   disqualifier on `retail_pos`) — rubric total is **69** but the displayed score is **25**; the
+   modifiers panel shows `hard_disqualifier — industry 'retail_pos' is on the exclude list` with
+   `overall capped from 69 to 25`, and the reconciliation line correctly switches to `rubric total 69
+   → capped to 25 by the modifier above` instead of asserting the two numbers match — confirmed
+   directly via the API response (`modifiers[0].detail == "overall capped from 69 to 25"`), not just
+   visually.
+6. Evidence provenance, verified per item: every Northwind/Riverbend/Ferrous Grid evidence card shows
+   "Synthetic evidence · demo fixture" with **no** `<a href>` present in the rendered DOM for any
+   `DEMO_FIXTURE` row (checked via Playwright's rendered output, not just the source) — the origin
+   check in `EvidenceCard.tsx` gates on `origin === "LIVE_FETCH" && source_url`, so no fixture row can
+   ever produce a link regardless of what's in `source_url` (which is `null` for every fixture row
+   per the backend's own `_no_fake_sources` validator).
+7. Outreach + review use actual persisted records: Northwind Labs' draft body cites
+   "Northwind Labs raised a $42M Series B" and "...GTM hiring surge", both resolving through
+   `claim_map` to real evidence titles; its Review panel shows all seven checks passing. Riverbend
+   Analytics' Review panel shows `score_support` and `confidence_floor` both `FAIL` (soft), consistent
+   with its `NEEDS_REVIEW` verdict and its demoted funding signal (rendered with an "ungrounded —
+   demoted, does not score" badge in Signals).
+8. Approve/reject, exercised live end-to-end (not simulated): approved Northwind Labs
+   (`POST /prospects/{id}/approve`) — page updated to `Decision APPROVED · by demo_user · <timestamp>`,
+   Approve/Reject buttons disappeared; confirmed via a **separate** `curl
+   /api/prospects/{id}` that `approval.state == "APPROVED"` and the engine-owned `status` column was
+   still `PASS` (untouched, per the Checkpoint C invariant). Rejected Riverbend Analytics with a typed
+   reason — same pattern, `approval.reason` persisted verbatim. Reloaded both pages fresh: decisions
+   persisted (read from the backend, not local state). Confirmed `DUPLICATE`/`FAILED` prospects render
+   **no** Approve/Reject controls at all (client-side mirrors the backend's `_DECIDABLE_STATUSES` 409
+   gate rather than only reacting to a failed request).
+9. Retry attempts render as independent rows: Northwind Labs' trace shows
+   `research · attempt 1 · RETRY · ProviderTimeout: scripted ProviderTimeout for northwind-labs/rese…`
+   immediately followed by `research · attempt 2 · OK` — exactly the sequence the task calls out.
+   Quarry Systems (`FAILED`) shows all three exhausted attempts (`RETRY`, `RETRY`, `FAILED`), each with
+   its own `ProviderUnavailable` message, none collapsed into a single line.
+10. Opened all required degraded states and confirmed graceful rendering, no crash, no broken-looking
+    layout: `NEEDS_REVIEW` (Riverbend, Ferrous Grid), `DUPLICATE` (Northwind Labs Inc. — empty
+    Score/Evidence/Signals/Contact/Outreach/Review panels each show an explicit "did not run" /
+    "stopped before" message, plus a link to the earlier prospect it collided with), `FAILED` (Quarry
+    Systems — same degraded-panel treatment, plus the pipeline error surfaced in the header),
+    `UNAVAILABLE` contact (Ferrous Grid — explicit "intentional outcome, not a missing field" copy,
+    not blank space).
+11. Viewport check at 1440×900 on all seven prospects in this run:
+    `document.documentElement.scrollWidth === document.documentElement.clientWidth` (1440 vs 1440,
+    zero overflow) on every one, verified via Playwright, not just visually.
+12. No browser console errors or page errors across any of the pages visited during this walkthrough
+    (approve/reject flows included).
+
+Two screenshots were captured during this walkthrough (PASS full detail — Northwind Labs; FAILED
+detail — Quarry Systems) and shown to the user in-session. Per instructions, they were not committed
+to the repository.
 
 ---
 
@@ -508,22 +654,24 @@ running the web app on a different port 400s on CORS preflight, confirmed the ha
 
 ## Next task
 
-**Checkpoint E — Depth UI** (`docs/IMPLEMENTATION_PLAN.md` §30, budget 60m). Files:
-`app/prospects/[id]/page.tsx` (replaces the Checkpoint D placeholder entirely) and `components/
-{ScoreBreakdown,EvidenceCard,SignalList,ContactPanel,OutreachViewer,ReviewPanel,TraceTable}.tsx`. The
-full aggregate is already served by `GET /prospects/{id}` (`ProspectAggregate` in
-`groundwork/api/schemas.py` — company, evidence, signals, score+dimensions+modifiers, contact, drafts,
-review, `agent_tasks` trace, approval state); nothing new needed on the backend. Reuse
-`components/ui/*` from this checkpoint rather than inventing parallel primitives — `Panel`/`Card`/
-`Badge`/`Table`/`Tabs` already carry the visual language. Approve/reject wire to `POST
-/prospects/{id}/approve|reject` (already implemented and tested in Checkpoint C) and should refetch the
-aggregate afterward rather than optimistically mutating local state, matching this checkpoint's
-"REST is authoritative" pattern in `useRunStream.ts`. Acceptance is demo checklist items 6–12 (§32):
-the score table's contributions sum to the displayed overall, no synthetic evidence renders a clickable
-external link (enforce this in `EvidenceCard`, not just trust the backend validator), all seven review
-checks render including passes, the trace table shows retries, approve/reject transitions state and
-visibly sends nothing external. **Do not build**: outreach editing, regeneration, the graphical
-waterfall.
+**Checkpoint F — Quality + hardening** (`docs/IMPLEMENTATION_PLAN.md` §30, budget 45m). Build the
+Quality tab on Run Detail (`MetricGrid` + `GuardrailPanel`, each metric with a computation tooltip) —
+`GET /runs/{id}/evaluation` already exists and is tested (Checkpoint C); the Run Detail page currently
+renders a placeholder string in that tab (`app/runs/[id]/page.tsx`, the `tab === "quality"` branch) —
+replace it, don't restructure the Board tab beside it. Also in scope: `test_run_integration.py`
+already exists (Checkpoint B) so re-verify rather than rewrite; `make demo-reset`; loading/empty/error
+states on all three screens (New Play, Run Detail, Prospect Detail — Prospect Detail's are largely
+done from this checkpoint, see below); `README.md`; `docs/DEMO_SCRIPT.md` filled with the §4 narrative
+and §32 checklist; one full rehearsal; a 90-second fallback screen recording. Acceptance: fresh clone
+→ `make dev` → the full §32 checklist passes; full test suite green; every Quality-tab number
+reconciles by hand against the run; recording saved.
+
+Prospect Detail's own loading/error states (this checkpoint): "Loading prospect…" while the aggregate
+fetch is in flight, a dedicated error card with the RFC-7807 detail on a failed/missing id — matches
+the pattern `app/runs/[id]/page.tsx` already uses. Empty/degraded states per section (score not
+computed, no evidence, contact not reached, etc.) are also already done — see "What Checkpoint E
+added" above — so Checkpoint F's "empty/error states on all three screens" item is really about New
+Play and Run Detail, if either still needs one.
 
 ---
 
@@ -564,3 +712,11 @@ waterfall.
   both hit and fixed during this checkpoint's own testing); `lib/constants.ts::MAX_CONCURRENT_PROSPECTS`
   should track `config.py` by hand until/unless a future checkpoint exposes it via `GET
   /settings/providers`, not be silently guessed at a different value.
+- **Checkpoint E's own do-not-touch:** `EvidenceCard.tsx`'s origin gate
+  (`origin === "LIVE_FETCH" && source_url`) is the frontend half of the §12 provenance invariant —
+  don't relax it to show a link for any other origin, even if a future fixture accidentally carries a
+  `source_url`. `SignalList.tsx`'s `(type, summary)` grouping is display-only (a `×N` badge); if a
+  future checkpoint changes what research extraction persists per fact, re-verify this grouping still
+  makes sense rather than assuming it does. `ApprovalBar`'s client-side decidable-status gate
+  (`{PASS, NEEDS_REVIEW, REJECTED}`) must stay in sync with `routers/prospects.py`'s
+  `_DECIDABLE_STATUSES` — if that set changes on the backend, update both.

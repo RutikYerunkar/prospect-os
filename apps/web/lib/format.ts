@@ -37,3 +37,8 @@ export function formatScore(score: number | null | undefined): string {
 export function formatConfidence(confidence: number | null | undefined): string {
   return confidence === null || confidence === undefined ? "—" : `${Math.round(confidence * 100)}%`;
 }
+
+export function formatDateOnly(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
