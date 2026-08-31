@@ -75,3 +75,12 @@ class TaskRepository:
                 select(AgentTaskRow).where(AgentTaskRow.run_id == run_id).order_by(AgentTaskRow.started_at)
             )
             return list(result.scalars())
+
+    async def for_prospect(self, prospect_id: str) -> list[AgentTaskRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(AgentTaskRow)
+                .where(AgentTaskRow.prospect_id == prospect_id)
+                .order_by(AgentTaskRow.started_at)
+            )
+            return list(result.scalars())

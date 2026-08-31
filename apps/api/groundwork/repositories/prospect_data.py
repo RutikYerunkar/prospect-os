@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
+
 from groundwork.models.schemas import Contact, Evidence, ICPScore, OutreachDraft, ReviewResult, Signal
 from groundwork.models.tables import (
     ContactRow,
     EvidenceRow,
     ICPScoreRow,
     OutreachDraftRow,
+    ProspectRow,
     ReviewResultRow,
     SignalRow,
 )
@@ -126,3 +129,105 @@ class ProspectDataRepository:
                 )
             )
             await session.commit()
+
+    # --- reads, single prospect (API aggregate) ---
+
+    async def get_evidence(self, prospect_id: str) -> list[EvidenceRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EvidenceRow).where(EvidenceRow.prospect_id == prospect_id)
+            )
+            return list(result.scalars())
+
+    async def get_signals(self, prospect_id: str) -> list[SignalRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(SignalRow).where(SignalRow.prospect_id == prospect_id)
+            )
+            return list(result.scalars())
+
+    async def get_score(self, prospect_id: str) -> ICPScoreRow | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ICPScoreRow).where(ICPScoreRow.prospect_id == prospect_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_contact(self, prospect_id: str) -> ContactRow | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ContactRow).where(ContactRow.prospect_id == prospect_id).order_by(ContactRow.id.desc())
+            )
+            return result.scalars().first()
+
+    async def get_drafts(self, prospect_id: str) -> list[OutreachDraftRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(OutreachDraftRow).where(OutreachDraftRow.prospect_id == prospect_id)
+            )
+            return list(result.scalars())
+
+    async def get_review(self, prospect_id: str) -> ReviewResultRow | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ReviewResultRow)
+                .where(ReviewResultRow.prospect_id == prospect_id)
+                .order_by(ReviewResultRow.reviewed_at.desc())
+            )
+            return result.scalars().first()
+
+    # --- reads, batched across a whole run (evaluation metrics) ---
+
+    async def evidence_for_run(self, run_id: str) -> list[EvidenceRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EvidenceRow).join(ProspectRow, EvidenceRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())
+
+    async def signals_for_run(self, run_id: str) -> list[SignalRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(SignalRow).join(ProspectRow, SignalRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())
+
+    async def scores_for_run(self, run_id: str) -> list[ICPScoreRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ICPScoreRow).join(ProspectRow, ICPScoreRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())
+
+    async def contacts_for_run(self, run_id: str) -> list[ContactRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ContactRow).join(ProspectRow, ContactRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())
+
+    async def drafts_for_run(self, run_id: str) -> list[OutreachDraftRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(OutreachDraftRow).join(ProspectRow, OutreachDraftRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())
+
+    async def reviews_for_run(self, run_id: str) -> list[ReviewResultRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ReviewResultRow).join(ProspectRow, ReviewResultRow.prospect_id == ProspectRow.id).where(
+                    ProspectRow.run_id == run_id
+                )
+            )
+            return list(result.scalars())

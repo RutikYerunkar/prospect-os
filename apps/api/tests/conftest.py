@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 
+import httpx
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from groundwork.api.deps import get_session_factory
+from groundwork.main import app
 from groundwork.models.tables import Base
 
 
@@ -39,3 +42,17 @@ async def session_factory():
             os.unlink(path + suffix)
         except FileNotFoundError:
             pass
+
+
+@pytest_asyncio.fixture
+async def client(session_factory):
+    """An httpx client against the real FastAPI app, retargeted at the
+    isolated per-test SQLite file above via dependency override — no app
+    lifespan (so no touching the real `groundwork.db`), and background
+    `execute_run` tasks launched by a request run against this same DB.
+    """
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()

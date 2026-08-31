@@ -50,3 +50,10 @@ class RunRepository:
     async def get(self, run_id: str) -> RunRow | None:
         async with self._session_factory() as session:
             return await session.get(RunRow, run_id)
+
+    async def for_play(self, play_id: str) -> list[RunRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(RunRow).where(RunRow.play_id == play_id).order_by(RunRow.started_at.desc())
+            )
+            return list(result.scalars())
