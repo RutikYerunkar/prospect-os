@@ -61,6 +61,21 @@ class Settings(BaseSettings):
     # budget enforcement entirely (no threshold configured).
     live_run_soft_budget_usd: float | None = None
 
+    # --- H1 Phase 14: hard search bounds for H2's live search adapter ---
+    # Defined now, not exercised against a real vendor in H1 — no live
+    # search happens in this checkpoint at all. `domain/query_plan.py` and
+    # `domain/discovery.py` are offline-tested against these bounds; H2
+    # wires an actual `TavilySearchProvider` that must respect them.
+    live_max_plan_queries_per_run: int = 4
+    live_max_domain_resolution_queries_per_run: int = 8
+    live_max_source_queries_per_prospect: int = 3
+    live_max_search_calls_per_run: int = 32
+    search_max_transport_retries: int = 1
+    live_max_result_occurrences_per_prospect: int = 15
+    live_max_sources_per_prospect: int = 5
+    live_max_extract_calls_per_run: int = 25
+    live_max_search_results_per_query: int = 10
+
     @field_validator(
         "openai_price_input_usd_per_mtok", "openai_price_output_usd_per_mtok", "live_run_soft_budget_usd",
         mode="before",

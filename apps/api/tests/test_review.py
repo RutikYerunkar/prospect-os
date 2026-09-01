@@ -98,6 +98,57 @@ def test_cross_prospect_leak_detects_other_company_name() -> None:
     assert check.passed is False
 
 
+def test_cross_prospect_leak_detects_other_company_domain() -> None:
+    draft = _draft(body="See more at initech.com for context.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"initech.com"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is False
+
+
+# --- H1 Bug B regression: real short company names must not hard-fail
+# merely because their character sequence occurs inside an unrelated word.
+# The pre-H1 implementation used a plain substring check
+# (`identifier.lower() in text`), which is a false positive machine —
+# "Ramp" matches inside "cramping", "Box" matches inside "mailbox", "Arc"
+# matches inside "March". `_identifier_pattern`'s word-boundary regex must
+# not match any of these while still catching the real reference.
+
+
+def test_cross_prospect_leak_short_name_no_false_positive_ramp() -> None:
+    draft = _draft(body="Congrats on the momentum — the team is really cramping our style.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"Ramp"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is True
+
+
+def test_cross_prospect_leak_short_name_no_false_positive_box() -> None:
+    draft = _draft(body="Ping me and I'll check my mailbox for the reply.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"Box"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is True
+
+
+def test_cross_prospect_leak_short_name_no_false_positive_arc() -> None:
+    draft = _draft(body="We spoke back in March about this opportunity.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"Arc"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is True
+
+
+def test_cross_prospect_leak_short_name_real_reference_still_caught() -> None:
+    draft = _draft(body="Unlike Ramp, Acme raised a Series B this quarter.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"Ramp"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is False
+
+
+def test_cross_prospect_leak_case_insensitive_word_boundary() -> None:
+    draft = _draft(body="Our friends over at BOX have a similar model.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft], other_company_identifiers={"Box"}))
+    check = next(c for c in result.checks if c.id == "cross_prospect_leak")
+    assert check.passed is False
+
+
 def test_no_placeholders_detects_template_tokens() -> None:
     draft = _draft(body="Hi {{first_name}}, congrats on the round.", claim_map=[])
     result = run_checks(**_base_kwargs(drafts=[draft]))

@@ -12,6 +12,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "pyyaml>=6.0",
     "openai==3.6.0",
+    "tldextract>=5.3.2",
 ]
 
 [dependency-groups]

@@ -19,7 +19,17 @@ from datetime import date, datetime, timedelta, timezone
 from pydantic import BaseModel
 
 from groundwork.models.llm_io import PersonalizationOutput, ResearchExtractionOutput, ScoreExplanationOutput
-from groundwork.models.schemas import ClaimMapEntry, FundingEvent, HiringRole, LeadershipCandidate, ResearchFacts, TechMention
+from groundwork.models.schemas import (
+    ClaimMapEntry,
+    CompanyProfileFacts,
+    EmployeeCountProfileFact,
+    FundingEvent,
+    HiringRole,
+    IndustryProfileFact,
+    LeadershipCandidate,
+    ResearchFacts,
+    TechMention,
+)
 from groundwork.providers.base import (
     FAILURE_TYPES,
     LLMAttemptKind,
@@ -176,8 +186,41 @@ class DemoLLMProvider:
             hiring_roles=hiring_roles,
             tech_mentions=tech_mentions,
             leadership=leadership,
+            profile=self._profile(fixture),
         )
         return ResearchExtractionOutput(facts=facts)
+
+    def _profile(self, fixture: FixtureCompany) -> CompanyProfileFacts:
+        """H1 Phase 8 — Demo Mode's profile facts are derived from the
+        fixture's own `industry`/`employee_count` fields (its authored
+        "ground truth"), citing whichever existing source ref the fixture
+        names, and pass through the identical deterministic grounding path
+        (`engine/steps/signals.py`) any other fact does — nothing here
+        bypasses grounding; this is simulating what a real extraction
+        would find, not a scoring shortcut. A company with no configured
+        `*_profile_source_ref` deliberately gets no fact at all, exercising
+        the UNKNOWN path.
+        """
+        industry = IndustryProfileFact()
+        if fixture.industry_profile_source_ref:
+            label = fixture.industry.replace("_", " ")
+            industry = IndustryProfileFact(
+                category=fixture.industry,
+                claim=f"{fixture.name} operates in the {label} industry.",
+                source_ref=fixture.industry_profile_source_ref,
+                evidence_ids=[],
+            )
+
+        employee_count = EmployeeCountProfileFact()
+        if fixture.employee_profile_source_ref:
+            employee_count = EmployeeCountProfileFact(
+                employee_count=fixture.employee_count,
+                claim=f"{fixture.name} has approximately {fixture.employee_count} employees.",
+                source_ref=fixture.employee_profile_source_ref,
+                evidence_ids=[],
+            )
+
+        return CompanyProfileFacts(industry=industry, employee_count=employee_count)
 
     def _personalization(self, envelope: PromptEnvelope) -> PersonalizationOutput:
         meta = envelope.metadata

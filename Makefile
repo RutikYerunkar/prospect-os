@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo live-smoke
+.PHONY: dev api web test seed demo-reset demo live-smoke search-spike
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -29,3 +29,10 @@ demo:
 # Requires OPENAI_API_KEY and explicit confirmation — see scripts/live_smoke.py.
 live-smoke:
 	cd apps/api && uv run python -m groundwork.scripts.live_smoke --i-understand-this-costs-money
+
+# H1 Phase 18 fact-finding spike ONLY — verifies the real Tavily SDK ahead
+# of a Checkpoint H2 adapter. Requires TAVILY_API_KEY, explicit confirmation,
+# and the `tavily` package installed separately (not a project dependency —
+# see scripts/search_spike.py). Never run automatically by `make test`/CI.
+search-spike:
+	cd apps/api && uv run python -m groundwork.scripts.search_spike --i-understand-this-makes-real-calls

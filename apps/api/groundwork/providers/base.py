@@ -17,7 +17,44 @@ from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
 
-from groundwork.models.schemas import CompanySeed, PlaySpec
+from groundwork.models.schemas import CompanySeed, PlaySpec, SourceDocument
+
+__all__ = [
+    "make_ctx_key",
+    "parse_ctx_key",
+    "stable_seed",
+    "digest_of",
+    "LLMOperation",
+    "LLMAttemptKind",
+    "LLMAttemptStatus",
+    "LLMAttemptTelemetry",
+    "LLMResult",
+    "ProviderError",
+    "ProviderTimeout",
+    "ProviderUnavailable",
+    "ProviderRateLimited",
+    "SchemaViolation",
+    "ProviderRefusal",
+    "ProviderOutputTruncated",
+    "ProviderContentFiltered",
+    "ProviderAuthError",
+    "ProviderNotConfigured",
+    "ProviderBudgetExceeded",
+    "FAILURE_TYPES",
+    "STEP_RETRYABLE",
+    "SourceDocument",
+    "SearchOperation",
+    "SearchAttemptKind",
+    "SearchAttemptStatus",
+    "SearchAttemptTelemetry",
+    "DiscoveryResult",
+    "DomainCandidates",
+    "SourceBundle",
+    "PromptEnvelope",
+    "LLMProvider",
+    "SearchProvider",
+    "ProviderBundle",
+]
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -220,16 +257,91 @@ FAILURE_TYPES: dict[str, type[ProviderError]] = {
 STEP_RETRYABLE: tuple[type[Exception], ...] = (ProviderTimeout, ProviderUnavailable, ProviderRateLimited)
 
 
-class SourceDocument(BaseModel):
-    """A single fetched (or, in Demo Mode, fixture-authored) source."""
+# --- Search provider contract / telemetry (H1 Phase 12) -------------------
+#
+# `SourceDocument` itself is defined in `models/schemas.py` (a pure data
+# model domain/ can import, unlike this provider-boundary module) and
+# re-exported here for every existing call site that imports it from
+# `providers.base`.
 
-    ref: str
-    title: str
-    claim: str
-    text: str
-    source_provider: str
-    signal_type: str | None = None
-    confidence: float = 0.8
+
+class SearchOperation(StrEnum):
+    DISCOVER = "discover"
+    RESOLVE_DOMAIN = "resolve_domain"
+    FETCH_SOURCES = "fetch_sources"
+
+
+class SearchAttemptKind(StrEnum):
+    INITIAL = "initial"
+    TRANSPORT_RETRY = "transport_retry"
+
+
+class SearchAttemptStatus(StrEnum):
+    OK = "OK"
+    NO_RESULTS = "NO_RESULTS"
+    TIMEOUT = "TIMEOUT"
+    RATE_LIMITED = "RATE_LIMITED"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    NOT_ATTEMPTED_BUDGET = "NOT_ATTEMPTED_BUDGET"
+
+
+class SearchAttemptTelemetry(BaseModel):
+    """One search-provider call attempt — the search-side analogue of
+    `LLMAttemptTelemetry`. `engine/search.py::call_search()` is the only
+    thing that persists these (into `search_calls`); providers only produce
+    them, exactly like the LLM boundary in `engine/llm.py`. Kept out of
+    `run_events` (H1 Phase 12) — SSE stays the resumable *progress* log,
+    not a telemetry sink.
+    """
+
+    provider: str
+    operation: SearchOperation
+    query_group_id: str
+    template_id: str | None = None
+    rendered_query: str | None = None
+    query_digest: str | None = None
+    call_group_id: str
+    attempt: int = 1
+    attempt_kind: SearchAttemptKind = SearchAttemptKind.INITIAL
+    status: SearchAttemptStatus = SearchAttemptStatus.OK
+    started_at: datetime
+    finished_at: datetime
+    latency_ms: float = 0.0
+    result_count: int = 0
+    selected_count: int = 0
+    provider_request_id: str | None = None
+    http_status: int | None = None
+    error_type: str | None = None
+    error_message: str | None = None  # redacted before this is set
+    cost_usd: float | None = None
+    chars_retrieved: int = 0
+
+
+class DiscoveryResult(BaseModel):
+    """`SearchProvider.discover()` return shape — a roster of candidate
+    companies plus the telemetry of however many provider calls it took."""
+
+    companies: list[CompanySeed]
+    telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
+
+
+class DomainCandidates(BaseModel):
+    """`SearchProvider.resolve_domain()` return shape (H2 groundwork, not
+    exercised by the H1 pipeline — no caller invokes it yet; it exists so
+    the full Phase 12 contract is offline-tested ahead of a real adapter)."""
+
+    domains: list[str]
+    telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
+
+
+class SourceBundle(BaseModel):
+    """`SearchProvider.fetch_sources()` return shape — every retrieval
+    *occurrence* this call produced (duplicates across queries included;
+    winner selection happens later, in `domain/source_identity.py`) plus
+    the telemetry of the call(s) that produced them."""
+
+    documents: list[SourceDocument]
+    telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
 
 
 class PromptEnvelope(BaseModel):
@@ -251,11 +363,20 @@ class LLMProvider(Protocol):
 
 
 class SearchProvider(Protocol):
+    """Provider-neutral search contract (H1 Phase 12). No concrete Tavily/Exa
+    adapter exists yet — `DemoSearchProvider` (Phase 13) is the only
+    implementation in this codebase. Every method returns its documents/
+    domains alongside the telemetry of however many provider calls it took;
+    `engine/search.py::call_search()` is the only thing that persists that
+    telemetry."""
+
     name: str
 
-    async def discover(self, spec: PlaySpec, limit: int) -> list[CompanySeed]: ...
+    async def discover(self, spec: PlaySpec, limit: int) -> DiscoveryResult: ...
 
-    async def fetch_sources(self, company: CompanySeed, *, ctx_key: str) -> list[SourceDocument]: ...
+    async def resolve_domain(self, company_name: str, *, ctx_key: str) -> DomainCandidates: ...
+
+    async def fetch_sources(self, company: CompanySeed, *, ctx_key: str) -> SourceBundle: ...
 
 
 @dataclass

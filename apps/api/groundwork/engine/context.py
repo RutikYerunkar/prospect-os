@@ -24,9 +24,11 @@ from groundwork.models.schemas import (
     ResearchFacts,
     ReviewResult,
     Signal,
+    SourceDocument,
 )
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
+from groundwork.observability.search_calls import SearchCallRecorder
 from groundwork.observability.trace import TraceRecorder
 from groundwork.providers.base import LLMResult, ProviderBundle, make_ctx_key
 
@@ -43,6 +45,7 @@ class ProspectContext:
     trace: TraceRecorder
     events: EventEmitter
     llm_calls: LLMCallRecorder
+    search_calls: SearchCallRecorder
 
     # Read-only awareness of the *other* prospects in this run — company
     # names/domains and dedupe keys only, never their evidence, facts, score
@@ -52,6 +55,13 @@ class ProspectContext:
     # another prospect's steps could reach into.
     other_dedupe_keys: frozenset[str] = frozenset()
     other_company_identifiers: frozenset[str] = frozenset()
+
+    # Retrieval state — cached, unique-usable-source winners fetched by the
+    # research step. Kept deliberately separate from `evidence` (the
+    # accepted state): re-populated only once per prospect; a retried
+    # research attempt reuses this instead of calling the search provider
+    # again (H1 Phase 11 — "retrieval state != accepted Evidence state").
+    sources: list[SourceDocument] = field(default_factory=list)
 
     facts: ResearchFacts | None = None
     evidence: list[Evidence] = field(default_factory=list)

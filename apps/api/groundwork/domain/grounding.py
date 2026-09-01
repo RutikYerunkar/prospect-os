@@ -59,6 +59,42 @@ def is_grounded(
     return token_overlap(claim, evidence.snippet) >= threshold
 
 
+MIN_PLAUSIBLE_EMPLOYEE_COUNT = 1
+MAX_PLAUSIBLE_EMPLOYEE_COUNT = 10_000_000
+
+_NUMBER_RE = re.compile(r"(\d[\d,]*)\s*([kK])?")
+
+
+def _numbers_in_text(text: str) -> set[int]:
+    """Every plausible integer literal mentioned in `text`, honoring
+    thousands separators (`"1,200"`) and `k`/`K` shorthand (`"1.2k"` is not
+    handled — only integer-anchored shorthand like `"140"`/`"1,400"`/`"12k"`
+    — deliberately conservative rather than guessing at fractional forms)."""
+    numbers: set[int] = set()
+    for match in _NUMBER_RE.finditer(text):
+        digits = match.group(1).replace(",", "")
+        if not digits:
+            continue
+        value = int(digits)
+        if match.group(2):
+            value *= 1000
+        numbers.add(value)
+    return numbers
+
+
+def numeric_claim_supported(snippet: str, claimed_count: int) -> bool:
+    """H1 Phase 6 — NUMERIC PROVENANCE. An employee-count claim survives
+    only when the exact claimed integer is actually present as a number in
+    the cited evidence's text — never inferred from vague prose like
+    `"large team"` or `"hundreds of employees"` (neither contains a parsable
+    number, so both correctly fail this check). Also rejects nonsensical or
+    out-of-range counts outright, independent of what the text says.
+    """
+    if claimed_count < MIN_PLAUSIBLE_EMPLOYEE_COUNT or claimed_count > MAX_PLAUSIBLE_EMPLOYEE_COUNT:
+        return False
+    return claimed_count in _numbers_in_text(snippet)
+
+
 def verify_claim_evidence(
     claim: str,
     evidence_id: str | None,

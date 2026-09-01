@@ -106,6 +106,10 @@ class SignalRow(Base):
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     confidence: Mapped[float] = mapped_column(Float)
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # H1 Phase 9: this column and `occurred_at` above existed on the pydantic
+    # `Signal` model since Checkpoint B but were never actually written by
+    # `insert_signals` — a real gap this checkpoint closes, not a new field.
+    grounded: Mapped[bool] = mapped_column(default=True)
 
 
 class ICPScoreRow(Base):
@@ -253,6 +257,95 @@ class LLMCallRow(Base):
     output_digest: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (UniqueConstraint("call_group_id", "attempt", name="uq_llm_calls_group_attempt"),)
+
+
+class SearchCallRow(Base):
+    """One row per search-provider call *attempt* (H1 Phase 9/12) — the
+    search-side analogue of `llm_calls`. Never overloaded onto `run_events`
+    (SSE stays the resumable progress log, not a telemetry sink)."""
+
+    __tablename__ = "search_calls"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    call_group_id: Mapped[str] = mapped_column(String)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    attempt_kind: Mapped[str] = mapped_column(String, default="initial")
+    operation: Mapped[str] = mapped_column(String)
+
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
+    play_id: Mapped[str | None] = mapped_column(ForeignKey("plays.id"), nullable=True)
+
+    provider: Mapped[str] = mapped_column(String)
+    query_group_id: Mapped[str] = mapped_column(String, default="")
+    template_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rendered_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_digest: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="OK")
+
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    finished_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+
+    result_count: Mapped[int] = mapped_column(Integer, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer, default=0)
+    provider_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    chars_retrieved: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (UniqueConstraint("call_group_id", "attempt", name="uq_search_calls_group_attempt"),)
+
+
+class SourceDocumentRow(Base):
+    """One row per retrieval *occurrence* (H1 Phase 9/10) — every provider
+    result from every search call, before dedupe. `winner_of_group_id` self-
+    references the row this occurrence's group collapsed onto (null on the
+    winner itself); `Evidence` is created only from winners
+    (`domain/source_identity.py::select_winners`)."""
+
+    __tablename__ = "source_documents"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    search_call_id: Mapped[str | None] = mapped_column(ForeignKey("search_calls.id"), nullable=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"))
+
+    ref: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    canonical_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    domain: Mapped[str | None] = mapped_column(String, nullable=True)
+    publisher: Mapped[str | None] = mapped_column(String, nullable=True)
+    excerpt: Mapped[str] = mapped_column(Text)
+    full_text_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_type: Mapped[str] = mapped_column(String, default="demo_fixture")
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    provider: Mapped[str] = mapped_column(String)
+    provider_result_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    extraction_method: Mapped[str] = mapped_column(String, default="fixture")
+    status: Mapped[str] = mapped_column(String, default="ok")
+    origin: Mapped[str] = mapped_column(String, default="DEMO_FIXTURE")
+
+    identity_key: Mapped[str] = mapped_column(String)
+    is_winner: Mapped[bool] = mapped_column(default=True)
+    canonical_source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("source_documents.id"), nullable=True
+    )
+    # Deliberately NOT a physical FK to `evidence.id`: it is set (best-
+    # effort, from `engine/runner.py`) only *after* Evidence is actually
+    # committed at the end of a successful prospect run, using the same
+    # deterministic uuid5 id `engine/steps/research.py` already computed —
+    # a winner occurrence whose prospect never reached a successful
+    # extraction legitimately has no Evidence row to point at, and that
+    # must not be a constraint violation.
+    evidence_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class RunEventRow(Base):

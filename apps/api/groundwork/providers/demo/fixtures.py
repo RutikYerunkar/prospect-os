@@ -75,6 +75,13 @@ class FixtureCompany(BaseModel):
     tech_mentions: list[FixtureTechMention] = Field(default_factory=list)
     leadership: list[FixtureLeadership] = Field(default_factory=list)
     failure_script: dict[str, FixtureFailureSpec] = Field(default_factory=dict)
+    # H1 Phase 8 — additive profile provenance. Each points at an EXISTING
+    # `sources` ref (never a new one — adding a new source would move
+    # `evidence_confidence`, since that dimension averages over evidence
+    # row count). `None` means this company deliberately carries no
+    # profile fact for that field, exercising the UNKNOWN path.
+    industry_profile_source_ref: str | None = None
+    employee_profile_source_ref: str | None = None
 
     def source_by_ref(self, ref: str) -> FixtureSource | None:
         return next((s for s in self.sources if s.ref == ref), None)

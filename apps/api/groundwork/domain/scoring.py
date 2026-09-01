@@ -12,13 +12,16 @@ import math
 from dataclasses import dataclass, field
 from datetime import date
 
+from groundwork.models.enums import DimensionSupport, ExclusionEvaluation
 from groundwork.models.schemas import (
     Contact,
     DimensionScore,
+    EmployeeCountProfileFact,
     Evidence,
     FundingEvent,
     HiringRole,
     ICPScore,
+    IndustryProfileFact,
     PlaySpec,
     ScoreModifier,
     TechMention,
@@ -50,13 +53,6 @@ _FUNDING_STAGE_ORDER = [
 
 PERSONA_RAW = {"VERIFIED": 1.0, "PERSONA_ONLY": 0.5, "UNAVAILABLE": 0.0}
 
-# industry_fit and size_fit are derived directly from CompanySeed — a
-# structural profile fact discovery always populates, not a claim that needs
-# grounding evidence. The §13 evidence gate applies to the other six, whose
-# raw value comes from an assertion (funding, hiring, tech, persona, signal
-# timing, evidence quality) that could be entirely absent.
-_STRUCTURAL_DIMENSIONS = {"industry_fit", "size_fit"}
-
 
 @dataclass
 class ScoringInputs:
@@ -68,26 +64,58 @@ class ScoringInputs:
     contact: Contact | None = None
     evidence: list[Evidence] = field(default_factory=list)
     reference_date: date = field(default_factory=date.today)
+    # H1 Phase 7 — industry_fit/size_fit read ONLY these independently
+    # grounded profile facts, never `company.industry`/`company.
+    # employee_count` (kept on `company` purely as the pre-research seed
+    # display identity — a scoring dimension reading it directly is exactly
+    # the "naked CompanySeed metadata earns score support" bug H1 closes).
+    industry_fact: IndustryProfileFact | None = None
+    employee_count_fact: EmployeeCountProfileFact | None = None
 
 
 def _industry_fit(inputs: ScoringInputs) -> DimensionScore:
-    industry = inputs.company.industry
+    """Reads ONLY the independently grounded `IndustryProfileFact` — never
+    `inputs.company.industry`. Ungrounded (no evidence) or unclassified (no
+    category) -> UNKNOWN, raw 0, excluded from the confidence denominator.
+    """
+    fact = inputs.industry_fact
     spec = inputs.play_spec
-    if industry in spec.target_industries:
+    if fact is None or not fact.evidence_ids or fact.category is None:
+        return DimensionScore(
+            name="industry_fit", raw=0.0, weight=WEIGHTS["industry_fit"], contribution=0.0,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNKNOWN,
+        )
+
+    category = fact.category
+    if category in spec.target_industries:
         raw = 1.0
-    elif any(industry in adj for adj in spec.adjacent_industries.values()) or any(
+    elif any(category in adj for adj in spec.adjacent_industries.values()) or any(
         adj_target in spec.target_industries
-        for adj_target in spec.adjacent_industries.get(industry, [])
+        for adj_target in spec.adjacent_industries.get(category, [])
     ):
         raw = 0.6
     else:
-        raw = 0.0
-    return DimensionScore(name="industry_fit", raw=raw, weight=WEIGHTS["industry_fit"], contribution=0.0)
+        raw = 0.0  # OTHER, or a served-but-unrelated category
+    return DimensionScore(
+        name="industry_fit", raw=raw, weight=WEIGHTS["industry_fit"], contribution=0.0,
+        evidence_ids=list(fact.evidence_ids), unsupported=False, support=DimensionSupport.SUPPORTED,
+    )
 
 
 def _size_fit(inputs: ScoringInputs) -> DimensionScore:
+    """Reads ONLY the independently grounded `EmployeeCountProfileFact` —
+    never `inputs.company.employee_count`. Ungrounded -> UNKNOWN, raw 0,
+    excluded from the confidence denominator. Exact count only — never a
+    model-authored `size_band` range."""
+    fact = inputs.employee_count_fact
     spec = inputs.play_spec
-    count = inputs.company.employee_count
+    if fact is None or not fact.evidence_ids or fact.employee_count is None:
+        return DimensionScore(
+            name="size_fit", raw=0.0, weight=WEIGHTS["size_fit"], contribution=0.0,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNKNOWN,
+        )
+
+    count = fact.employee_count
     lo, hi = spec.size_band_min, spec.size_band_max
     if lo <= count <= hi:
         raw = 1.0
@@ -95,7 +123,10 @@ def _size_fit(inputs: ScoringInputs) -> DimensionScore:
         band_width = max(hi - lo, 1)
         distance = (lo - count) if count < lo else (count - hi)
         raw = max(0.0, 1.0 - distance / band_width)
-    return DimensionScore(name="size_fit", raw=raw, weight=WEIGHTS["size_fit"], contribution=0.0)
+    return DimensionScore(
+        name="size_fit", raw=raw, weight=WEIGHTS["size_fit"], contribution=0.0,
+        evidence_ids=list(fact.evidence_ids), unsupported=False, support=DimensionSupport.SUPPORTED,
+    )
 
 
 def _stage_match(stage: str, targets: list[str]) -> float:
@@ -122,7 +153,7 @@ def _funding_signal(inputs: ScoringInputs) -> DimensionScore:
     if not grounded_events:
         return DimensionScore(
             name="funding_signal", raw=0.0, weight=WEIGHTS["funding_signal"], contribution=0.0,
-            evidence_ids=[], unsupported=True,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     newest = max(grounded_events, key=lambda e: e.announced_at or date.min)
     stage_score = _stage_match(newest.stage, inputs.play_spec.target_funding_stages)
@@ -130,7 +161,7 @@ def _funding_signal(inputs: ScoringInputs) -> DimensionScore:
     raw = stage_score * recency
     return DimensionScore(
         name="funding_signal", raw=raw, weight=WEIGHTS["funding_signal"], contribution=0.0,
-        evidence_ids=list(newest.evidence_ids), unsupported=False,
+        evidence_ids=list(newest.evidence_ids), unsupported=False, support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -139,7 +170,7 @@ def _hiring_signal(inputs: ScoringInputs) -> DimensionScore:
     if not relevant:
         return DimensionScore(
             name="hiring_signal", raw=0.0, weight=WEIGHTS["hiring_signal"], contribution=0.0,
-            evidence_ids=[], unsupported=True,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     role_score = min(1.0, len(relevant) / 3.0)
     newest = max(relevant, key=lambda r: r.posted_at or date.min)
@@ -148,7 +179,7 @@ def _hiring_signal(inputs: ScoringInputs) -> DimensionScore:
     evidence_ids = sorted({eid for r in relevant for eid in r.evidence_ids})
     return DimensionScore(
         name="hiring_signal", raw=raw, weight=WEIGHTS["hiring_signal"], contribution=0.0,
-        evidence_ids=evidence_ids, unsupported=False,
+        evidence_ids=evidence_ids, unsupported=False, support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -157,7 +188,7 @@ def _tech_fit(inputs: ScoringInputs) -> DimensionScore:
     if not grounded:
         return DimensionScore(
             name="tech_fit", raw=0.0, weight=WEIGHTS["tech_fit"], contribution=0.0,
-            evidence_ids=[], unsupported=True,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     detected = {t.name.lower() for t in grounded}
     target = {t.lower() for t in inputs.play_spec.target_technologies}
@@ -166,7 +197,7 @@ def _tech_fit(inputs: ScoringInputs) -> DimensionScore:
     evidence_ids = sorted({eid for t in grounded for eid in t.evidence_ids})
     return DimensionScore(
         name="tech_fit", raw=raw, weight=WEIGHTS["tech_fit"], contribution=0.0,
-        evidence_ids=evidence_ids, unsupported=False,
+        evidence_ids=evidence_ids, unsupported=False, support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -175,12 +206,13 @@ def _persona_availability(inputs: ScoringInputs) -> DimensionScore:
     if contact is None or not contact.evidence_ids:
         return DimensionScore(
             name="persona_availability", raw=0.0, weight=WEIGHTS["persona_availability"],
-            contribution=0.0, evidence_ids=[], unsupported=True,
+            contribution=0.0, evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     raw = PERSONA_RAW.get(contact.verification.value, 0.0)
     return DimensionScore(
         name="persona_availability", raw=raw, weight=WEIGHTS["persona_availability"],
         contribution=0.0, evidence_ids=list(contact.evidence_ids), unsupported=False,
+        support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -191,13 +223,13 @@ def _signal_freshness(inputs: ScoringInputs) -> DimensionScore:
     if not dated:
         return DimensionScore(
             name="signal_freshness", raw=0.0, weight=WEIGHTS["signal_freshness"], contribution=0.0,
-            evidence_ids=[], unsupported=True,
+            evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     newest_date, evidence_ids = max(dated, key=lambda item: item[0])
     raw = _recency_decay(inputs.reference_date, newest_date, 90.0)
     return DimensionScore(
         name="signal_freshness", raw=raw, weight=WEIGHTS["signal_freshness"], contribution=0.0,
-        evidence_ids=list(evidence_ids), unsupported=False,
+        evidence_ids=list(evidence_ids), unsupported=False, support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -205,12 +237,13 @@ def _evidence_confidence(inputs: ScoringInputs) -> DimensionScore:
     if not inputs.evidence:
         return DimensionScore(
             name="evidence_confidence", raw=0.0, weight=WEIGHTS["evidence_confidence"],
-            contribution=0.0, evidence_ids=[], unsupported=True,
+            contribution=0.0, evidence_ids=[], unsupported=True, support=DimensionSupport.UNSUPPORTED,
         )
     raw = sum(e.confidence for e in inputs.evidence) / len(inputs.evidence)
     return DimensionScore(
         name="evidence_confidence", raw=raw, weight=WEIGHTS["evidence_confidence"],
         contribution=0.0, evidence_ids=[e.id for e in inputs.evidence], unsupported=False,
+        support=DimensionSupport.SUPPORTED,
     )
 
 
@@ -226,36 +259,81 @@ _DIMENSION_FNS = [
 ]
 
 
+def _evaluate_exclusion(category: str | None, excluded_industries: list[str]) -> ExclusionEvaluation:
+    """Tri-state exclusion-policy evaluation (H1 Phase 7). `category` here
+    is already the independently *grounded* category (or `None`) — never
+    read from `CompanySeed`."""
+    if category is None:
+        return ExclusionEvaluation.UNKNOWN
+    if category in excluded_industries:
+        return ExclusionEvaluation.EXCLUDED
+    return ExclusionEvaluation.NOT_EXCLUDED
+
+
 def compute_score(prospect_id: str, inputs: ScoringInputs) -> ICPScore:
     dimensions = [fn(inputs) for fn in _DIMENSION_FNS]
 
     # Evidence gate, enforced defensively even though each dimension fn
     # already zeroes itself out when ungrounded: a dimension with no
-    # supporting evidence can never contribute points.
+    # supporting evidence can never contribute points. Every dimension is
+    # evidence-gated now — there is no structural exemption left (H1 Phase
+    # 7 deleted it): industry_fit/size_fit are gated exactly like the other
+    # six, through their own grounded profile facts.
     for dim in dimensions:
-        if dim.name not in _STRUCTURAL_DIMENSIONS and not dim.evidence_ids:
+        if not dim.evidence_ids:
             dim.unsupported = True
+            if dim.support == DimensionSupport.SUPPORTED:
+                dim.support = DimensionSupport.UNSUPPORTED
             dim.raw = 0.0
         dim.contribution = round(dim.weight * dim.raw, 6)
 
     base = sum(d.contribution for d in dimensions)
     overall = round(100 * base)
 
+    # Exclusion policy is evaluated from the SAME independently grounded
+    # industry category the industry_fit dimension used — never
+    # `inputs.company.industry`.
+    grounded_category = (
+        inputs.industry_fact.category
+        if inputs.industry_fact is not None and inputs.industry_fact.evidence_ids
+        else None
+    )
+    exclusion_status = _evaluate_exclusion(grounded_category, inputs.play_spec.excluded_industries)
+
     modifiers: list[ScoreModifier] = []
-    disqualified = inputs.company.industry in inputs.play_spec.excluded_industries
+    disqualified = exclusion_status == ExclusionEvaluation.EXCLUDED
     if disqualified:
         capped = min(overall, 25)
         modifiers.append(
             ScoreModifier(
                 name="hard_disqualifier",
-                reason=f"industry '{inputs.company.industry}' is on the exclude list",
+                reason=f"industry '{grounded_category}' is on the exclude list",
                 detail=f"overall capped from {overall} to {capped}",
             )
         )
         overall = capped
+    elif exclusion_status == ExclusionEvaluation.UNKNOWN:
+        # Never silently pass: surfaced as a modifier here, and
+        # `engine/runner.py::_derive_final_status` forces NEEDS_REVIEW for
+        # it rather than adding an eighth review guardrail — the seven
+        # deterministic checks stay exactly seven.
+        modifiers.append(
+            ScoreModifier(
+                name="exclusion_not_evaluable",
+                reason="industry was not established from evidence",
+                detail="Exclusion policy could not be evaluated because industry was not established from evidence.",
+            )
+        )
 
-    supported = sum(1 for d in dimensions if not d.unsupported)
-    confidence = supported / len(dimensions)
+    # UNKNOWN dimensions are excluded from the confidence denominator
+    # entirely (H1 Phase 7) — a fact that was never independently
+    # established should neither help nor hurt confidence. UNSUPPORTED
+    # still counts in the denominator (it WAS checked for, and wasn't
+    # found) — this preserves the pre-H1 "confidence = coverage" semantics
+    # for every dimension that isn't in an UNKNOWN state.
+    evaluable = [d for d in dimensions if d.support != DimensionSupport.UNKNOWN]
+    supported = sum(1 for d in evaluable if d.support == DimensionSupport.SUPPORTED)
+    confidence = supported / len(evaluable) if evaluable else 0.0
 
     return ICPScore(
         prospect_id=prospect_id,
@@ -266,4 +344,5 @@ def compute_score(prospect_id: str, inputs: ScoringInputs) -> ICPScore:
         confidence=confidence,
         rubric_version=RUBRIC_VERSION,
         explanation="",
+        exclusion_status=exclusion_status,
     )

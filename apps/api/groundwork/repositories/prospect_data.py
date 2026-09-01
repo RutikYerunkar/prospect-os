@@ -4,6 +4,7 @@ scores, contacts, outreach drafts, review results, approvals."""
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, time
 
 from sqlalchemy import select
 
@@ -57,8 +58,10 @@ class ProspectDataRepository:
                         prospect_id=s.prospect_id,
                         type=s.type.value,
                         summary=s.summary,
+                        occurred_at=datetime.combine(s.occurred_at, time.min) if s.occurred_at else None,
                         confidence=s.confidence,
                         evidence_ids=s.evidence_ids,
+                        grounded=s.grounded,
                     )
                 )
             await session.commit()

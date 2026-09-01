@@ -16,19 +16,21 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **D — Hero product UI** | `aa41f97` (merged to `master` via PR #4) | New Play (objective + 4 controls + live-parsed read-only `PlaySpec`), Run Detail hero screen (live board, activity stream, counters, bounded-concurrency indicator, Board/Quality tab shell), `useRunStream` SSE client with manual reconnect + REST reconciliation, minimal Prospect Detail placeholder. No backend changes. |
 | **E — Depth UI** | `a1f9190` (merged to `master` via PR #5) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
 | **F — Quality + hardening** | `41883be` (merged to `master` via PR #6) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
-| **G — Live Mode LLM provider** | *this commit* (branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
+| **G — Live Mode LLM provider** | `1e7586c` (merged to `master` via PR #7, branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
+| **H1 — demo-neutral, real-company-safe foundation** | *this commit* (branch `claude/checkpoint-h1-caz9gn`) | Fixed two real bugs (evidence-retry duplication; substring-based cross-prospect-leak false positive on short names); offline PSL-aware domain normalization (`domain/psl.py`, pinned `tldextract`); pure `url_safety`/`source_identity` helpers; independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` — scoring's `industry_fit`/`size_fit` now read *only* these, never `CompanySeed`; tri-state `DimensionSupport`/`ExclusionEvaluation` (ungrounded industry forces `NEEDS_REVIEW`, seven review checks unchanged); `source_documents`/`search_calls` persistence with deterministic retrieval-occurrence dedupe; `ctx.sources` (retrieval) split from `ctx.evidence` (accepted); refined `SearchProvider` contract, `DemoSearchProvider` ported, zero live vendor. Demo Mode preserved byte-identical at every gate. **No live search was performed; no vendor adapter was written.** |
 
 ---
 
 ## Current checkpoint
 
-**G — Live Mode LLM provider.** Demo Mode (Checkpoints A–F) remains P0-complete and untouched at the
-domain/output level. Checkpoint G adds real OpenAI execution behind the existing provider seam — see
-"What Checkpoint G added" below for the full implementation, and "Next task" for what's explicitly
-*not* started (Checkpoint H — live web search).
+**H1 — demo-neutral, real-company-safe foundation.** Checkpoints A–G remain intact; H1 hardens the
+domain/search/provenance/scoring architecture so it can safely accept an arbitrary real company later,
+without adding a live search vendor. See "What Checkpoint H1 added" below for the full implementation,
+and "H2 invariants / next task" for what's explicitly *not* started (Checkpoint H2 — the real Tavily
+adapter and live web search).
 
 A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-further work. **Do not begin Checkpoint H** without the user explicitly asking.
+further work. **Do not begin Checkpoint H2** without the user explicitly asking.
 
 ---
 
@@ -677,6 +679,257 @@ credentials are available and I explicitly provide/approve them."
 
 ---
 
+## What Checkpoint H1 added
+
+**Goal:** harden the domain/search/provenance/scoring foundation to safely accept an arbitrary real
+company later, without adding a live search vendor — H2 is the actual Tavily adapter and live web
+search, not built here. Demo Mode's canonical output verified byte-identical after every phase gate
+(see Verification below) — `PASS:2/NEEDS_REVIEW:2/REJECTED:1/DUPLICATE:1/FAILED:1`, Northwind 92,
+Riverbend 35, Cobalt 25 (still `REJECTED`), Ferrous 58, Sable 79, 3 retries recorded, `run status:
+PARTIAL`.
+
+**Phase 1 — two proven bugs, fixed:**
+
+- **Bug A (evidence-retry duplication).** `engine/steps/research.py` used to `ctx.evidence.extend(...)`
+  *before* the LLM extraction call; a step-level retry re-invoked the whole function, appending the same
+  sources' evidence again with fresh `uuid4` ids. Root-caused and reproduced directly: a temporary debug
+  probe confirmed Northwind Labs (which genuinely retries once via its own scripted `ProviderTimeout`)
+  ended up with 8 evidence rows pre-fix instead of the correct 4. Fixed via the commit-once architecture
+  described in Phase 9-11 below — post-fix, a direct SQLite query against a real headless demo run
+  confirms Northwind Labs has exactly 4 evidence rows.
+- **Bug B (cross-prospect-leak false positive on short names).** `domain/review.py::_cross_prospect_leak`
+  used `identifier.lower() in text` — a plain substring check that hard-fails on short real company names
+  purely because the character sequence occurs inside an unrelated word (`"Ramp"` inside `"cramping"`,
+  `"Box"` inside `"mailbox"`, `"Arc"` inside `"March"`). Replaced with a word/token-boundary-aware regex
+  (`(?<!\w)...(?!\w)`, case-insensitive) — domain identifiers (`acme.com`) are unaffected since `.`/`-`
+  are already non-word characters; a real reference at a word boundary is still caught. Six new
+  regression tests in `tests/test_review.py` cover both directions (no false positive, real leak still
+  caught, case-insensitivity).
+
+**Phase 2 — PSL-aware domain normalization** (`domain/psl.py`, new): a pinned `tldextract==5.3.2`
+(added as a real dependency, `pyproject.toml`/`uv.lock`), configured `TLDExtract(suffix_list_urls=(),
+include_psl_private_domains=True, cache_dir=None)`. `suffix_list_urls=()` is the documented way to
+disable tldextract's default network-fetch-on-first-use behavior entirely — with no URLs configured it
+falls back unconditionally to the public-suffix-list snapshot frozen into the installed package at build
+time; no network call is ever attempted, at import time or call time, verified directly in
+`tests/test_psl.py::test_no_network_access_attempted` by monkeypatching `socket.socket`/
+`socket.create_connection` to raise. `include_psl_private_domains=True` is what makes `acme.github.io`
+resolve as its own registrable identity instead of collapsing to the ICANN-only `github.io`. One real
+edge case found and fixed during this phase: `tldextract` has no PSL rule for RFC 2606 reserved/unlisted
+TLDs (`.example`, used by this project's own `test_isolation.py` fixture domains) and returns an empty
+`suffix` for them, which — combined with a naive "domain + suffix" join — would have silently *merged*
+`alphacanary.example` and `betacanary.example` into the same bare `"example"` registrable domain,
+breaking `test_isolation.py` (confirmed by running it: it failed with both canary companies computing to
+the same dedupe key and one landing spuriously `DUPLICATE`). Fixed by falling back to the full
+`subdomain.domain` string whenever `suffix` comes back empty — a fallback for *missing PSL data*, not a
+hand-written suffix rule; it never runs when a real suffix was matched. `domain/dedupe.py::normalize_domain`
+now routes through `domain/psl.py::canonical_domain` instead of the old "strip scheme, take before first
+slash, strip www." logic — verified to produce byte-identical results for every fixture company's plain
+`.com`/`.io`/`.ai`/`.dev` domain (canonical demo output unaffected). 14 new offline determinism tests in
+`tests/test_psl.py`.
+
+**Phase 3 — URL safety / source identity** (`domain/url_safety.py`, `domain/source_identity.py`, both
+new, both pure — no network resolution of any kind, consistent with the architecture's explicit ban on
+an arbitrary backend `httpx.get(result_url)`): `is_safe_source_url()` hard-rejects non-http(s), malformed
+URLs, missing host, credentialed URLs, `localhost`/`.local`/`.internal`/`.localhost`, any IP-literal host
+(v4 or v6, public or private — a real citable source is expected to resolve through a hostname), and
+overlength URLs (>2048 chars). `canonicalize_url()` lowercases scheme/host, drops the default port,
+strips the fragment, removes `utm_*`/`gclid`/`fbclid`/`ref` tracking params, sorts remaining query
+params, and normalizes the trailing slash — returns `None` for anything the safety gate already rejects.
+`domain/source_identity.py` defines source identity (`canonical_url` when present, else `source_ref` —
+the required Demo Mode fallback, since fixture sources carry no URLs at all) and a deterministic
+winner-selection total order over duplicate occurrences (successful extraction > longer text > known
+`published_at` > higher `relevance_score` > better/lower `rank` > a stable lexicographic tie-break),
+plus content-hash-based group merging across distinct canonical URLs. `evidence_id_for()` derives a
+deterministic, idempotent `uuid5` Evidence id from `(prospect_id, source_identity)` — the same winning
+source always derives the same Evidence id. 16 + 12 new tests (`test_url_safety.py`,
+`test_source_identity.py`), including a 20-iteration shuffled-input determinism proof for winner
+selection.
+
+**Phase 4/5/6/7 — company profile facts, canonical industry classification, numeric/date validation, and
+scoring honesty** (the architectural core of this checkpoint): `models/schemas.py` gains
+`IndustryProfileFact`/`EmployeeCountProfileFact`/`CompanyProfileFacts` (`ResearchFacts.profile`) — two
+independent fact objects, each with its own `evidence_ids`, populated only after that fact's *own* claim
+independently passes deterministic grounding. The two never share one provenance record: even when both
+legitimately cite the same `source_ref` (a company page can genuinely state both facts in one paragraph),
+`engine/steps/signals.py` verifies each against its own claim text and its own numeric/category check —
+corrupting one fact's `evidence_ids` in a test has zero effect on the other (`tests/
+test_profile_provenance.py::test_no_cross_borrowed_evidence_ids_when_both_grounded_from_same_source`).
+
+`domain/industry.py` (new) builds the closed, served allowed-category set from a Play:
+`target_industries ∪ excluded_industries ∪ adjacent_industries(keys ∪ values) ∪ {"OTHER"}`.
+`prompts/research_extraction.py` (bumped `research_extraction-v1 → v2`) now serves this set to the model
+and instructs it to select `profile.industry.category` only from it (or the literal `"OTHER"`, or omit
+it entirely) — and removed the prior prompt text that stated Industry/Size Band as an assumed fact from
+`CompanySeed`. Server-side, `domain/industry.py::validate_category()` re-validates independently of
+what the model claims: any category outside the served set collapses to `None` (UNKNOWN), never reaching
+scoring/exclusion as free text. `OTHER` (grounded, classified, outside the target/excluded set — scores
+`raw=0.0` but *is* `SUPPORTED`) and `UNKNOWN` (never adequately classified — `category=None`, scoring
+*and* exclusion both unevaluable) are structurally distinct: `OTHER` is a string in the fact; `UNKNOWN` is
+the fact carrying no evidence/category at all.
+
+`domain/grounding.py` gains `numeric_claim_supported()` — an employee-count claim survives only when the
+exact claimed integer is actually present as a parsed number (digits, thousands separators, `k`/`K`
+shorthand) in the cited evidence's text; vague prose (`"a large team"`, `"hundreds of employees"`) and
+out-of-range counts (`≤0` or `>10,000,000`) both correctly fail. No inference, no LLM judge.
+
+`domain/scoring.py` — the actual honesty fix: `_industry_fit`/`_size_fit` now read **only**
+`ScoringInputs.industry_fact`/`.employee_count_fact` (both independently grounded), never
+`inputs.company.industry`/`.employee_count`. The old `_STRUCTURAL_DIMENSIONS` exemption (which treated
+these two dimensions as "always supported from `CompanySeed`," never evidence-gated) is deleted entirely
+— every one of the eight dimensions now goes through the identical evidence gate. `DimensionScore` gains
+`support: DimensionSupport` (`SUPPORTED`/`UNSUPPORTED`/`UNKNOWN`), computed alongside the existing
+`unsupported: bool` (kept, and kept in sync, for backward compatibility with the `score_support` review
+check and the frontend `ScoreBreakdown` table — `unsupported` is `True` for both `UNSUPPORTED` and
+`UNKNOWN`). Confidence's denominator now excludes `UNKNOWN` dimensions entirely (a fact that was never
+independently established should neither help nor hurt confidence) while still counting `UNSUPPORTED`
+ones (a fact that *was* checked for and genuinely wasn't found) — `tests/
+test_scoring.py::test_unknown_dimension_excluded_from_confidence_denominator` proves this directly.
+`ICPScore` gains `exclusion_status: ExclusionEvaluation` (`EXCLUDED`/`NOT_EXCLUDED`/`UNKNOWN`), computed
+from the same grounded industry category the `industry_fit` dimension used — never from
+`inputs.company.industry`. `UNKNOWN` adds an `exclusion_not_evaluable` `ScoreModifier` with the exact
+reason text the task specified ("Exclusion policy could not be evaluated because industry was not
+established from evidence.") and, in `engine/runner.py::_derive_final_status`, downgrades an otherwise-
+PASS status to `NEEDS_REVIEW` — never silently passing an unevaluable exclusion. This is explicitly
+**not** an eighth review guardrail: `domain/review.py`'s seven checks are byte-for-byte unchanged, and
+`tests/test_exclusion_unknown_forces_review.py` asserts `len(review.checks) == 7` on exactly this path.
+20 new tests across `test_scoring.py`, `test_industry.py`, `test_grounding.py`,
+`test_profile_provenance.py`, `test_exclusion_unknown_forces_review.py`.
+
+**Phase 8 — Demo fixtures extended additively:** `providers/demo/fixtures.py::FixtureCompany` gains two
+optional fields, `industry_profile_source_ref`/`employee_profile_source_ref`, each pointing at an
+*existing* `sources` ref (never a new one). `demo_pack.yaml`'s six non-duplicate companies each have their
+first/primary source's `snippet` extended (additively — the existing sentence is kept, a new sentence is
+appended) with an explicit industry-category and employee-count statement, e.g. Northwind Labs'
+`funding-note` snippet gained "Northwind Labs operates in the ai infrastructure industry and has
+approximately 140 employees." This is provably safe: `token_overlap()`/`numeric_claim_supported()` only
+ever check whether required tokens/numbers are *present* in a snippet, so appending more text to a
+snippet is monotonic — it can only add words, never remove ones an existing claim already depended on,
+meaning every pre-H1 grounding check (funding/hiring/tech claims, personalization, `claim_grounding`
+review) is provably unaffected. No new `sources` entries were added anywhere, so evidence row *count* and
+every existing row's `confidence` are byte-identical to pre-H1 — `evidence_confidence` (which averages
+over evidence rows) is therefore unaffected, confirmed by the byte-identical canonical scores.
+`providers/demo/demo_llm.py::DemoLLMProvider._profile()` builds `CompanyProfileFacts` from the fixture's
+own `industry`/`employee_count` fields (its authored "ground truth"), citing whichever ref the fixture
+names — this is Demo Mode *simulating* what a real grounded extraction would find, not a scoring
+shortcut: the facts still pass through the identical `engine/steps/signals.py` verification path as any
+other fact. Cobalt Retail Systems' industry fact grounds to `"retail_pos"` (on the exclude list) exactly
+as `CompanySeed.industry` always was, so `EXCLUDED`/`REJECTED`/`score=25` is preserved unchanged.
+
+**Phase 9/10/11 — provenance persistence and the retrieval/accepted-Evidence split:**
+`models/schemas.py::SourceDocument` (moved from `providers/base.py`, now a pure model importable by
+`domain/`, re-exported from `providers/base.py` for every existing import site) expanded to the full
+Phase 9 conceptual shape (url/canonical_url/domain/publisher/content_sha256/source_type/retrieved_at/
+published_at/provider_result_id/rank/relevance_score/extraction_method/status/origin/search_call_id).
+New tables `search_calls` (one row per provider call attempt — provider/operation/query metadata/status/
+latency/result counts/redacted error) and `source_documents` (one row per retrieval *occurrence* —
+`is_winner` + `canonical_source_id` self-FK pointing every loser at its group's winner,
+`identity_key` = `domain/source_identity.py`'s identity string). `repositories/search.py::SearchRepository
+.record_search()` inserts winner rows before loser rows in two explicit passes (the same FK-ordering
+lesson Checkpoint G's post-smoke hardening already learned for `create_play_with_attempts` — no ORM
+`relationship()` exists anywhere in this schema, so insert order is load-bearing under `PRAGMA
+foreign_keys=ON`) and computes each winner's deterministic `evidence_id` directly (not a physical FK to
+`evidence.id` — a winner whose prospect never reached a successful extraction legitimately has no
+Evidence row to reference, and that must never be a constraint violation). `engine/search.py::call_search()`
+is the search-side analogue of `engine/llm.py::call_structured()` — the only thing that persists this
+telemetry; `observability/search_calls.py::SearchCallRecorder` catches and logs persistence failures
+rather than failing a successful search, exactly like `LLMCallRecorder`. Search telemetry never touches
+`run_events` — verified by inspection (`SearchCallRecorder`/`SearchRepository` have no `EventEmitter`
+dependency at all).
+
+`engine/context.py::ProspectContext` gains `sources: list[SourceDocument]` — retrieval state, strictly
+separate from `evidence: list[Evidence]` (accepted state). `engine/steps/research.py` is the commit-once
+architecture that actually fixes Bug A: fetch (and dedupe via `domain.source_identity.select_winners`)
+sources into `ctx.sources` only if empty (a step-level retry reuses the cache, never calling the search
+provider again); build candidate `Evidence` **locally** (never touching `ctx.evidence` yet); run the LLM
+extraction; only on success, `ctx.evidence = candidate_evidence` — a plain assignment, not `.extend()`,
+so even a hypothetical second successful completion can't accumulate duplicates, and because Evidence ids
+are deterministic (`uuid5`), re-committing the same winners is a content no-op. On failure, the exception
+propagates unchanged and `ctx.evidence` is untouched. Proven directly, not just by inspection, in
+`tests/test_research_retrieval_state.py` using a custom `LLMProvider` stub that fails
+`research_extraction` a controlled number of times while a `DemoSearchProvider` subclass counts real
+`fetch_sources` invocations: search OK → LLM timeout → retry OK (`fetch_calls == 1`, evidence committed
+once, exactly 4 rows for Sable Compute, trace shows `RETRY` then `OK`); search OK → all LLM retries
+exhausted (`fetch_calls == 1` still, `ctx.evidence` empty, zero persisted evidence rows, prospect
+`FAILED`, retrieval telemetry still persisted for observability); Northwind's own pre-existing
+search-side scripted failure still retries correctly and commits evidence exactly once. A genuine bug
+was found and fixed while writing this test: the first draft accidentally built both the flaky-LLM
+provider and the counting-search provider from the *full* 7-company fixture pack while running against a
+*single*-company `target_count=1` Play — `DemoSearchProvider.discover()` (which indexes into
+`self.pack.companies[:limit]`) then returned Northwind Labs (the full pack's first company) regardless of
+which company the test intended, silently compounding Northwind's own real scripted search failure with
+the test's injected LLM failure into 3 total attempts instead of the intended 2. Fixed by building both
+providers from a purpose-built single-company `FixturePack`; not a defect in `research.py` itself, which
+the earlier direct-call reproduction (bypassing `Step`/`Pipeline` entirely) had already proven correct in
+isolation.
+
+`models/tables.py::SignalRow` gains `grounded: bool` (the pydantic `Signal.grounded`/`occurred_at`
+fields have existed since Checkpoint B but were never actually persisted — `insert_signals` silently
+dropped both). Fixed: `signals.py` now sets `occurred_at` from the fact's own `announced_at`/`posted_at`,
+and `insert_signals` persists both `occurred_at` and `grounded`. `db.py::schema_upgrade_problems()`
+extended to detect a pre-H1 DB missing `search_calls`/`source_documents`/`signals.grounded`, mirroring
+Checkpoint G's stale-schema guard exactly. 5 + 5 + 4 new tests (`test_provenance_persistence.py`,
+`test_research_retrieval_state.py`, `test_schema_upgrade_check.py` additions).
+
+**Phase 12/13/14 — search provider contract, DemoSearchProvider port, query-plan/discovery primitives:**
+`SearchProvider` Protocol refined to `discover()`/`resolve_domain()`/`fetch_sources()`, each returning
+its payload alongside `SearchAttemptTelemetry` (`DiscoveryResult`/`DomainCandidates`/`SourceBundle`,
+`providers/base.py`) — no concrete Tavily/Exa adapter exists anywhere in this codebase.
+`DemoSearchProvider` ported to the new contract: zero credentials, identical fixture-derived documents/
+scripted-failure behavior, one `OK` telemetry attempt per call (nothing to retry against a fixture).
+`domain/query_plan.py` (new, pure): five versioned query templates (industry+funding,
+industry+persona-hiring, industry+technology, breadth, official-site-domain) rendered only from
+`PlaySpec`-derived parameters — the LLM never constructs an arbitrary query string. `domain/discovery.py`
+(new, pure): the identity-gate primitives — `resolve_candidate_domain()` requires a URL to pass
+`is_safe_source_url()`, normalize to a non-aggregator registrable domain (`STRUCTURAL_AGGREGATOR_DOMAINS`
+— LinkedIn, Crunchbase, Wikipedia, social platforms, etc.), AND have been present in the *served*
+candidate domain set — a canonical domain can never originate from the model's own output alone.
+`config.py` gains the nine `LIVE_MAX_*`/`SEARCH_MAX_*` H2 hard bounds named in the task spec, defined now,
+not exercised against a vendor. `engine/runner.py::discover_and_dedupe` updated for `discover()`'s new
+`DiscoveryResult` return shape. 15 + 8 + 6 new tests (`test_query_plan.py`, `test_discovery.py`,
+`test_demo_search_provider.py`).
+
+**Phase 15 — historical mode labeling:** `RunSummary.tsx`'s mode chip used to infer `"LIVE LLM · FIXTURE
+SEARCH"` from `run.mode === "live"` alone — correct today (Live Mode has only ever meant fixture search),
+but would render exactly the same wrong label for a future H2 run with a real search provider.
+`searchLabel()` now reads this run's own persisted `provider_profile.synthetic_search` (with a `true`
+fallback for a run predating the field) — a historical Checkpoint G run stays truthfully "LIVE LLM ·
+FIXTURE SEARCH" forever; an H2 run with `synthetic_search: false` will render "LIVE LLM · LIVE SEARCH".
+Backend `provider_profile` persistence (Checkpoint G's `providers/profile.py`) is untouched — this was a
+frontend-only truthfulness fix.
+
+**Phase 16 — source/quality metric definitions:** `evaluation/metrics.py::_compute_search_quality()`
+(new, computed on read from `source_documents`/`search_calls`/`icp_scores`) defines, with real
+implementations, `result_occurrences`, `sources_retrieved_unique`, `sources_used_as_evidence` (a winner
+whose `evidence_id` matches a real persisted Evidence row), `source_utilization_rate`,
+`duplicate_retrieval_rate`, plus `industry_grounded_coverage`/`employee_count_grounded_coverage` (read
+straight off the already-persisted `dimensions[].support` JSON) and `unevaluable_exclusion_count` (read
+off `modifiers[].name == "exclusion_not_evaluable"`) — no new DB columns needed for either. Several
+fields (`search_cost_usd`, per-status search error counts) are legitimately always-null/zero in H1 (no
+live search has ever run) but the metric *definitions* and computation exist now, matching the
+`llm_usage.estimated_cost_usd` "null unless every contributing value is known" rule. 2 new tests
+(`test_search_quality_metrics.py`), verified against both a real Demo run (Demo Mode has zero true
+duplicate retrievals, so `result_occurrences == sources_retrieved_unique` and
+`duplicate_retrieval_rate == 0.0` exactly) and an empty run (every rate `None`, never a fabricated
+zero-vs-null conflation).
+
+**Phase 18 — provider verification spike script:** `scripts/search_spike.py` (new) mirrors
+`scripts/live_smoke.py`'s exact safety pattern for the *search* side — requires
+`--i-understand-this-makes-real-calls` AND a configured `TAVILY_API_KEY`, lazily imports the `tavily`
+package only after both checks pass (never imported by running this module without the flag, and the
+package is deliberately **not** added as a project dependency — H1 must not pin/install a search SDK).
+Verified directly: running without the flag refuses with no import attempted; running with the flag but
+without the SDK installed refuses with an actionable message and still no network call. Prints the
+installed SDK version, client class/signature (via `inspect.signature`, not memory), the actual
+request/response field names it observes, and any usage/rate-limit/error fields the one real call
+surfaces — draws no legal conclusions, records "not observed" for anything a given run doesn't surface.
+**Not run this session** — no `TAVILY_API_KEY` was provided or requested; per the task's own instruction,
+this script exists for H2, is never invoked automatically by anything in this repo (not `make test`, not
+`make dev`, not CI), and its provider-verification status is `NOT RUN` until the user explicitly runs
+`make search-spike` themselves.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -957,6 +1210,49 @@ to the repository.
    refuse safely without the flag and without a configured key (both checked, both correctly exit 1
    with no network call attempted). **The user ran it for real after PR #7 was opened** — see
    "Post-smoke hardening pass" immediately below for the result and what it surfaced.
+
+---
+
+---
+
+## Checkpoint H1 tests and verification
+
+1. **Baseline first (Phase 0):** `uv run pytest` — 132/132 — and `make demo-reset && make demo` captured
+   verbatim before any change, matching this file's documented reference numbers exactly.
+2. `cd apps/api && uv run pytest` — **238/238 passing** (132 original + 106 new). New files:
+   `test_psl.py` (14), `test_url_safety.py` (16), `test_source_identity.py` (12), `test_industry.py` (6),
+   `test_grounding.py` additions (7), `test_review.py` additions (6), `test_scoring.py` additions (6, plus
+   the 8 pre-existing tests updated for the new `industry_fact`/`employee_count_fact` inputs — see
+   deviations), `test_profile_provenance.py` (7), `test_research_retrieval_state.py` (3),
+   `test_provenance_persistence.py` (5), `test_demo_search_provider.py` (6), `test_query_plan.py` (7),
+   `test_discovery.py` (8), `test_search_quality_metrics.py` (2), `test_exclusion_unknown_forces_review.py`
+   (1), `test_schema_upgrade_check.py` additions (2), plus a net +6 in `test_run_integration.py` (Cobalt/
+   canonical-score assertions). Re-run after every phase gate, not just once at the end — zero
+   regressions the whole way; the two real bugs found mid-implementation (the `.example`-TLD PSL
+   collision breaking `test_isolation.py`, and the wrong-fixture-pack test-construction bug in the first
+   draft of `test_research_retrieval_state.py`) were both caught by this discipline, not discovered later.
+3. `make demo-reset && make demo` re-run after every phase — **byte-identical to the Phase 0 baseline at
+   every gate**: Northwind Labs 92, Riverbend Analytics 35, Cobalt Retail Systems 25 (`REJECTED`), Ferrous
+   Grid 58, Sable Compute 79, `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`, 3 retries,
+   `run status: PARTIAL`. Diffed programmatically against the captured Phase 0 output, not eyeballed.
+4. **Bug A fix confirmed by direct inspection, not just by test**: a raw SQLite query against a real
+   post-H1 headless demo run's `groundwork.db` shows Northwind Labs (the one prospect that genuinely
+   retries) with exactly 4 `evidence` rows, and `source_documents` row count (16) equals the sum of every
+   prospect's evidence count exactly — no duplication anywhere in the run.
+5. `cd apps/web && pnpm install && pnpm lint` — clean (no new violations). `pnpm build` — compiles,
+   typechecks, prerenders `/`/`/plays/new`/`/icon.svg` static and `/prospects/[id]`/`/runs/[id]` dynamic,
+   no errors. Only frontend file touched: `RunSummary.tsx` (Phase 15's truthful mode-label fix).
+6. `uv run python -m groundwork.scripts.seed` — schema ready, fixture pack loads and validates with the
+   new `industry_profile_source_ref`/`employee_profile_source_ref` fields present.
+7. `search_spike.py` verified to refuse safely and make zero network/import attempts both without the
+   confirmation flag and with the flag but no `tavily` package installed — **not run for real** this
+   session (no `TAVILY_API_KEY` provided or requested).
+8. No live OpenAI or search call was made at any point this session — every test uses `DemoLLMProvider`/
+   `DemoSearchProvider` or an in-process stub; Checkpoint G's Live Mode path is untouched by H1 except for
+   the `research_extraction` prompt version bump (`v1 → v2`, Phase 5) and the `ResearchExtractionInput`
+   shape change (`industry`/`size_band` fields removed, `allowed_industry_categories` added) — both apply
+   identically to Demo and Live Mode since they share the same prompt-building code, and neither touches
+   `providers/live/openai_llm.py` itself.
 
 ---
 
@@ -1480,25 +1776,112 @@ update; no application code changed as part of recording these results.
 
 ---
 
+**Checkpoint H1's own deviations:**
+
+- **`SourceDocument` was moved from `providers/base.py` to `models/schemas.py`.** The task's Phase 9
+  described it as a "provider-neutral retrieval record," and Phase 10's dedupe/winner-selection logic is
+  naturally `domain/`-pure — but `domain/` cannot import from `providers/` (CLAUDE.md's own invariant).
+  Rather than duck-typing against a `Protocol` or duplicating the model, it was promoted to `models/
+  schemas.py` (the same tier `Evidence`/`ResearchFacts` already live in) and re-exported from
+  `providers/base.py` for every existing import site (`prompts/research_extraction.py`,
+  `providers/demo/demo_search.py`) — no call site needed to change its import.
+- **`search_calls`/`source_documents` telemetry for `discover()`/`resolve_domain()` is not persisted** —
+  only `fetch_sources()` (the one call the research step actually makes) is wired through `engine/
+  search.py::call_search()`/`SearchCallRecorder`. `discover()` is called once, run-level, before any
+  per-prospect `ProspectContext` exists (no natural `(run_id, prospect_id)` scope), and `resolve_domain()`
+  isn't called by anything in H1's pipeline at all (H2 groundwork). Both return `SearchAttemptTelemetry`
+  today so persisting them later is additive, not a redesign — deferred because doing so has zero
+  observable effect on anything H1's acceptance criteria checks.
+- **`DimensionScore.unsupported: bool` was kept alongside the new `support: DimensionSupport` tri-state**
+  rather than replaced — a computed/derived Pydantic field was considered and rejected in favor of two
+  explicit fields kept in sync by `domain/scoring.py`, since `unsupported` is round-tripped through
+  `ICPScoreRow.dimensions` (JSON) and read directly by the `score_support` review check and the frontend
+  `ScoreBreakdown` table; changing its meaning or removing it would have required touching both without
+  any behavior change to justify the risk. `support` is the new authoritative field; `unsupported` is
+  `True` for both `UNSUPPORTED` and `UNKNOWN`, preserving every pre-H1 reader's semantics exactly.
+- **`ICPScore.exclusion_status` is not persisted as its own `ICPScoreRow` column.** `runner.py::
+  _derive_final_status` reads it directly off the in-memory `ctx.score` before the DB write — nothing
+  downstream (API responses, evaluation metrics) currently needs a DB-level round trip of this specific
+  field, since `unevaluable_exclusion_count` in the new `search_quality` metrics block is instead
+  computed from the already-persisted `modifiers[].name == "exclusion_not_evaluable"`, which carries the
+  same information. Adding a dedicated column is a small, low-risk future addition if a consumer needs it.
+- **Demo fixture profile facts reuse each company's first/primary existing source** (`funding-note` for
+  five companies, `market-note` for Riverbend) rather than a dedicated new source — required by the task's
+  own explicit instruction ("extend the cited source snippet rather than adding new Evidence rows") and
+  proven safe by the monotonic-grounding argument in "What Checkpoint H1 added," Phase 8.
+- **`STRUCTURAL_AGGREGATOR_DOMAINS` in `domain/discovery.py` is a small, reviewable hand-picked denylist**
+  (LinkedIn, Crunchbase, Wikipedia, social platforms, a few B2B directories), not derived from any external
+  source — the task explicitly asks for "structural aggregator filtering" as one of several identity-gate
+  primitives without specifying a canonical list, and this is H2 groundwork not yet exercised against a
+  real provider; a real H2 implementation may want to source this list differently.
+- **`domain/query_plan.py`'s five templates render deterministic strings from `PlaySpec` fields only** —
+  no LLM involvement anywhere in query construction, consistent with the task's explicit "the LLM never
+  creates arbitrary search queries" requirement. The exact template wording is illustrative (H2 will tune
+  it against real provider behavior); what's load-bearing and tested is the *mechanism* (versioned,
+  deterministic, bounded, ordered by signal strength) not the specific phrasing.
+- **8 pre-existing `test_scoring.py` tests were rewritten**, not left in place — they asserted the exact
+  behavior Phase 7 was tasked with deleting (`industry_fit`/`size_fit` reading `CompanySeed` directly).
+  This is the task's own explicitly mandated architecture change, not a test weakened to hide a
+  regression: the rewritten tests now construct `IndustryProfileFact`/`EmployeeCountProfileFact` inputs
+  matching the new, honest data flow, and new tests (`test_industry_fit_ignores_company_seed_when_no_profile_fact`,
+  `test_company_seed_industry_disagreeing_with_fact_is_ignored`) specifically prove the old behavior no
+  longer happens.
+- **`scripts/search_spike.py` was written against the `tavily` SDK's *documented/typical* shape** (a
+  `TavilyClient`/`AsyncTavilyClient` class, `search()`/`extract()` methods) inferred from public
+  documentation knowledge, not from an actually-installed package in this environment — H1 deliberately
+  does not add `tavily-python` as a dependency (task requirement: "do not install/pin a search SDK"). The
+  script is defensive about this (`getattr`/`hasattr` checks, no assumption the exact class names exist)
+  and prints exactly what it finds rather than crashing if the real SDK's shape differs; a human running
+  it for real against the actually-installed package is what the task calls "verify the actual installed
+  API," and that verification is explicitly deferred to whenever the user runs it.
+
+---
+
 ## Next task
 
-**Checkpoint G is complete. Do not begin Checkpoint H without the user explicitly asking.**
-All Checkpoint A–F (P0) behavior remains unchanged and verified byte-identical; Checkpoint G adds real
-OpenAI LLM execution (fixture-backed search) behind the existing provider seam, fully tested against a
-scripted transport, with zero live network calls made by any automated test.
+**Checkpoint H1 is complete. Do not begin Checkpoint H2 without the user explicitly asking.**
+All Checkpoints A–G behavior remains unchanged and verified byte-identical; H1 hardens the domain/search/
+provenance/scoring foundation (two real bugs fixed, PSL-aware domain normalization, URL safety/source
+identity, independently-grounded profile facts, tri-state scoring/exclusion honesty, `source_documents`/
+`search_calls` persistence with deterministic dedupe, retrieval/accepted-Evidence state split, a refined
+`SearchProvider` contract, and offline query-plan/discovery primitives) — with zero live search calls made
+by anything, anywhere, this session.
 
-If/when Checkpoint H (live web search) is authorized, the seams are already in place:
-`providers/registry.py::build_provider_bundle` is where a `TavilySearchProvider` (or similar) would be
-wired in for Live Mode instead of the current `DemoSearchProvider`; `models/schemas.py::Evidence`'s
-`origin=LIVE_FETCH` path (with a real `source_url`) is built and tested
-(`test_fixture_provenance.py`) but currently untriggerable — every evidence row in the repo today is
-still `DEMO_FIXTURE`, in both Demo and Live Mode, because Checkpoint G is explicitly "LIVE LLM · FIXTURE
-SEARCH." `providers/profile.py`'s `synthetic_search: true` / `evidence_origin: "DEMO_FIXTURE"` fields
-would flip once a real search provider lands. Beyond Checkpoint H, `docs/IMPLEMENTATION_PLAN.md` §5's
-remaining order still applies: **deployment → MCP shim → polish**. Concretely:
+**H2 invariants — what a future session must preserve when it builds the real search adapter:**
 
-1. **Live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url` handling
-   to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently untriggerable.
+- `providers/registry.py::build_provider_bundle` is where a real `TavilySearchProvider` gets wired in for
+  Live Mode instead of `DemoSearchProvider` — it must satisfy the exact `SearchProvider` Protocol H1
+  refined (`discover`/`resolve_domain`/`fetch_sources`, each returning payload + `SearchAttemptTelemetry`).
+- Every retrieval occurrence a real provider returns must flow through `engine/search.py::call_search()`
+  (which persists `search_calls`/`source_documents`) and `domain/source_identity.py::select_winners()`
+  (which dedupes before Evidence is ever built) — never construct `Evidence` directly from raw provider
+  results.
+- `models/schemas.py::Evidence`'s `origin=LIVE_FETCH` path (real `source_url`, structurally validated by
+  `Evidence._no_fake_sources`) is built and tested (`test_fixture_provenance.py`) but currently
+  untriggerable — every evidence row in the repo today is still `DEMO_FIXTURE`, in both Demo and Live Mode.
+  A real adapter must route retrieved URLs through `domain/url_safety.py::is_safe_source_url()`/
+  `canonicalize_url()` before ever setting `Evidence.source_url`.
+- Industry/employee-count classification from real web text must go through `domain/industry.py`'s
+  server-side `validate_category()` and `domain/grounding.py::numeric_claim_supported()` exactly as Demo
+  Mode's simulated facts already do — never trust a real model's free-text category or an inferred count.
+- `domain/discovery.py::resolve_candidate_domain()` is the identity gate a real domain-resolution step
+  must route every candidate through — served-set membership, non-aggregator, URL-safe, all three,
+  before ever setting a prospect's canonical domain from a search result.
+- The `LIVE_MAX_*`/`SEARCH_MAX_*` bounds in `config.py` (Phase 14) are hard bounds a real adapter must
+  actually enforce, not just carry as unused config.
+- `providers/profile.py`'s `synthetic_search: true` / `evidence_origin: "DEMO_FIXTURE"` fields must flip
+  to `false`/`"LIVE_FETCH"` once a real search provider lands — `RunSummary.tsx`'s mode label (Phase 15)
+  already reads `synthetic_search` truthfully and needs no further change when that happens.
+- Run `scripts/search_spike.py` (or an updated version of it) against the actually-installed SDK BEFORE
+  writing `providers/live/tavily_search.py` — its provider-verification status is `NOT RUN` as of this
+  checkpoint; do not skip straight to an adapter based on remembered/assumed SDK behavior.
+
+Beyond Checkpoint H2, `docs/IMPLEMENTATION_PLAN.md` §5's remaining order still applies: **deployment →
+MCP shim → polish**. Concretely:
+
+1. **H2 — live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url`
+   handling to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently
+   untriggerable, per the H2 invariants above.
 2. **Deployment** — currently local-only by design (§27); optional.
 3. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
 4. **Polish backlog** (not required, noted for completeness):
@@ -1607,3 +1990,20 @@ remaining order still applies: **deployment → MCP shim → polish**. Concretel
   method's contract but won't catch a new method repeating the mistake. `tests/conftest.py::_enable_wal`
   must keep setting `PRAGMA foreign_keys=ON` (mirroring `db.py`'s real one exactly) — removing it would
   silently make the whole test suite blind to foreign-key violations again, the way it already was once.
+- **Checkpoint H1's own do-not-touch:** `domain/scoring.py`'s deleted `_STRUCTURAL_DIMENSIONS` exemption
+  must not come back — `industry_fit`/`size_fit` must keep reading only `ScoringInputs.industry_fact`/
+  `.employee_count_fact`, never `inputs.company.industry`/`.employee_count`; re-adding a CompanySeed
+  shortcut for either dimension is exactly the bug this checkpoint closed. `engine/steps/research.py`'s
+  commit-once pattern (`ctx.sources` cached, `ctx.evidence` set by one plain assignment only on success)
+  must not regress to appending evidence before or during the LLM call — that reintroduces Bug A.
+  `domain/source_identity.py::evidence_id_for()`'s `uuid5` scheme is load-bearing for idempotent commits;
+  don't switch it back to `uuid4()`. `repositories/search.py::SearchRepository.record_search()`'s
+  two-pass winner-then-loser insert order is load-bearing under `PRAGMA foreign_keys=ON` (same lesson as
+  `create_play_with_attempts` — no ORM `relationship()` exists anywhere in this schema) — do not collapse
+  it into one pass. `domain/review.py`'s seven checks must stay exactly seven; the UNKNOWN-exclusion-forces-
+  NEEDS_REVIEW logic belongs in `runner.py::_derive_final_status`, never as an eighth guardrail.
+  `domain/psl.py`'s `TLDExtract(suffix_list_urls=(), ...)` construction must not gain a real
+  `suffix_list_urls` value or a bare `TLDExtract()` default — either reintroduces a runtime PSL network
+  fetch. H2 must not write `providers/live/tavily_search.py` or perform live search without the user
+  explicitly authorizing Checkpoint H2 — see "H2 invariants" under Next Task above for what that adapter
+  must satisfy when it's built.

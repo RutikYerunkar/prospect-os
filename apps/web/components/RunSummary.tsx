@@ -40,6 +40,19 @@ function isActivelyExecuting(p: ProspectSummary): boolean {
   return !TERMINAL(p.status) && p.stage !== "DISCOVERED";
 }
 
+// H1 Phase 15: the mode chip reads this RUN's own persisted
+// `provider_profile.synthetic_search`, never `run.mode === "live"` alone.
+// A historical Checkpoint G run stays truthfully "LIVE LLM · FIXTURE
+// SEARCH" forever; a future Checkpoint H2 run with a real search provider
+// (`synthetic_search: false`) renders "LIVE LLM · LIVE SEARCH" — the label
+// is a fact about what actually executed, not an inference from the mode
+// string. `synthetic_search` undefined (a run predating this field) falls
+// back to the only thing that has ever been true so far: fixture search.
+function searchLabel(run: RunResponse): string {
+  const syntheticSearch = run.provider_profile?.synthetic_search ?? true;
+  return syntheticSearch ? "LIVE LLM · FIXTURE SEARCH" : "LIVE LLM · LIVE SEARCH";
+}
+
 export function RunSummary({
   run,
   objective,
@@ -81,7 +94,7 @@ export function RunSummary({
           {run.mode === "live" ? (
             <span title={run.provider_profile?.model ? `model: ${run.provider_profile.model}` : undefined}>
               <Badge tone="indigo">
-                LIVE LLM · FIXTURE SEARCH
+                {searchLabel(run)}
                 {run.provider_profile?.model ? ` · ${run.provider_profile.model}` : ""}
               </Badge>
             </span>
