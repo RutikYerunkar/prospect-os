@@ -20,6 +20,7 @@ from groundwork.domain.dedupe import find_duplicate, normalize_domain, normalize
 from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.pipeline import build_prospect_pipeline
+from groundwork.engine.search import call_discover
 from groundwork.models.enums import ExclusionEvaluation, ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
 from groundwork.models.schemas import CompanySeed, PlaySpec, ProspectOutcome
 from groundwork.observability.events import EventEmitter
@@ -97,8 +98,19 @@ async def discover_and_dedupe(
 ) -> tuple[list[tuple[str, CompanySeed, str, str | None]], set[str]]:
     """Sequential, cheap (§7 diagram). Returns per-prospect seeds plus the
     full set of company identifiers in this run (for the cross-prospect-leak
-    guardrail)."""
-    discovery = await providers.search.discover(play_spec, play_spec.target_count)
+    guardrail).
+
+    Discovery telemetry is persisted through the same `engine/search.py`
+    seam `fetch_sources()` already uses — never a duplicated persistence
+    path here (H1 Phase 1 deviation closure). `prospect_id=None` on the
+    recorder is correct, not a placeholder: `discover()` runs once, before
+    any prospect exists to attribute it to.
+    """
+    discovery_search_calls = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
+    discovery = await call_discover(
+        providers=providers, play_spec=play_spec, limit=play_spec.target_count,
+        search_calls=discovery_search_calls,
+    )
     company_seeds = discovery.companies
 
     seen_keys: dict[str, str] = {}

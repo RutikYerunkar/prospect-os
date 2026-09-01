@@ -1785,13 +1785,11 @@ update; no application code changed as part of recording these results.
   schemas.py` (the same tier `Evidence`/`ResearchFacts` already live in) and re-exported from
   `providers/base.py` for every existing import site (`prompts/research_extraction.py`,
   `providers/demo/demo_search.py`) — no call site needed to change its import.
-- **`search_calls`/`source_documents` telemetry for `discover()`/`resolve_domain()` is not persisted** —
-  only `fetch_sources()` (the one call the research step actually makes) is wired through `engine/
-  search.py::call_search()`/`SearchCallRecorder`. `discover()` is called once, run-level, before any
-  per-prospect `ProspectContext` exists (no natural `(run_id, prospect_id)` scope), and `resolve_domain()`
-  isn't called by anything in H1's pipeline at all (H2 groundwork). Both return `SearchAttemptTelemetry`
-  today so persisting them later is additive, not a redesign — deferred because doing so has zero
-  observable effect on anything H1's acceptance criteria checks.
+- ~~`search_calls` telemetry for `discover()` is not persisted~~ — **CLOSED** in the H1 deviation-closure
+  pass (see "H1 deviation-closure pass" below): `discover()` is an active execution path (called once per
+  run) and now routes through `engine/search.py::call_discover()`, the same persistence seam
+  `fetch_sources()` uses. `resolve_domain()` remains deliberately unwired — nothing in H1's pipeline calls
+  it (H2 groundwork) — per the same reasoning as before.
 - **`DimensionScore.unsupported: bool` was kept alongside the new `support: DimensionSupport` tri-state**
   rather than replaced — a computed/derived Pydantic field was considered and rejected in favor of two
   explicit fields kept in sync by `domain/scoring.py`, since `unsupported` is round-tripped through
@@ -1799,12 +1797,12 @@ update; no application code changed as part of recording these results.
   `ScoreBreakdown` table; changing its meaning or removing it would have required touching both without
   any behavior change to justify the risk. `support` is the new authoritative field; `unsupported` is
   `True` for both `UNSUPPORTED` and `UNKNOWN`, preserving every pre-H1 reader's semantics exactly.
-- **`ICPScore.exclusion_status` is not persisted as its own `ICPScoreRow` column.** `runner.py::
-  _derive_final_status` reads it directly off the in-memory `ctx.score` before the DB write — nothing
-  downstream (API responses, evaluation metrics) currently needs a DB-level round trip of this specific
-  field, since `unevaluable_exclusion_count` in the new `search_quality` metrics block is instead
-  computed from the already-persisted `modifiers[].name == "exclusion_not_evaluable"`, which carries the
-  same information. Adding a dedicated column is a small, low-risk future addition if a consumer needs it.
+- ~~`ICPScore.exclusion_status` is not persisted as its own `ICPScoreRow` column~~ — **investigated and
+  CLOSED without a new column** in the H1 deviation-closure pass (see below): `ICPScoreRow.disqualified` +
+  `ICPScoreRow.modifiers` (both already persisted) represent all three exclusion states unambiguously;
+  `domain/scoring.py::exclusion_status_from_persisted()` reconstructs the tri-state from those two plain
+  fields alone, proven to survive a literal engine disposal/reconnect in
+  `tests/test_exclusion_persistence_reload.py`. No standalone column was needed — this remains the design.
 - **Demo fixture profile facts reuse each company's first/primary existing source** (`funding-note` for
   five companies, `market-note` for Riverbend) rather than a dedicated new source — required by the task's
   own explicit instruction ("extend the cited source snippet rather than adding new Evidence rows") and
@@ -1834,6 +1832,109 @@ update; no application code changed as part of recording these results.
   and prints exactly what it finds rather than crashing if the real SDK's shape differs; a human running
   it for real against the actually-installed package is what the task calls "verify the actual installed
   API," and that verification is explicitly deferred to whenever the user runs it.
+
+---
+
+## H1 deviation-closure pass (before PR #8 merge)
+
+A focused follow-up pass, requested before merging PR #8, closing the two deviations flagged above.
+**No H2 work, no Tavily/live-provider code, no network/provider calls, and no H1 redesign** — both
+closures are small, additive changes to the existing seams.
+
+### 1. Discovery search telemetry now uses the same persistence seam as `fetch_sources()`
+
+**Root cause of the original gap:** `discover_and_dedupe()` called `providers.search.discover(...)`
+directly, bypassing `engine/search.py` entirely — the one place search telemetry is supposed to be
+persisted. This meant `discover()`, despite being called on *every* run, left zero `search_calls` trace,
+while `fetch_sources()` (the per-prospect call) was fully instrumented.
+
+**Fix, root implementation chosen:**
+
+- `providers/base.py` gains `SearchProviderError` (a `SearchAttemptTelemetry`-carrying exception, the
+  search-side analogue of `ProviderError.attempts`) — providers that fail before returning a result can
+  still hand back whatever telemetry they produced.
+- `engine/search.py` gains `call_discover()`, structurally identical to the existing `call_search()`:
+  calls `providers.search.discover(...)`, persists its telemetry via a `SearchCallRecorder` either way
+  (success or `SearchProviderError`), and only then returns/re-raises. This is the single new call site —
+  no search-telemetry logic was duplicated into `runner.py`.
+- `repositories/search.py::SearchRepository.record_search()` and `observability/search_calls.py::
+  SearchCallRecorder` both had `prospect_id: str` relaxed to `prospect_id: str | None = None` —
+  `SearchCallRow.prospect_id` was already a nullable column (H1 Phase 9), so this is a signature widening,
+  not a schema change. `discover()` never returns `SourceDocument` occurrences (only `CompanySeed`s), so
+  the existing winner/loser `source_documents` logic in `record_search()` is simply never exercised for a
+  `prospect_id=None` call — no special-casing needed there either.
+- `engine/runner.py::discover_and_dedupe()` now builds `SearchCallRecorder(run_id=run_id,
+  prospect_id=None, repo=repos.search)` and calls `call_discover(...)` instead of the provider directly.
+  `play_id` is left `None` on these rows, deliberately mirroring `llm_calls`' own convention (a
+  run/prospect-scoped row never also carries `play_id` — only `objective_parse`'s pre-Play-existence rows
+  do); `run_id` is the correct, suf­ficient association since a `Run` already references its `Play` via
+  `RunRow.play_id`.
+- `resolve_domain()` was deliberately left unwired to any call site — nothing in H1's pipeline invokes it
+  (it's H2 domain-resolution groundwork), and inventing a runtime caller purely to exercise it would be
+  scope creep the task explicitly warned against. `engine/search.py`'s docstring records this choice
+  explicitly so H2 doesn't have to re-derive the reasoning.
+
+**Verified directly** (`tests/test_discovery_telemetry.py`, 4 tests): one Demo `discover()` call produces
+exactly one `search_calls` row (`operation="discover"`, `run_id` set, `prospect_id=None`, `provider=
+"demo_fixture"`, `status="OK"`, `result_count`/`selected_count` matching the fixture roster, `cost_usd=
+None`); the provider's own telemetry-attempt count (1, for Demo Mode) reconciles exactly with the
+persisted row count; a scripted discovery failure (`_FlakyDiscovery`, a `DemoSearchProvider` subclass
+raising `SearchProviderError` with attached telemetry) persists a `PROVIDER_ERROR` row with the redacted
+error type/message *before* the exception propagates and fails the run — proven by asserting zero
+prospects were created and a subsequent successful retry adds an independent second row rather than
+mutating the first; and the full canonical Demo distribution/scores are unaffected (confirmed via a direct
+`execute_run()` end to end, not just `discover_and_dedupe()` in isolation).
+
+A real SQLite inspection after a headless `make demo` run confirms the fix live:
+`('discover', <run_id>, None, 'demo_fixture', 'OK', 7, 7)` alongside the five pre-existing `fetch_sources`
+rows — `discover()` is no longer a silent gap in the telemetry story.
+
+### 2. Tri-state exclusion survives persistence/reload — investigated, closed without a new column
+
+**Investigation finding:** the persisted `ICPScoreRow` already carries everything needed. `domain/
+scoring.py::compute_score()` sets `disqualified=True` if and only if the exclusion status is `EXCLUDED`,
+and appends a `ScoreModifier(name="exclusion_not_evaluable", detail="Exclusion policy could not be
+evaluated because industry was not established from evidence.")` if and only if the status is `UNKNOWN` —
+both already flow into `ICPScoreRow.disqualified` (bool column) and `ICPScoreRow.modifiers` (JSON column)
+via the existing, unmodified `upsert_score()`. These two plain fields represent all three states with zero
+ambiguity: `disqualified=True` ⟺ `EXCLUDED`; `disqualified=False` + the `exclusion_not_evaluable` modifier
+present ⟺ `UNKNOWN`; `disqualified=False` + no such modifier ⟺ `NOT_EXCLUDED`. This is **preference A**
+from the task's own list ("persist in the existing score-result/modifier JSON if that structure already
+represents scoring decisions cleanly") — and it turned out to already be true; no column was added.
+
+**What was added, additively:** `domain/scoring.py::exclusion_status_from_persisted(*, disqualified:
+bool, modifiers: list[dict]) -> ExclusionEvaluation` and `exclusion_reason_from_persisted(modifiers:
+list[dict]) -> str | None` — small, pure functions that take only the two plain fields a repository read
+off `ICPScoreRow` actually returns (never an in-memory `ICPScore`/`ProspectContext`), so they work
+identically whether called one millisecond after `compute_score()` or after a full process restart.
+`evaluation/metrics.py::_compute_search_quality()`'s `unevaluable_exclusion_count` was refactored (net
+same behavior, now DRY) to call `exclusion_status_from_persisted()` instead of inlining the modifier-name
+check — it already read from persisted `score_rows`, so this was a clarity change, not a behavior change.
+The modifier name (`exclusion_not_evaluable`) and reason text are now named constants
+(`EXCLUSION_NOT_EVALUABLE_MODIFIER`, alongside `HARD_DISQUALIFIER_MODIFIER`) referenced from both the
+writer (`compute_score`) and the readers, so the two can never silently drift apart.
+
+**Verified directly** (`tests/test_exclusion_persistence_reload.py`, 4 tests), including the literal
+six-step round trip the task asked for: a prospect whose grounded industry is unavailable is run to
+completion (`NEEDS_REVIEW`) against a real, file-backed SQLite engine; that engine is then **disposed**
+(`await engine.dispose()`, plus deleting every Python object from the execution — `repos`, `providers`,
+`summary`); a **brand-new** `create_async_engine()` is opened against the *same file path*; a fresh
+`ProspectDataRepository` bound to the new engine reads the score row; `exclusion_status_from_persisted()`
+correctly reports `UNKNOWN` and `exclusion_reason_from_persisted()` returns the exact required sentence;
+and `compute_run_evaluation()` (also reading through the reconnected engine) counts it in
+`unevaluable_exclusion_count`. Three further tests confirm: Cobalt Retail Systems reloads as
+`disqualified=True`/`EXCLUDED`/`REJECTED` through an independent repository instance; Northwind Labs
+(grounded, on the target list) reloads as `NOT_EXCLUDED` with a `None` reason; and the persisted
+`review_results.checks` length is exactly 7 in both the Cobalt and the UNKNOWN-exclusion case — this
+remains a scoring/status-derivation concern, never an eighth review guardrail.
+
+**Post-closure verification:** `uv run pytest` — **246/246 passing** (238 + 4 discovery-telemetry tests +
+4 exclusion-persistence-reload tests). `make demo-reset && make demo` — still byte-identical to every
+prior gate (Northwind 92, Riverbend 35, Cobalt 25/`REJECTED`, Ferrous 58, Sable 79, `PASS:2
+NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`). `cd apps/web && pnpm lint && pnpm build` — clean,
+unchanged (no frontend files touched this pass). No real search/provider call was made anywhere in this
+pass; `search_spike.py` remains `NOT RUN`. No H2 code (no Tavily adapter, no live-search execution) was
+introduced.
 
 ---
 

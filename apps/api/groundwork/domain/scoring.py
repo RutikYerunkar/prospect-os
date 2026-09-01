@@ -259,6 +259,10 @@ _DIMENSION_FNS = [
 ]
 
 
+EXCLUSION_NOT_EVALUABLE_MODIFIER = "exclusion_not_evaluable"
+HARD_DISQUALIFIER_MODIFIER = "hard_disqualifier"
+
+
 def _evaluate_exclusion(category: str | None, excluded_industries: list[str]) -> ExclusionEvaluation:
     """Tri-state exclusion-policy evaluation (H1 Phase 7). `category` here
     is already the independently *grounded* category (or `None`) — never
@@ -268,6 +272,46 @@ def _evaluate_exclusion(category: str | None, excluded_industries: list[str]) ->
     if category in excluded_industries:
         return ExclusionEvaluation.EXCLUDED
     return ExclusionEvaluation.NOT_EXCLUDED
+
+
+def exclusion_status_from_persisted(*, disqualified: bool, modifiers: list[dict]) -> ExclusionEvaluation:
+    """Reconstruct the tri-state exclusion evaluation from a persisted
+    `ICPScoreRow` alone — `disqualified` (bool) and `modifiers` (the JSON
+    list of `{name, reason, detail}` dicts `ICPScoreRow.modifiers` already
+    stores) are sufficient; no dedicated `exclusion_status` column exists
+    because this pair already represents all three states unambiguously
+    (H1 deviation-closure investigation, see docs/PROGRESS.md):
+
+    - EXCLUDED: `compute_score` only ever sets `disqualified=True` when
+      `exclusion_status == EXCLUDED` — the two are equivalent by
+      construction (`groundwork.models.schemas.ICPScore` isn't required
+      here at all).
+    - UNKNOWN: `disqualified=False` and `modifiers` contains a
+      `"exclusion_not_evaluable"` entry — `compute_score` adds this
+      modifier if and only if the exclusion status is `UNKNOWN`.
+    - NOT_EXCLUDED: `disqualified=False` and no such modifier.
+
+    Takes plain `bool`/`list[dict]` (exactly what a repository read off
+    `ICPScoreRow` yields) rather than an in-memory `ICPScore` — this must
+    work after a process restart, with zero `ProspectContext`/`ICPScore`
+    Python objects from the original execution still alive.
+    """
+    if disqualified:
+        return ExclusionEvaluation.EXCLUDED
+    if any(m.get("name") == EXCLUSION_NOT_EVALUABLE_MODIFIER for m in modifiers):
+        return ExclusionEvaluation.UNKNOWN
+    return ExclusionEvaluation.NOT_EXCLUDED
+
+
+def exclusion_reason_from_persisted(modifiers: list[dict]) -> str | None:
+    """The exact UNKNOWN-exclusion reason text, read back from a persisted
+    `ICPScoreRow.modifiers` list — `None` if no such modifier is present
+    (EXCLUDED and NOT_EXCLUDED both carry no `exclusion_not_evaluable`
+    entry)."""
+    for m in modifiers:
+        if m.get("name") == EXCLUSION_NOT_EVALUABLE_MODIFIER:
+            return m.get("detail")
+    return None
 
 
 def compute_score(prospect_id: str, inputs: ScoringInputs) -> ICPScore:
@@ -306,7 +350,7 @@ def compute_score(prospect_id: str, inputs: ScoringInputs) -> ICPScore:
         capped = min(overall, 25)
         modifiers.append(
             ScoreModifier(
-                name="hard_disqualifier",
+                name=HARD_DISQUALIFIER_MODIFIER,
                 reason=f"industry '{grounded_category}' is on the exclude list",
                 detail=f"overall capped from {overall} to {capped}",
             )
@@ -316,10 +360,13 @@ def compute_score(prospect_id: str, inputs: ScoringInputs) -> ICPScore:
         # Never silently pass: surfaced as a modifier here, and
         # `engine/runner.py::_derive_final_status` forces NEEDS_REVIEW for
         # it rather than adding an eighth review guardrail — the seven
-        # deterministic checks stay exactly seven.
+        # deterministic checks stay exactly seven. This modifier (name +
+        # `detail` text) is also the ONLY persisted representation of the
+        # UNKNOWN exclusion state — see `exclusion_status_from_persisted()`
+        # above. Changing this string is a persisted-data-shape change.
         modifiers.append(
             ScoreModifier(
-                name="exclusion_not_evaluable",
+                name=EXCLUSION_NOT_EVALUABLE_MODIFIER,
                 reason="industry was not established from evidence",
                 detail="Exclusion policy could not be evaluated because industry was not established from evidence.",
             )

@@ -12,8 +12,9 @@ from datetime import datetime
 from typing import Any
 
 from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_evidence
+from groundwork.domain.scoring import exclusion_status_from_persisted
 from groundwork.engine.runner import Repos
-from groundwork.models.enums import EvidenceOrigin, ProspectStatus, SignalType
+from groundwork.models.enums import EvidenceOrigin, ExclusionEvaluation, ProspectStatus, SignalType
 from groundwork.models.schemas import Evidence
 
 
@@ -272,8 +273,15 @@ async def _compute_search_quality(run_id: str, repos: Any, *, score_rows: list) 
     scored_count = len(score_rows)
     industry_grounded_coverage = industry_grounded / scored_count if scored_count else None
     employee_count_grounded_coverage = size_grounded / scored_count if scored_count else None
+    # Reconstructed purely from persisted `ICPScoreRow` fields (H1
+    # deviation-closure pass) — `exclusion_status_from_persisted` never
+    # touches an in-memory `ICPScore`/`ProspectContext`, so this is exactly
+    # what a fresh process reading the DB after a restart would compute.
     unevaluable_exclusion_count = sum(
-        1 for row in score_rows if any(m.get("name") == "exclusion_not_evaluable" for m in row.modifiers)
+        1
+        for row in score_rows
+        if exclusion_status_from_persisted(disqualified=row.disqualified, modifiers=row.modifiers)
+        == ExclusionEvaluation.UNKNOWN
     )
 
     search_error_counts: dict[str, int] = {}

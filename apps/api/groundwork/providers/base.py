@@ -47,6 +47,7 @@ __all__ = [
     "SearchAttemptKind",
     "SearchAttemptStatus",
     "SearchAttemptTelemetry",
+    "SearchProviderError",
     "DiscoveryResult",
     "DomainCandidates",
     "SourceBundle",
@@ -315,6 +316,19 @@ class SearchAttemptTelemetry(BaseModel):
     error_message: str | None = None  # redacted before this is set
     cost_usd: float | None = None
     chars_retrieved: int = 0
+
+
+class SearchProviderError(Exception):
+    """Base for exceptions search-provider implementations raise — the
+    search-side analogue of `ProviderError`. Carries whatever
+    `SearchAttemptTelemetry` was produced before the failure, if any, so
+    `engine/search.py`'s call sites can persist a FAILED/PROVIDER_ERROR
+    `search_calls` row even when the logical call never returns a result
+    (mirrors `ProviderError.attempts` for the LLM boundary exactly)."""
+
+    def __init__(self, message: str, *, telemetry: list[SearchAttemptTelemetry] | None = None) -> None:
+        super().__init__(message)
+        self.telemetry: list[SearchAttemptTelemetry] = telemetry or []
 
 
 class DiscoveryResult(BaseModel):

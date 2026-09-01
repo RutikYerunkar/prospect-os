@@ -29,10 +29,18 @@ class SearchRepository:
         self,
         *,
         run_id: str,
-        prospect_id: str,
+        prospect_id: str | None = None,
         telemetry: list[SearchAttemptTelemetry],
         documents: list[SourceDocument],
     ) -> None:
+        """`prospect_id=None` is the run-level-only case (H1 Phase 1
+        deviation closure) — `discover()` runs once per run, before any
+        `ProspectContext`/prospect exists, so its `search_calls` rows
+        legitimately have no prospect to reference. `documents` is always
+        empty for a run-level call (`discover()` returns companies, not
+        retrieval occurrences), so the winner/loser `source_documents`
+        logic below is simply never exercised for that case — no special
+        casing needed."""
         async with self._session_factory() as session:
             call_ids: list[str] = []
             for t in telemetry:

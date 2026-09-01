@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SearchCallRecorder:
     run_id: str
-    prospect_id: str
+    # `None` for the run-level `discover()` call, which happens before any
+    # prospect exists (H1 Phase 1 deviation closure) — every per-prospect
+    # recorder (`fetch_sources()`) still binds a real prospect_id.
+    prospect_id: str | None
     repo: SearchRepository
 
     async def record(
