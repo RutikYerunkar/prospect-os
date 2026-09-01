@@ -286,10 +286,44 @@ async def _compute_search_quality(run_id: str, repos: Any, *, score_rows: list) 
 
     search_error_counts: dict[str, int] = {}
     latencies: list[float] = []
+    retries = 0
     for c in calls:
         if c.error_type:
             search_error_counts[c.error_type] = search_error_counts.get(c.error_type, 0) + 1
         latencies.append(c.latency_ms)
+        if c.attempt_kind == "transport_retry":
+            retries += 1
+
+    # H2 Phase 16: `search_cost_usd` sums only once EVERY contributing call
+    # has a non-null cost — the same completeness rule `_compute_llm_usage`
+    # applies, never a partial sum presented as complete. `search_credits_
+    # used` is the provider-native usage figure, summed independently
+    # (defaulting missing values to 0, like token counts) so real usage is
+    # visible even when no trustworthy USD rate is configured.
+    costs = [c.cost_usd for c in calls]
+    search_cost_usd = sum(costs) if costs and all(cost is not None for cost in costs) else None
+    credits = [c.credits_used for c in calls if c.credits_used is not None]
+    search_credits_used = sum(credits) if credits else None
+
+    extraction_calls = [c for c in calls if c.operation == "extract"]
+    partial_extractions = sum(1 for c in extraction_calls if c.status == "PARTIAL_EXTRACTION")
+    failed_source_count = sum(1 for d in docs if d.status in ("failed", "partial"))
+
+    # H2 Phase 18/19 — discovery-only counters, sourced from the same
+    # `run_events` SSE log `engine/discovery.py` already writes narrative
+    # entries to (never a second telemetry table for something this
+    # lightweight; the events are real progress items a viewer could also
+    # see in the Activity Stream).
+    discovery_rejection_reasons: dict[str, int] = {}
+    domain_resolution_method_counts: dict[str, int] = {}
+    events = await repos.events.after(run_id, 0)
+    for event in events:
+        if event.type == "discovery.candidate_rejected":
+            reason = (event.payload or {}).get("reason", "unknown")
+            discovery_rejection_reasons[reason] = discovery_rejection_reasons.get(reason, 0) + 1
+        elif event.type == "discovery.domain_resolved":
+            method = (event.payload or {}).get("method", "unknown")
+            domain_resolution_method_counts[method] = domain_resolution_method_counts.get(method, 0) + 1
 
     return {
         "result_occurrences": result_occurrences,
@@ -301,9 +335,17 @@ async def _compute_search_quality(run_id: str, repos: Any, *, score_rows: list) 
         "employee_count_grounded_coverage": employee_count_grounded_coverage,
         "unevaluable_exclusion_count": unevaluable_exclusion_count,
         "search_calls": len(calls),
+        "search_retries": retries,
         "search_error_counts": search_error_counts,
         "p50_search_latency_ms": _percentile(latencies, 0.5),
-        "search_cost_usd": None,  # H2: sum only once every call has a non-null cost, same rule as llm_usage
+        "p95_search_latency_ms": _percentile(latencies, 0.95),
+        "search_cost_usd": search_cost_usd,
+        "search_credits_used": search_credits_used,
+        "extraction_calls": len(extraction_calls),
+        "partial_extractions": partial_extractions,
+        "failed_or_partial_sources": failed_source_count,
+        "discovery_rejection_reasons": discovery_rejection_reasons,
+        "domain_resolution_method_counts": domain_resolution_method_counts,
     }
 
 

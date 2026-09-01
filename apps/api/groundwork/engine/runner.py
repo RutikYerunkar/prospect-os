@@ -19,6 +19,7 @@ from groundwork.domain.dedupe import dedupe_key as compute_dedupe_key
 from groundwork.domain.dedupe import find_duplicate, normalize_domain, normalize_name
 from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
+from groundwork.engine.discovery import DiscoveryBounds, discover_live
 from groundwork.engine.pipeline import build_prospect_pipeline
 from groundwork.engine.search import call_discover
 from groundwork.models.enums import ExclusionEvaluation, ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
@@ -94,24 +95,48 @@ def _derive_final_status(ctx: ProspectContext) -> ProspectStatus:
 
 
 async def discover_and_dedupe(
-    run_id: str, play_spec: PlaySpec, providers: ProviderBundle, repos: Repos
+    run_id: str,
+    play_spec: PlaySpec,
+    providers: ProviderBundle,
+    repos: Repos,
+    *,
+    events: EventEmitter | None = None,
+    discovery_bounds: DiscoveryBounds = DiscoveryBounds(),
 ) -> tuple[list[tuple[str, CompanySeed, str, str | None]], set[str]]:
     """Sequential, cheap (§7 diagram). Returns per-prospect seeds plus the
     full set of company identifiers in this run (for the cross-prospect-leak
     guardrail).
 
-    Discovery telemetry is persisted through the same `engine/search.py`
-    seam `fetch_sources()` already uses — never a duplicated persistence
-    path here (H1 Phase 1 deviation closure). `prospect_id=None` on the
-    recorder is correct, not a placeholder: `discover()` runs once, before
-    any prospect exists to attribute it to.
+    Demo Mode (and any future single-shot provider): discovery telemetry is
+    persisted through the same `engine/search.py` seam `fetch_sources()`
+    already uses — never a duplicated persistence path here (H1 Phase 1
+    deviation closure). `prospect_id=None` on the recorder is correct, not a
+    placeholder: `discover()` runs once, before any prospect exists to
+    attribute it to.
+
+    Live Mode (H2): a provider whose `requires_llm_discovery` is truthy
+    (only `TavilySearchProvider`) is routed instead to
+    `engine/discovery.py::discover_live()` — real multi-stage discovery
+    (search -> LLM extraction -> domain resolution -> identity gate). This
+    is the ONLY branch point between the two paths; everything below (dedupe,
+    `CompanyRepository`/`ProspectRepository` writes) is shared byte-for-byte.
     """
-    discovery_search_calls = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
-    discovery = await call_discover(
-        providers=providers, play_spec=play_spec, limit=play_spec.target_count,
-        search_calls=discovery_search_calls,
-    )
+    if getattr(providers.search, "requires_llm_discovery", False):
+        discovery = await discover_live(
+            run_id=run_id, play_spec=play_spec, providers=providers, repos=repos,
+            events=events or EventEmitter(run_id=run_id, events=repos.events),
+            limit=play_spec.target_count,
+            max_plan_queries=discovery_bounds.max_plan_queries,
+            max_domain_resolution_queries=discovery_bounds.max_domain_resolution_queries,
+        )
+    else:
+        discovery_search_calls = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
+        discovery = await call_discover(
+            providers=providers, play_spec=play_spec, limit=play_spec.target_count,
+            search_calls=discovery_search_calls,
+        )
     company_seeds = discovery.companies
+    company_origin = "live_fetch" if getattr(providers.search, "requires_llm_discovery", False) else "demo_fixture"
 
     seen_keys: dict[str, str] = {}
     prospect_seeds: list[tuple[str, CompanySeed, str, str | None]] = []
@@ -120,7 +145,9 @@ async def discover_and_dedupe(
     for company in company_seeds:
         key = compute_dedupe_key(company.domain, company.name)
         canonical_domain = normalize_domain(company.domain) or normalize_name(company.name)
-        company_id = await repos.companies.get_or_create(company, canonical_domain, normalize_name(company.name))
+        company_id = await repos.companies.get_or_create(
+            company, canonical_domain, normalize_name(company.name), origin=company_origin
+        )
 
         duplicate_of = find_duplicate(key, seen_keys)
         status = ProspectStatus.DUPLICATE if duplicate_of else ProspectStatus.RUNNING
@@ -146,8 +173,11 @@ async def execute_run(
     max_concurrent_prospects: int,
     run_wall_clock_timeout_s: float,
     budget: PipelineBudget = DEMO_BUDGET,
+    discovery_bounds: DiscoveryBounds = DiscoveryBounds(),
 ) -> RunSummary:
-    prospect_seeds, all_identifiers = await discover_and_dedupe(run_id, play_spec, providers, repos)
+    prospect_seeds, all_identifiers = await discover_and_dedupe(
+        run_id, play_spec, providers, repos, discovery_bounds=discovery_bounds
+    )
     other_dedupe_keys_by_prospect = {
         pid: {k for pid2, _, k, dup in prospect_seeds if pid2 != pid and dup is None}
         for pid, _, _, _ in prospect_seeds

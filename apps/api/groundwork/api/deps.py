@@ -39,6 +39,17 @@ def get_live_runtime(request: Request):
 LiveRuntimeDep = Annotated[object, Depends(get_live_runtime)]
 
 
+def get_live_search_runtime(request: Request):
+    """The process-scoped `LiveSearchRuntime` created once in `main.py`'s
+    lifespan, or `None` if no `TAVILY_API_KEY` is configured — the search-
+    side analogue of `get_live_runtime`. H2's Live Mode requires BOTH this
+    AND `get_live_runtime` to be non-null."""
+    return getattr(request.app.state, "live_search_runtime", None)
+
+
+LiveSearchRuntimeDep = Annotated[object, Depends(get_live_search_runtime)]
+
+
 def get_repos(session_factory: SessionFactory) -> Repos:
     return Repos.build(session_factory)
 

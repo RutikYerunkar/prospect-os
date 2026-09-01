@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from fastapi import APIRouter
 
-from groundwork.api.deps import LiveRuntimeDep, PlaysRepoDep, ReposDep
+from groundwork.api.deps import LiveRuntimeDep, LiveSearchRuntimeDep, PlaysRepoDep, ReposDep
 from groundwork.api.errors import NotFoundError, UnprocessableEntityError
 from groundwork.api.run_service import launch_run
 from groundwork.api.schemas import (
@@ -39,6 +39,16 @@ def _require_live_runtime(live_runtime):
             "Demo Mode never falls back silently"
         )
     return live_runtime
+
+
+def _require_search_runtime(search_runtime):
+    if search_runtime is None:
+        raise UnprocessableEntityError(
+            "Live Mode requires TAVILY_API_KEY to be configured and the API process restarted — "
+            "H2 Live Mode requires BOTH a real LLM AND a real search provider, never a fixture-"
+            "search fallback"
+        )
+    return search_runtime
 
 
 async def _to_response(play_row, repos: ReposDep) -> PlayResponse:
@@ -138,13 +148,21 @@ async def get_play(play_id: str, plays: PlaysRepoDep, repos: ReposDep) -> PlayRe
 
 @router.post("/{play_id}/runs", response_model=RunCreateResponse, status_code=202)
 async def start_run(
-    play_id: str, body: RunCreateRequest, plays: PlaysRepoDep, repos: ReposDep, live_runtime: LiveRuntimeDep
+    play_id: str,
+    body: RunCreateRequest,
+    plays: PlaysRepoDep,
+    repos: ReposDep,
+    live_runtime: LiveRuntimeDep,
+    search_runtime: LiveSearchRuntimeDep,
 ) -> RunCreateResponse:
     """Persists the Run and returns 202 immediately — `execute_run` is
     launched as a background task and does not block this response (§17).
 
-    Live Mode requires a configured, running `LiveProviderRuntime` — never a
-    silent fallback to Demo Mode (Checkpoint G §7). Prospect count is
+    H2: Live Mode requires BOTH a configured, running `LiveProviderRuntime`
+    (OpenAI) AND `LiveSearchRuntime` (Tavily) — never a silent fallback to
+    Demo Mode, and never real LLM + fixture search for a NEW run (that
+    combination only exists in historical Checkpoint G runs, whose
+    `provider_profile` stays truthfully unchanged). Prospect count is
     clamped to `LIVE_MAX_PROSPECTS_PER_RUN` for cost control.
     """
     play_row = await plays.get(play_id)
@@ -160,12 +178,16 @@ async def start_run(
     run_budget = None
     if mode is Mode.LIVE:
         _require_live_runtime(live_runtime)
+        _require_search_runtime(search_runtime)
         if play_spec.target_count > settings.live_max_prospects_per_run:
             play_spec = play_spec.model_copy(update={"target_count": settings.live_max_prospects_per_run})
         run_budget = RunBudget(settings.live_run_soft_budget_usd)
 
     provider_profile = build_provider_profile(mode, settings, run_budget=run_budget)
     run_id = await repos.runs.create(play_id=play_id, mode=mode_value, seed=seed, provider_profile=provider_profile)
-    launch_run(run_id, play_spec, mode, seed, repos, live_runtime=live_runtime, run_budget=run_budget)
+    launch_run(
+        run_id, play_spec, mode, seed, repos,
+        live_runtime=live_runtime, run_budget=run_budget, search_runtime=search_runtime,
+    )
 
     return RunCreateResponse(run_id=run_id, status="RUNNING")

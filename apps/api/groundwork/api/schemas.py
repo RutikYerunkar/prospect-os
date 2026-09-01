@@ -144,21 +144,29 @@ class ProviderInfo(BaseModel):
 
 
 class LiveAvailability(BaseModel):
-    """§21/Phase 8: enough truth for the New Play screen to disable Live and
-    explain why, or show real bounds — never a secret value."""
+    """§21/Phase 8/H2 Phase 17: enough truth for the New Play screen to
+    disable Live and explain why, or show real bounds — never a secret
+    value. `available` requires BOTH `llm_available` AND `search_available`
+    (H2: no Live -> fixture-search fallback)."""
 
     available: bool
+    llm_available: bool = False
+    search_available: bool = False
     model: str
     reasoning_effort: str | None
     prompt_versions: dict[str, str]
-    search_provider: str = "demo_fixture"
+    search_provider: str = "tavily"
     synthetic_search: bool = True
+    query_plan_version: str = ""
     live_max_prospects_per_run: int
     llm_max_output_tokens: int
     llm_max_transport_retries: int
     llm_max_schema_retries: int
     llm_call_deadline_s: float
     live_step_timeout_s: float
+    search_hard_bounds: dict[str, int] = Field(default_factory=dict)
+    search_usage_capable: bool = False
+    search_pricing_configured: bool = False
     pricing_configured: bool
     soft_budget_usd: float | None
     soft_budget_enforceable: bool

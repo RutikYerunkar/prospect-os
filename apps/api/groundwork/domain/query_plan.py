@@ -24,6 +24,9 @@ class QueryTemplateId(StrEnum):
     INDUSTRY_TECHNOLOGY = "industry_technology"
     BREADTH = "breadth"
     OFFICIAL_SITE_DOMAIN = "official_site_domain"
+    COMPANY_FUNDING = "company_funding"
+    COMPANY_CAREERS = "company_careers"
+    COMPANY_LEADERSHIP = "company_leadership"
 
 
 def _digest(text: str) -> str:
@@ -59,6 +62,18 @@ def render_official_site_domain(company_name: str) -> str:
     return f"{company_name} official website"
 
 
+def render_company_funding(company_name: str) -> str:
+    return f"{company_name} funding round investment"
+
+
+def render_company_careers(company_name: str) -> str:
+    return f"{company_name} careers hiring jobs"
+
+
+def render_company_leadership(company_name: str) -> str:
+    return f"{company_name} leadership team about"
+
+
 def build_query_plan(play_spec: PlaySpec, *, max_queries: int) -> list[QueryPlanEntry]:
     """The discovery-phase query plan for one Play — deterministic given
     the same `PlaySpec`, bounded at `max_queries`
@@ -88,3 +103,19 @@ def build_domain_resolution_query(company_name: str) -> QueryPlanEntry:
     return QueryPlanEntry(
         template_id=QueryTemplateId.OFFICIAL_SITE_DOMAIN, query=query, query_digest=_digest(query)
     )
+
+
+def build_source_queries(company_name: str, *, max_queries: int) -> list[QueryPlanEntry]:
+    """Per-company category queries for real per-company source retrieval
+    (H2 Phase 10), bounded at `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT`. Order
+    is fixed — funding, careers/hiring, leadership/about — the highest-
+    signal categories first, so truncation drops the least specific
+    category last, never first. The LLM never constructs these queries;
+    they are rendered only from the company's own display name."""
+    candidates: list[tuple[QueryTemplateId, str]] = [
+        (QueryTemplateId.COMPANY_FUNDING, render_company_funding(company_name)),
+        (QueryTemplateId.COMPANY_CAREERS, render_company_careers(company_name)),
+        (QueryTemplateId.COMPANY_LEADERSHIP, render_company_leadership(company_name)),
+    ]
+    bounded = candidates[: max(max_queries, 0)]
+    return [QueryPlanEntry(template_id=tid, query=q, query_digest=_digest(q)) for tid, q in bounded]

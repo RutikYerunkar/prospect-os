@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo live-smoke search-spike
+.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -36,3 +36,10 @@ live-smoke:
 # see scripts/search_spike.py). Never run automatically by `make test`/CI.
 search-spike:
 	cd apps/api && uv run python -m groundwork.scripts.search_spike --i-understand-this-makes-real-calls
+
+# H2 real end-to-end smoke: REAL OpenAI + REAL Tavily, real discovered
+# companies, real money. Requires OPENAI_API_KEY, TAVILY_API_KEY, and
+# explicit confirmation — see scripts/search_smoke.py. Never run
+# automatically by `make test`/CI.
+search-smoke:
+	cd apps/api && uv run python -m groundwork.scripts.search_smoke --i-understand-this-costs-money

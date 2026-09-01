@@ -266,7 +266,11 @@ export default function NewPlayPage() {
                   type="button"
                   disabled={!liveAvailable}
                   onClick={() => setMode("live")}
-                  title={liveAvailable ? undefined : "Live Mode requires OPENAI_API_KEY configured on the API process"}
+                  title={
+                    liveAvailable
+                      ? undefined
+                      : "Live Mode requires BOTH OPENAI_API_KEY and TAVILY_API_KEY configured on the API process"
+                  }
                   className={`rounded-md border px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-40 ${mode === "live" ? "border-indigo-400 bg-indigo-400/10 text-indigo-200" : "border-zinc-700 text-zinc-400"}`}
                 >
                   Live
@@ -274,18 +278,26 @@ export default function NewPlayPage() {
               </div>
               {!liveAvailable && (
                 <p className="text-xs text-zinc-500">
-                  Live is unavailable — no OPENAI_API_KEY is configured on the API process. Demo Mode needs no
-                  credentials and reproduces the canonical fixture-driven results.
+                  Live is unavailable —{" "}
+                  {!live?.llm_available && !live?.search_available
+                    ? "neither OPENAI_API_KEY nor TAVILY_API_KEY is configured"
+                    : !live?.llm_available
+                      ? "OPENAI_API_KEY is not configured"
+                      : "TAVILY_API_KEY is not configured"}{" "}
+                  on the API process — H2 Live Mode requires BOTH a real LLM and a real search provider, never a
+                  fixture-search fallback. Demo Mode needs no credentials and reproduces the canonical
+                  fixture-driven results.
                 </p>
               )}
               {mode === "live" && live && (
                 <div className="mt-1 flex flex-col gap-1 rounded-md border border-amber-700/40 bg-amber-400/5 p-3 text-xs text-zinc-400">
-                  <p className="font-medium text-amber-300">LIVE LLM · FIXTURE SEARCH</p>
+                  <p className="font-medium text-amber-300">LIVE LLM · LIVE SEARCH</p>
                   <p>
                     Real OpenAI calls (model <span className="font-mono text-zinc-300">{live.model}</span>,
                     reasoning effort <span className="font-mono text-zinc-300">{live.reasoning_effort ?? "omitted"}</span>)
-                    for research extraction, scoring explanation, and personalization. Search stays
-                    fixture-backed — no live web search yet (Checkpoint H). Evidence remains SYNTHETIC.
+                    for discovery extraction, research extraction, scoring explanation, and personalization —
+                    plus real Tavily web search for discovery and per-company sources. Evidence for real prospects
+                    is LIVE_FETCH with real, clickable provider URLs.
                   </p>
                   <p>
                     Prospects this run: <span className="font-mono text-zinc-300">{cappedProspectCount}</span>
@@ -295,15 +307,47 @@ export default function NewPlayPage() {
                   </p>
                   {worstCaseTokens != null && (
                     <p>
-                      Hard worst-case bound per prospect: {maxAttemptsPerCall} provider attempts/call ×{" "}
+                      Hard worst-case LLM bound per prospect: {maxAttemptsPerCall} provider attempts/call ×{" "}
                       {live.llm_max_output_tokens} output tokens × 3 operations ={" "}
                       <span className="font-mono text-zinc-300">{worstCaseTokens.toLocaleString()}</span> tokens.
                     </p>
                   )}
+                  {live.search_hard_bounds && (
+                    <p>
+                      Search hard bounds: max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_plan_queries_per_run}
+                      </span>{" "}
+                      discovery queries, max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_domain_resolution_queries_per_run}
+                      </span>{" "}
+                      domain-resolution queries, max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_source_queries_per_prospect}
+                      </span>{" "}
+                      source queries/prospect, max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_search_calls_per_run}
+                      </span>{" "}
+                      search calls/run, max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_sources_per_prospect}
+                      </span>{" "}
+                      unique sources/prospect, max{" "}
+                      <span className="font-mono text-zinc-300">
+                        {live.search_hard_bounds.live_max_extract_calls_per_run}
+                      </span>{" "}
+                      extract calls/run.
+                    </p>
+                  )}
                   <p>
                     {live.soft_budget_enforceable
-                      ? `Soft spending threshold: $${live.soft_budget_usd} (advisory — not a hard cap).`
-                      : "Monetary threshold is not enforceable — no pricing configured for this deployment."}
+                      ? `Soft spending threshold: $${live.soft_budget_usd} (advisory — not a hard cap; OpenAI only).`
+                      : "Monetary threshold is not enforceable — no pricing configured for this deployment."}{" "}
+                    {live.search_pricing_configured
+                      ? "Tavily usage is priced too."
+                      : "Tavily cost estimate unavailable — hard search/extract call caps above are the real safety controls."}
                   </p>
                   <label className="mt-2 flex items-center gap-2 text-zinc-300">
                     <input
@@ -311,7 +355,7 @@ export default function NewPlayPage() {
                       checked={confirmedSpend}
                       onChange={(e) => setConfirmedSpend(e.target.checked)}
                     />
-                    I understand this run will make real, billed OpenAI API calls.
+                    I understand this run will make real, billed OpenAI and Tavily API calls.
                   </label>
                 </div>
               )}

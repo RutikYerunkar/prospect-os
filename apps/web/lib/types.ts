@@ -102,6 +102,12 @@ export interface ProviderProfile {
   search_provider: string;
   synthetic_search: boolean;
   evidence_origin: string;
+  // H2: present only on new Live runs, absent on Demo and on historical
+  // Checkpoint G rows (`LIVE LLM · FIXTURE SEARCH`) — never assume present.
+  query_plan_version?: string;
+  search_hard_bounds?: Record<string, number>;
+  search_usage_capable?: boolean;
+  search_pricing_configured?: boolean;
   llm_max_output_tokens: number | null;
   llm_max_transport_retries: number | null;
   llm_max_schema_retries: number | null;
@@ -396,6 +402,29 @@ export interface LLMUsage {
   budget_tripped: boolean;
 }
 
+export interface SearchQualityMetrics {
+  result_occurrences: number;
+  sources_retrieved_unique: number;
+  sources_used_as_evidence: number;
+  source_utilization_rate: number | null;
+  duplicate_retrieval_rate: number | null;
+  industry_grounded_coverage: number | null;
+  employee_count_grounded_coverage: number | null;
+  unevaluable_exclusion_count: number;
+  search_calls: number;
+  search_retries: number;
+  search_error_counts: Record<string, number>;
+  p50_search_latency_ms: number | null;
+  p95_search_latency_ms: number | null;
+  search_cost_usd: number | null;
+  search_credits_used: number | null;
+  extraction_calls: number;
+  partial_extractions: number;
+  failed_or_partial_sources: number;
+  discovery_rejection_reasons: Record<string, number>;
+  domain_resolution_method_counts: Record<string, number>;
+}
+
 export interface RunEvaluation {
   run_id: string;
   volume: VolumeMetrics;
@@ -403,6 +432,7 @@ export interface RunEvaluation {
   reliability: ReliabilityMetrics;
   guardrails: GuardrailMetric[];
   llm_usage: LLMUsage;
+  search_quality: SearchQualityMetrics;
 }
 
 // --- settings ---
@@ -414,17 +444,23 @@ export interface ProviderInfo {
 
 export interface LiveAvailability {
   available: boolean;
+  llm_available: boolean;
+  search_available: boolean;
   model: string;
   reasoning_effort: string | null;
   prompt_versions: Record<string, string>;
   search_provider: string;
   synthetic_search: boolean;
+  query_plan_version: string;
   live_max_prospects_per_run: number;
   llm_max_output_tokens: number;
   llm_max_transport_retries: number;
   llm_max_schema_retries: number;
   llm_call_deadline_s: number;
   live_step_timeout_s: number;
+  search_hard_bounds: Record<string, number>;
+  search_usage_capable: boolean;
+  search_pricing_configured: boolean;
   pricing_configured: boolean;
   soft_budget_usd: number | null;
   soft_budget_enforceable: boolean;

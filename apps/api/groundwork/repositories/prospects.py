@@ -16,7 +16,9 @@ class CompanyRepository:
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
 
-    async def get_or_create(self, company: CompanySeed, canonical_domain: str, normalized_name: str) -> str:
+    async def get_or_create(
+        self, company: CompanySeed, canonical_domain: str, normalized_name: str, *, origin: str = "demo_fixture"
+    ) -> str:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(CompanyRow).where(CompanyRow.canonical_domain == canonical_domain)
@@ -30,7 +32,7 @@ class CompanyRepository:
                 normalized_name=normalized_name,
                 display_name=company.name,
                 profile=company.model_dump(mode="json"),
-                origin="demo_fixture",
+                origin=origin,
             )
             session.add(row)
             await session.commit()

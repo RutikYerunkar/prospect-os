@@ -16,13 +16,24 @@ def build_demo_provider_bundle(seed: int, fixture_pack: FixturePack | None = Non
 
 
 def build_provider_bundle(
-    mode: Mode, seed: int, fixture_pack: FixturePack | None = None, *, live_runtime=None, run_budget=None
+    mode: Mode,
+    seed: int,
+    fixture_pack: FixturePack | None = None,
+    *,
+    live_runtime=None,
+    run_budget=None,
+    search_runtime=None,
+    search_budget=None,
+    search_bounds: dict | None = None,
 ) -> ProviderBundle:
-    """Mode -> `ProviderBundle`. Live Mode (Checkpoint G) is real OpenAI LLM +
-    fixture-backed search — `LIVE LLM · FIXTURE SEARCH`, never live web
-    search (that's Checkpoint H). Requesting Live without a configured
-    `LiveProviderRuntime` raises `ProviderNotConfigured`, never a silent
-    fallback to `DemoLLMProvider`.
+    """Mode -> `ProviderBundle`.
+
+    H2: Live Mode is real OpenAI LLM + real Tavily search — `LIVE LLM ·
+    LIVE SEARCH`. Requesting Live without BOTH a configured
+    `LiveProviderRuntime` (OpenAI) AND a configured `LiveSearchRuntime`
+    (Tavily) raises `ProviderNotConfigured`, never a silent fallback to
+    `DemoLLMProvider`/`DemoSearchProvider` for either half — see H1/H2's
+    "no Live -> fixture fallback" invariant.
     """
     if mode is Mode.DEMO:
         return build_demo_provider_bundle(seed, fixture_pack)
@@ -31,14 +42,28 @@ def build_provider_bundle(
         raise ProviderNotConfigured(
             "Live Mode requires a configured OPENAI_API_KEY and a running LiveProviderRuntime"
         )
+    if search_runtime is None:
+        raise ProviderNotConfigured(
+            "Live Mode requires a configured TAVILY_API_KEY and a running LiveSearchRuntime"
+        )
 
-    # Imported lazily so `providers/live/*` (which imports the `openai` SDK)
-    # is never imported at all on the pure-Demo-Mode / no-credentials path —
-    # a public clone with no OpenAI key must still run Demo Mode cleanly.
+    # Imported lazily so `providers/live/*` (which imports the `openai`/
+    # `tavily` SDKs) is never imported at all on the pure-Demo-Mode /
+    # no-credentials path — a public clone with no keys must still run Demo
+    # Mode cleanly.
     from groundwork.providers.live.openai_llm import OpenAILLMProvider
+    from groundwork.providers.live.tavily_search import TavilySearchProvider
 
-    pack = fixture_pack or load_fixture_pack()
+    bounds = search_bounds or {}
     return ProviderBundle(
         llm=OpenAILLMProvider(runtime=live_runtime, run_budget=run_budget),
-        search=DemoSearchProvider(pack, seed),
+        search=TavilySearchProvider(
+            runtime=search_runtime,
+            search_budget=search_budget,
+            max_results_per_query=bounds.get("max_results_per_query", 10),
+            max_source_queries_per_prospect=bounds.get("max_source_queries_per_prospect", 3),
+            max_result_occurrences_per_prospect=bounds.get("max_result_occurrences_per_prospect", 15),
+            max_sources_per_prospect=bounds.get("max_sources_per_prospect", 5),
+            max_source_excerpt_chars=bounds.get("max_source_excerpt_chars", 1200),
+        ),
     )

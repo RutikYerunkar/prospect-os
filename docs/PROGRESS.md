@@ -17,20 +17,19 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **E — Depth UI** | `a1f9190` (merged to `master` via PR #5) | Full `/prospects/{id}` page: score breakdown table (reconciles to the displayed overall), evidence cards with provenance chips, grouped signal list, contact/buyer panel, outreach viewer with grounded-claim references, all-seven-checks review panel, approve/reject wired to the existing audit-trail endpoints, execution trace table with independently visible retries. No backend changes. |
 | **F — Quality + hardening** | `41883be` (merged to `master` via PR #6) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
 | **G — Live Mode LLM provider** | `1e7586c` (merged to `master` via PR #7, branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
-| **H1 — demo-neutral, real-company-safe foundation** | *this commit* (branch `claude/checkpoint-h1-caz9gn`) | Fixed two real bugs (evidence-retry duplication; substring-based cross-prospect-leak false positive on short names); offline PSL-aware domain normalization (`domain/psl.py`, pinned `tldextract`); pure `url_safety`/`source_identity` helpers; independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` — scoring's `industry_fit`/`size_fit` now read *only* these, never `CompanySeed`; tri-state `DimensionSupport`/`ExclusionEvaluation` (ungrounded industry forces `NEEDS_REVIEW`, seven review checks unchanged); `source_documents`/`search_calls` persistence with deterministic retrieval-occurrence dedupe; `ctx.sources` (retrieval) split from `ctx.evidence` (accepted); refined `SearchProvider` contract, `DemoSearchProvider` ported, zero live vendor. Demo Mode preserved byte-identical at every gate. **No live search was performed; no vendor adapter was written.** |
+| **H1 — demo-neutral, real-company-safe foundation** | `acdd769`/`f44c33b` (merged to `master` via PR #8, branch `claude/checkpoint-h1-caz9gn`) | Fixed two real bugs (evidence-retry duplication; substring-based cross-prospect-leak false positive on short names); offline PSL-aware domain normalization (`domain/psl.py`, pinned `tldextract`); pure `url_safety`/`source_identity` helpers; independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` — scoring's `industry_fit`/`size_fit` now read *only* these, never `CompanySeed`; tri-state `DimensionSupport`/`ExclusionEvaluation` (ungrounded industry forces `NEEDS_REVIEW`, seven review checks unchanged); `source_documents`/`search_calls` persistence with deterministic retrieval-occurrence dedupe; `ctx.sources` (retrieval) split from `ctx.evidence` (accepted); refined `SearchProvider` contract, `DemoSearchProvider` ported, zero live vendor. Demo Mode preserved byte-identical at every gate. **No live search was performed; no vendor adapter was written.** |
+| **H2 — real live web search** | *this commit* (branch `claude/checkpoint-h2-implementation-w7upys`) | **REAL OpenAI LLM + REAL TAVILY SEARCH** — `LIVE LLM · LIVE SEARCH`. Pinned `tavily-python==0.8.0`, process-scoped `LiveSearchRuntime`, real `TavilySearchProvider` behind the same `SearchProvider` Protocol; real multi-stage discovery (`engine/discovery.py` — bounded search → `DISCOVERY_EXTRACTION` LLM → deterministic/`DOMAIN_SELECTION`-fallback domain resolution → identity gate), never a model-authored domain; real per-company retrieval reusing H1's winner-selection + one batched Tavily `extract()` call per prospect; a real bug fixed in `engine/steps/research.py` (Evidence origin/URL used to be hardcoded to `DEMO_FIXTURE`/`None` regardless of what actually produced it); NEW Live Mode requires BOTH OpenAI and Tavily runtimes, never a fixture-search fallback; historical Checkpoint G `provider_profile` rows render unchanged. Demo Mode preserved byte-identical at every gate. |
 
 ---
 
 ## Current checkpoint
 
-**H1 — demo-neutral, real-company-safe foundation.** Checkpoints A–G remain intact; H1 hardens the
-domain/search/provenance/scoring architecture so it can safely accept an arbitrary real company later,
-without adding a live search vendor. See "What Checkpoint H1 added" below for the full implementation,
-and "H2 invariants / next task" for what's explicitly *not* started (Checkpoint H2 — the real Tavily
-adapter and live web search).
+**H2 — real live web search.** Checkpoints A–H1 remain intact; H2 adds the real Tavily adapter and
+multi-stage discovery/retrieval pipeline described above, while Demo Mode and historical Checkpoint G
+runs stay byte-identical/truthful. See "What Checkpoint H2 added" below for the full implementation.
 
 A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-further work. **Do not begin Checkpoint H2** without the user explicitly asking.
+further work. **Do not begin a new checkpoint** without the user explicitly asking.
 
 ---
 
@@ -927,6 +926,320 @@ surfaces — draws no legal conclusions, records "not observed" for anything a g
 this script exists for H2, is never invoked automatically by anything in this repo (not `make test`, not
 `make dev`, not CI), and its provider-verification status is `NOT RUN` until the user explicitly runs
 `make search-spike` themselves.
+
+---
+
+## What Checkpoint H2 added
+
+**Goal:** replace `LIVE LLM · FIXTURE SEARCH` with `LIVE LLM · LIVE SEARCH` for NEW Live runs — real
+OpenAI + real Tavily + real companies + real provider-returned URLs + real bounded extracted evidence —
+while preserving Demo Mode, historical Checkpoint G runs, and every H1 invariant. **Zero real (paid)
+provider calls were made this session** — every test uses a scripted `httpx.MockTransport`. The paid
+`scripts/search_smoke.py` was written but deliberately **NOT RUN** (requires explicit user approval).
+
+**Phase 0/1 — baseline + verified Tavily SDK facts.** Backend baseline reconfirmed before any change:
+246/246 tests, canonical Demo byte-identical (Northwind 92 / Riverbend 35 / Cobalt 25 REJECTED / Ferrous
+58 / Sable 79, PASS 2 / NEEDS_REVIEW 2 / REJECTED 1 / DUPLICATE 1 / FAILED 1), frontend lint/build clean.
+Pinned `tavily-python==0.8.0` (`pyproject.toml`, exact pin like `openai==3.6.0`). Verified by reading the
+*installed* package (`inspect.signature`, not memory) rather than `scripts/search_spike.py` (still never
+run — no `TAVILY_API_KEY` was available this session either):
+
+- `AsyncTavilyClient(api_key=None, ..., client: Optional[httpx.AsyncClient] = None)` — a real
+  `httpx.AsyncClient` can be injected, so `httpx.MockTransport` fully substitutes for the network in
+  tests (mirrors `LiveProviderRuntime`'s `http_client=httpx2.AsyncClient(...)` pattern exactly, using
+  plain `httpx` since `tavily-python` depends on it directly, not `openai`'s `httpx2` successor major).
+- `search(query, search_depth, topic, time_range, start_date, end_date, days, max_results,
+  include_domains, exclude_domains, include_answer, include_raw_content, include_images, timeout=60,
+  country, auto_parameters, include_favicon, include_usage, exact_match, language, filter_by_language,
+  **kwargs) -> dict`. `extract(urls, include_images, extract_depth, format, timeout=30, include_favicon,
+  include_usage, query, chunks_per_source, **kwargs) -> dict`.
+- **No SDK-side retry logic at all** — `_search`/`_extract` each issue exactly ONE `httpx` POST; every
+  retry/backoff decision in this codebase belongs to `providers/live/tavily_search.py`, confirmed by
+  reading `tavily/async_tavily.py` directly, not assumed.
+- Exceptions are flat, NOT a shared hierarchy: `InvalidAPIKeyError`/`BadRequestError`/
+  `UsageLimitExceededError` are re-exported at `tavily` top level; `ForbiddenError`/`TimeoutError` exist
+  only in `tavily.errors` (imported from there explicitly — `tavily.TimeoutError` does not exist). Status
+  → exception mapping inside `_handle_error_response`: 429→`UsageLimitExceededError`,
+  403/432/433→`ForbiddenError`, 401→`InvalidAPIKeyError`, 400→`BadRequestError`, else→
+  `response.raise_for_status()` (→ `httpx.HTTPStatusError` for 5xx). A real `httpx.TimeoutException` is
+  caught and re-raised as `tavily.errors.TimeoutError`.
+- **No structured `Retry-After` is exposed for an authenticated 429** — only the keyless-mode
+  `TavilyKeylessLimitError` envelope carries `retry_after_seconds`, and keyless mode never applies here
+  (a real API key is always configured for Live Mode). The adapter therefore uses bounded exponential
+  backoff for 429s, the same as for 5xx/timeout — an honest fallback, documented in
+  `providers/live/tavily_search.py`'s own docstring, not a silent divergence from the task's "respect
+  Retry-After if exposed" instruction.
+- `search()` response dict: `answer`, `follow_up_questions`, `images`, `query`, `request_id`,
+  `response_time`, `results` (list). Each result observed with keys `content`, `id`, `raw_content`,
+  `score`, `title`, `url` (matches the manual spike's own recorded observation) — `id` is mapped to
+  `SourceDocument.provider_result_id`. A `published_date` key was NOT observed on ordinary results in
+  either the manual spike or this session's own (offline, scripted) exercise of the SDK shape — see
+  Phase 12 below.
+- `extract()` response dict: `results`, `failed_results`, `request_id`, `response_time`. `results[]` items
+  carry `url`/`raw_content`(/`images`/`favicon` per flags); `failed_results[]` items carry `url`/`error`.
+- `include_usage` shape for a real authenticated call was **not verified against the real API this
+  session** (no `TAVILY_API_KEY` available) — the adapter defensively reads `response["usage"]["credits"]`
+  when present and leaves `credits_used`/`cost_usd` `None` otherwise; `scripts/search_smoke.py` prints
+  whatever shape a real run actually returns so this can be corrected/confirmed on the first authorized
+  paid run without a code change being required first.
+
+**Phase 2 — process-scoped live search runtime** (`providers/live/search_runtime.py::
+LiveSearchRuntime`): `AsyncTavilyClient` + `asyncio.Semaphore(SEARCH_MAX_CONCURRENCY)` + resolved
+search-depth/deadline/retry/pricing config, created ONCE in `main.py`'s lifespan (only when
+`TAVILY_API_KEY` is configured) and closed ONCE at shutdown — the exact same discipline
+`LiveProviderRuntime` established in Checkpoint G. `tests/search_live_helpers.py::make_search_provider`
+mirrors `tests/live_helpers.py`'s `ScriptedTransport` pattern for offline testing.
+
+**Phase 3 — hard search bounds**: H1's planned `LIVE_MAX_*`/`SEARCH_MAX_*` bounds preserved unchanged in
+`config.py`; added `SEARCH_CALL_DEADLINE_S`, `SEARCH_MAX_CONCURRENCY`, `LIVE_MAX_SOURCE_EXCERPT_CHARS`,
+`TAVILY_SEARCH_DEPTH`, `TAVILY_PRICE_USD_PER_CREDIT` (unset by default — no publicly-documented stable
+per-credit USD rate to hardcode). `engine/search_budget.py::SearchCallBudget` — the search-side analogue
+of `engine/run_budget.py::RunBudget`, but a HARD (not soft) ceiling: atomic
+`reserve_search_call()`/`reserve_extract_call()` (single check-and-increment under one lock, so two
+concurrent prospects racing the last slot can never both succeed) bound `LIVE_MAX_SEARCH_CALLS_PER_RUN`/
+`LIVE_MAX_EXTRACT_CALLS_PER_RUN` across ALL concurrent prospects in one run — constructed once per run in
+`api/run_service.py`, passed into `TavilySearchProvider` as a duck-typed collaborator (no import of
+`engine/search_budget.py` inside `providers/live/*`, exactly mirroring how `OpenAILLMProvider` takes
+`run_budget` without importing `engine/run_budget.py`). Per-prospect/one-shot bounds (source queries,
+result occurrences, unique sources, plan queries, domain-resolution queries) don't need shared state —
+enforced locally by truncation at the call site, or by `engine/discovery.py`'s own strictly-sequential
+Stage C loop.
+
+**Phase 4 — `TavilySearchProvider`** (`providers/live/tavily_search.py`, ~450 lines): implements the
+existing `SearchProvider` Protocol's `resolve_domain()`/`fetch_sources()` for real, plus a discovery-only
+extension `raw_discover()` `engine/discovery.py` calls directly (`discover()` itself raises
+`NotImplementedError` with an explanatory message — it is never called for Live Mode; H2's multi-stage
+discovery needs an LLM call and telemetry persistence no single provider method can own, so the
+orchestration lives in `engine/`, exactly as `engine/objective_parser.py` already established the
+"run-scoped LLM call outside any `ProspectContext`" pattern in Checkpoint G). One flat transport-retry
+loop per logical call (`_call_tavily`, mirrors `OpenAILLMProvider.structured()`'s flat-loop discipline
+exactly — ONE `while True`, ONE `_issue()` call site, bounded at `1 + SEARCH_MAX_TRANSPORT_RETRIES`
+attempts, every attempt (success or failure) appended to the returned telemetry). CRITICAL BOUNDARY
+preserved: this module never imports a repository, SQLAlchemy, or a DB table model
+(`test_provider_purity_no_repository_or_sqlalchemy_imports`, AST-based source inspection, not a
+docstring-substring check) — it only returns provider-neutral shapes or raises a typed
+`SearchProviderError` carrying whatever telemetry exists so far.
+
+**Phase 5 — error taxonomy**: `SearchAttemptStatus` gained `AUTH_ERROR`/`INVALID_RESPONSE`/
+`EMPTY_RESULT`/`PARTIAL_EXTRACTION`; new typed exceptions `SearchTimeout`/`SearchRateLimited`/
+`SearchProviderUnavailable`/`SearchAuthError`/`SearchInvalidResponse`/`SourceExtractionFailed` mirror the
+LLM `Provider*` hierarchy. `AUTH_ERROR`/`INVALID_RESPONSE` are permanent (never retried — verified: exactly
+1 attempt, not `1 + max_transport_retries`); `TIMEOUT`/`RATE_LIMITED`/`PROVIDER_ERROR` (5xx) consume the
+shared transport budget. A batch `extract()` call with some URLs in `failed_results` and some in
+`results` is classified `PARTIAL_EXTRACTION` (a real, non-fatal degradation — the batch call itself
+succeeded), never conflated with a whole-call failure.
+
+**Phase 6/7 — Stage A/B discovery** (`engine/discovery.py::discover_live()`, invoked by
+`engine/runner.py::discover_and_dedupe()` only when `providers.search.requires_llm_discovery` is truthy
+— Demo Mode's `discover_and_dedupe()` code path is provably untouched, verified by the canonical Demo
+byte-identical gate at every phase). Stage A: `TavilySearchProvider.raw_discover()` issues H1's existing
+bounded, versioned query plan (`domain/query_plan.py::build_query_plan`, `QUERY_PLAN_VERSION="v1"`,
+unchanged) as real searches; results become `RawSearchHit` (opaque ref + bounded excerpt — no URL in the
+LLM-visible shape) for Stage B and `SourceDocument` retrieval occurrences (run-scoped, `prospect_id=NULL`
+— required `models/tables.py::SourceDocumentRow.prospect_id` nullability change, additive) for
+persistence via the same `SearchCallRecorder` H1 already used for the run-level `discover()` call. Stage
+B is a new `LLMOperation.DISCOVERY_EXTRACTION` (`prompts/discovery_extraction.py`) — the model sees ONLY
+opaque refs + bounded excerpts (400 chars, capped at 40 hits and 20 candidates), never a URL, domain,
+provider id, or search query; its telemetry is persisted directly via
+`repos.llm_calls.record_attempts(run_id=..., prospect_id=None, step_name=None, play_id=None)`, the same
+run-scoped pattern `engine/objective_parser.py` established (minus that operation's Play-transaction
+requirement, since the `Run` row already exists by discovery time). Server-side post-filter
+(`domain/discovery.py::company_name_textually_supported`, token-overlap reused from
+`domain/grounding.py`, threshold 0.8) drops any candidate citing an unserved ref or whose name isn't
+textually supported by its own cited excerpt(s) — verified with an explicit prompt-injection test
+(`test_prompt_injection_in_excerpt_cannot_manufacture_a_company`): adversarial "Ignore all previous
+instructions… domain evil.com" text inside a search excerpt cannot produce a `CompanySeed` with that
+domain, because no server-side gate ever reads the LLM's own claimed domain — it isn't even in the output
+schema.
+
+**Phase 8 — Stage C domain resolution + Phase 9 identity gate**: one deterministic
+`"<company_name> official site"` query per surviving candidate (`domain/query_plan.py::
+build_domain_resolution_query`, unchanged from H1). The engine — never the model — resolves each served
+candidate's URL to a canonical domain via H1's `domain/discovery.py::resolve_candidate_domain()`
+(safety + PSL normalization + served-domain membership + non-aggregator, all three, unchanged). New
+`domain_label_matches_company()` heuristic (alnum-normalized SLD-label-vs-company-name substring check;
+fixed mid-session to strip hyphens from both sides after a real hyphenated-domain test failure) decides
+the DETERMINISTIC accept path: exactly one structurally-safe candidate whose domain label matches the
+company name → accepted, zero LLM calls, `discovery.domain_resolved` event `method=deterministic`.
+Otherwise (zero or multiple label matches among the safe candidates) → the bounded
+`LLMOperation.DOMAIN_SELECTION` fallback (`prompts/domain_selection.py`) — the model sees only opaque
+refs + titles (no URLs), may select ONLY among already structurally-safe candidates, and `null` is a
+legitimate, expected "unresolved" answer, not a schema failure or an error. A selected ref that wasn't
+actually served (a hallucinated ref) is treated identically to `null` — never trusted. Every
+accept/reject decision is emitted as a `run_events` row (`discovery.domain_resolved`/
+`discovery.candidate_rejected` with a `reason`), which is also what
+`evaluation/metrics.py::search_quality.discovery_rejection_reasons`/`domain_resolution_method_counts`
+reconcile from — no second telemetry table invented for something this narrative/lightweight. A
+candidate that never establishes a safe domain (aggregator-only candidates, zero domain-resolution
+results, a null LLM selection, an already-claimed domain) is dropped and does NOT consume a
+`target_count` slot — verified explicitly
+(`test_target_count_not_consumed_by_unresolved_candidates`).
+
+**Phase 10/11 — real per-company retrieval + provider-managed extraction**
+(`TavilySearchProvider.fetch_sources()`, called through the exact SAME `engine/search.py::call_search()`
+seam H1 built for `engine/steps/research.py` — **zero changes to that call site or to `research.py`'s
+control flow** were needed for this phase; H1's architecture already anticipated it correctly). Per
+company: deterministic, domain-scoped category queries (funding / careers / leadership,
+`domain/query_plan.py::build_source_queries`, new, bounded at `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT`,
+`include_domains=[company.domain]` — verified sent on every request via inspecting the scripted
+transport's captured request bodies) → occurrences bounded at
+`LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` → H1's existing `domain/source_identity.py::select_winners()`
+computed *inside the provider* to decide what to Extract (bounded at `LIVE_MAX_SOURCES_PER_PROSPECT`) →
+ONE batched Tavily `extract()` call per prospect for the winners only (never one call per URL — the
+whole `LIVE_MAX_EXTRACT_CALLS_PER_RUN=25` bound is calls, not URLs) → winners mutated in place with real
+extracted text (`extraction_method="tavily_extract"`), non-winners keep their original search snippet.
+`engine/steps/research.py`'s own later `select_winners(occurrences)` call re-derives the *identical*
+deterministic winner set (verified: `test_only_winners_are_extracted`) — the winner-selection algorithm
+never changed, only what's now feeding it is real. A URL failing inside the extract batch degrades that
+one source (`SourceStatus.PARTIAL`, keeps its search-snippet text) rather than failing the prospect
+(`test_extract_results_and_failed_results_mapped`). No `httpx.get(result_url)`/`requests.get(...)`
+anywhere in the codebase (`test_no_arbitrary_http_fetch_path`, source-grep-based) — provider-managed
+extraction only, per the OUT OF SCOPE list.
+
+**A real bug found and fixed**: `engine/steps/research.py` built every `Evidence` row with
+`source_url=None, retrieved_at=None, origin=EvidenceOrigin.DEMO_FIXTURE` **hardcoded**, regardless of
+what `winners` (the `SourceDocument`s) actually carried. Harmless through H1 (only `DemoSearchProvider`
+existed, whose documents are always genuinely `DEMO_FIXTURE`-origin with no URL) — but it would have
+silently mislabeled every real `TavilySearchProvider` result as synthetic fixture data and *dropped its
+real URL* the moment Live search existed, defeating H2's whole "real LIVE_FETCH evidence with real
+clickable URLs" goal while still passing every existing H1 test (none of which exercised a non-`DEMO_
+FIXTURE` `SourceDocument`). Found by
+`test_research_step_produces_live_fetch_evidence_with_real_urls`, the first test in this codebase to run
+the real `research()` step against non-Demo `SourceDocument`s. Fixed: Evidence now reads
+`origin`/`source_url`/`retrieved_at` off the winning `SourceDocument` itself
+(`source_url=doc.url if doc.origin == LIVE_FETCH else None`) — `Evidence`'s own §12 model validator
+(`_no_fake_sources`, untouched) still enforces the invariant structurally regardless of what this step
+does. Canonical Demo re-verified byte-identical after the fix (Demo's `SourceDocument.origin` defaults
+`DEMO_FIXTURE` with `url=None`, so the new code path produces the exact same Evidence rows Demo always
+has).
+
+**Phase 12 — published date**: unchanged from the H1 plan and reconfirmed by this session's own SDK
+reading — `published_at` stays nullable, never inferred from `retrieved_at`/URL/prose; a `published_date`
+result field is defensively parsed (ISO-date-prefix, trusted only if it parses cleanly) but was not
+observed present on ordinary results in this session's own (offline) exercise of the response shape.
+
+**Phase 15 — mode/registry**: `providers/registry.py::build_provider_bundle` now requires BOTH
+`live_runtime` (OpenAI) AND `search_runtime` (Tavily) for `Mode.LIVE` — either missing raises
+`ProviderNotConfigured`, never a silent fallback to `DemoSearchProvider`/`DemoLLMProvider` for the other
+half (`test_live_unavailable_without_search_runtime_even_with_llm_runtime` and its mirror). `api/routers/
+plays.py::start_run` 422s with an actionable message identifying which key is missing before creating any
+`Run` row. `providers/profile.py::build_provider_profile(Mode.LIVE, ...)` now snapshots
+`search_provider="tavily", synthetic_search=False, evidence_origin="LIVE_FETCH", query_plan_version,
+search_hard_bounds, search_usage_capable, search_pricing_configured, deterministic=False` — this function
+is called once, at run creation, and by the time it's called for a NEW run both runtimes are already
+guaranteed present (the router's own gate), so every new profile is truthfully `LIVE LLM · LIVE SEARCH`.
+Historical Checkpoint G rows keep their own persisted `provider_profile` JSON verbatim — this function is
+never called again for an existing run — verified directly
+(`test_historical_g_provider_profile_renders_fixture_search_unchanged`, a hand-constructed historical-
+shaped row read back through `GET /runs/{id}` unchanged). `RunSummary.tsx`'s `searchLabel()` needed **zero
+changes** — H1 already wrote it to derive the badge purely from `provider_profile.synthetic_search`,
+anticipating exactly this.
+
+**Phase 17 — API**: `GET /settings/providers` gained `live.llm_available`/`search_available` (both
+required for `available`), `search_hard_bounds`, `query_plan_version`, `search_usage_capable`,
+`search_pricing_configured` — no secret values, same as every existing field here.
+
+**Phase 18 — frontend**: `app/plays/new/page.tsx`'s Live gating/copy updated for BOTH-providers-required
+language and the H2 search-bounds summary; **`EvidenceCard.tsx` and `RunSummary.tsx` needed zero
+changes** — both were already written generically against `origin`/`synthetic_search` in earlier
+checkpoints, specifically anticipating this. New `components/SearchQualityPanel.tsx` (mirrors
+`ModelUsagePanel.tsx`'s shape) added to `QualityTab.tsx`, backed entirely by `/evaluation`'s new
+`search_quality` fields — most of which (`result_occurrences`, `sources_retrieved_unique`,
+`source_utilization_rate`, `duplicate_retrieval_rate`, `industry_grounded_coverage`,
+`employee_count_grounded_coverage`, `unevaluable_exclusion_count`) were **already computed correctly by
+H1's `evaluation/metrics.py::_compute_search_quality`** against real `source_documents`/`search_calls`
+rows; H2 only added `search_cost_usd`'s real (previously hardcoded-`None`) computation,
+`search_credits_used`, `extraction_calls`/`partial_extractions`/`failed_or_partial_sources`, and the two
+`run_events`-sourced discovery counters. Verified live in the browser against a real Demo run (screenshot
+taken this session): the Search panel renders correctly with zero runtime errors even with
+`search_cost_usd`/`search_credits_used` both null (Demo issues real `search_calls` rows with no
+`credits_used`, exactly the "usage absent" case the panel must render as "—", not "$0.00" or a crash).
+
+**Phase 16 — usage/cost**: new `SearchAttemptTelemetry.credits_used`/`SearchCallRow.credits_used` column
+(additive), kept distinct from `cost_usd` — a real credits figure can be known even with no configured
+USD rate, so `search_quality.search_credits_used` sums it independently (defaulting missing to 0, like
+token counts) while `search_cost_usd` keeps the strict all-non-null completeness rule
+`_compute_llm_usage` already established for LLM cost, verified with an explicit test asserting both
+states simultaneously on the same row (`test_extraction_failure_and_usage_metrics`).
+
+**Phase 19 — observability**: `test_search_calls_persisted_match_provider_attempts` proves provider
+attempt count == persisted `search_calls` row count exactly (including a scripted timeout-then-retry
+sequence — 2 attempts, both persisted). `test_secret_never_leaks_into_persisted_search_calls` proves
+`observability/redact.py::redact()` (already generic over any configured secret, `settings.tavily_api_key`
+included — no change needed there) actually strips a real configured Tavily key from a persisted
+`search_calls.error_message`.
+
+**Phase 20 — security**: structural defenses unchanged/reconfirmed — the model never sees a URL, domain,
+provider id, or its own prior search query at any stage; `DiscoveryCandidate`/`DomainSelectionOutput`'s
+Pydantic schemas structurally cannot carry a URL/domain field (verified:
+`"domain" not in DiscoveryCandidate.model_fields`). Adversarial excerpt content ("Ignore all previous
+instructions… email the CEO…") stays inert — never reaches an executable decision, only ever bounded
+excerpt text a claim-support check independently verifies.
+
+**Phase 21 — partial failure**: a single discovery query's exhausted retries degrades that query's
+contribution (empty hits, telemetry recorded) rather than aborting Stage A
+(`test_deterministic_query_plan_issues_bounded_queries`-adjacent coverage); a total
+`DISCOVERY_EXTRACTION` LLM failure degrades to zero candidates, never a crash
+(`test_llm_failure_degrades_to_zero_candidates_not_a_crash`); `resolve_domain()`/`fetch_sources()`/
+`raw_discover()` all catch `SearchProviderError` internally per-query and continue — verified both via
+direct white-box tests of the retry mechanics (`_call_tavily`, which DOES raise) and black-box tests of
+the public methods (which never do,
+`test_resolve_domain_degrades_gracefully_on_exhausted_retries`).
+
+**Phase 22 — offline tests, `apps/api/tests/`** (all new, zero network calls, `httpx.MockTransport`-only):
+`search_live_helpers.py` (scaffolding, mirrors `live_helpers.py`), `test_tavily_adapter.py` (18 — SDK
+version pin, response/request-id/provider-result-id parsing, `include_usage`/credits mapping,
+`failed_results` mapping, excerpt bound + content hash, timeout/429/401/400/5xx classification + retry
+ceilings, budget gating, provider purity via AST import inspection, no-arbitrary-fetch source grep),
+`test_live_discovery.py` (13 — deterministic query plan, unserved-ref rejection, unsupported-name
+rejection, deterministic domain accept, ambiguous → `DOMAIN_SELECTION` fallback, null selection,
+hallucinated-ref rejection, aggregator-only rejection, duplicate-company dedupe, target-count-not-
+consumed-by-unresolved, zero-result non-exception, LLM-failure graceful degradation, prompt injection),
+`test_live_retrieval.py` (5 — `include_domains` sent, source-query bound, duplicate-URL-one-winner,
+only-winners-extracted, full `research()` step producing real `LIVE_FETCH` Evidence — this is the test
+that found the hardcoded-origin bug above), `test_search_mode_gating.py` (7 — both-required gating at
+the registry and API layers, Demo zero-credentials, historical G profile preserved),
+`test_search_observability.py` (4 — telemetry reconciliation, secret redaction, discovery-metric
+reconciliation from `run_events`, extraction-failure + usage/cost metrics), `test_live_search_pipeline_
+integration.py` (1 — the full `execute_run()` wired against a scripted `TavilySearchProvider`, one real-
+shaped prospect end to end: discovery → dedupe → research → signals → enrich → score → contact → review
+→ finalize, `LIVE_FETCH` Evidence with real URLs, `company.origin="live_fetch"` persisted, `/evaluation`
+reconciling). **48 new tests, 294/294 total** (up from H1's 246), zero real network calls anywhere in the
+suite. Canonical Demo re-verified byte-identical after every phase gate, most recently after the
+Evidence-origin bug fix and after the `domain_label_matches_company` hyphen fix.
+
+**Phase 23 — real smoke script**: `scripts/search_smoke.py` (new) + `make search-smoke`, mirrors
+`scripts/live_smoke.py`'s exact safety pattern — requires `--i-understand-this-costs-money`, requires
+BOTH `OPENAI_API_KEY` and `TAVILY_API_KEY`, caps at 1-2 prospects, prints every bound before spending and
+full telemetry/discovered-company/evidence-URL detail after, and fails loudly (nonzero exit) on any of
+the named structural-invariant violations (synthetic evidence in a Live run, an evidence URL that didn't
+come from a served provider result, a canonical domain that didn't come from a served provider URL,
+retry-ceiling overrun, a fatal wiring exception) without requiring the final status to be PASS. Verified
+this session only by confirming it refuses correctly with no network call attempted, both with no flag
+and with the flag but no keys configured. **Not run for real this session — no `OPENAI_API_KEY`/
+`TAVILY_API_KEY` was available or requested, and Phase 23/the task instructions explicitly require
+separate, explicit user approval before ever running it for real.**
+
+**Deviations from the task's literal ask, and why:**
+
+- `SearchOperation` kept `FETCH_SOURCES` (Demo Mode's existing telemetry label) alongside new
+  `DOMAIN_SEARCH`/`EXTRACT` members rather than repurposing it, so H1's Demo-path telemetry semantics
+  stay byte-identical.
+- `include_usage`'s exact response shape (in particular, the `credits` key name) is an informed guess
+  from the task's own spike notes, not independently re-verified against a real authenticated call this
+  session (no key available) — flagged explicitly above and printed prominently by `search_smoke.py` so
+  the first real run either confirms or corrects it without a blind re-guess.
+- `domain_label_matches_company()` is a small, reviewable heuristic (alnum-normalized substring match),
+  not a fuzzy-matching model — it is one signal among several independently-enforced structural gates
+  (served-ref, safety, aggregator, uniqueness), never the sole thing standing between a search result and
+  a canonical domain.
+- Real-company `CompanySeed.industry`/`size_band`/`employee_count`/`hq_country` are `"unknown"`/`0`
+  placeholders at discovery time (grep-verified: nothing in scoring/exclusion reads these fields directly
+  — only the independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` research later
+  establishes do, per H1's own invariant) — a legitimate consequence of discovery genuinely not knowing
+  these yet, not an oversight; `CompanyRow.profile` (and thus the Prospect Detail company header) will
+  show these placeholders until research completes, a known, minor, and acceptable UX gap for this
+  checkpoint.
 
 ---
 
@@ -1940,52 +2253,32 @@ introduced.
 
 ## Next task
 
-**Checkpoint H1 is complete. Do not begin Checkpoint H2 without the user explicitly asking.**
-All Checkpoints A–G behavior remains unchanged and verified byte-identical; H1 hardens the domain/search/
-provenance/scoring foundation (two real bugs fixed, PSL-aware domain normalization, URL safety/source
-identity, independently-grounded profile facts, tri-state scoring/exclusion honesty, `source_documents`/
-`search_calls` persistence with deterministic dedupe, retrieval/accepted-Evidence state split, a refined
-`SearchProvider` contract, and offline query-plan/discovery primitives) — with zero live search calls made
-by anything, anywhere, this session.
+**Checkpoint H2 is complete. Do not begin another checkpoint without the user explicitly asking.**
+All Checkpoints A–H1 behavior remains unchanged and verified byte-identical; H2 adds the real Tavily
+search adapter, real multi-stage discovery/domain-resolution, real per-company retrieval/extraction, and
+fixes a real Evidence-provenance bug — with zero real (paid) provider calls made by anything, anywhere,
+this session (every test is offline/scripted; `scripts/search_smoke.py` exists but was not run).
 
-**H2 invariants — what a future session must preserve when it builds the real search adapter:**
+**Before any real spend happens:** the user must explicitly run `make search-smoke` (or approve it) —
+this is the first time `include_usage`'s real response shape (in particular the `credits` key name
+assumption noted in "What Checkpoint H2 added") gets verified against the live API, and the smoke
+script's output should be read carefully for that specifically.
 
-- `providers/registry.py::build_provider_bundle` is where a real `TavilySearchProvider` gets wired in for
-  Live Mode instead of `DemoSearchProvider` — it must satisfy the exact `SearchProvider` Protocol H1
-  refined (`discover`/`resolve_domain`/`fetch_sources`, each returning payload + `SearchAttemptTelemetry`).
-- Every retrieval occurrence a real provider returns must flow through `engine/search.py::call_search()`
-  (which persists `search_calls`/`source_documents`) and `domain/source_identity.py::select_winners()`
-  (which dedupes before Evidence is ever built) — never construct `Evidence` directly from raw provider
-  results.
-- `models/schemas.py::Evidence`'s `origin=LIVE_FETCH` path (real `source_url`, structurally validated by
-  `Evidence._no_fake_sources`) is built and tested (`test_fixture_provenance.py`) but currently
-  untriggerable — every evidence row in the repo today is still `DEMO_FIXTURE`, in both Demo and Live Mode.
-  A real adapter must route retrieved URLs through `domain/url_safety.py::is_safe_source_url()`/
-  `canonicalize_url()` before ever setting `Evidence.source_url`.
-- Industry/employee-count classification from real web text must go through `domain/industry.py`'s
-  server-side `validate_category()` and `domain/grounding.py::numeric_claim_supported()` exactly as Demo
-  Mode's simulated facts already do — never trust a real model's free-text category or an inferred count.
-- `domain/discovery.py::resolve_candidate_domain()` is the identity gate a real domain-resolution step
-  must route every candidate through — served-set membership, non-aggregator, URL-safe, all three,
-  before ever setting a prospect's canonical domain from a search result.
-- The `LIVE_MAX_*`/`SEARCH_MAX_*` bounds in `config.py` (Phase 14) are hard bounds a real adapter must
-  actually enforce, not just carry as unused config.
-- `providers/profile.py`'s `synthetic_search: true` / `evidence_origin: "DEMO_FIXTURE"` fields must flip
-  to `false`/`"LIVE_FETCH"` once a real search provider lands — `RunSummary.tsx`'s mode label (Phase 15)
-  already reads `synthetic_search` truthfully and needs no further change when that happens.
-- Run `scripts/search_spike.py` (or an updated version of it) against the actually-installed SDK BEFORE
-  writing `providers/live/tavily_search.py` — its provider-verification status is `NOT RUN` as of this
-  checkpoint; do not skip straight to an adapter based on remembered/assumed SDK behavior.
+**What a future session should look at next**, in `docs/IMPLEMENTATION_PLAN.md` §5's remaining order —
+**deployment → MCP shim → polish**:
 
-Beyond Checkpoint H2, `docs/IMPLEMENTATION_PLAN.md` §5's remaining order still applies: **deployment →
-MCP shim → polish**. Concretely:
-
-1. **H2 — live search** (Tavily or similar) — the other half of Live Mode; needs real `source_url`
-   handling to actually exercise the `LIVE_FETCH` evidence-card path that's built but currently
-   untriggerable, per the H2 invariants above.
-2. **Deployment** — currently local-only by design (§27); optional.
-3. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
-4. **Polish backlog** (not required, noted for completeness):
+1. **Run `make search-smoke` for real** (with explicit user approval) — confirm/correct the
+   `include_usage`/`credits` shape assumption, confirm real discovered companies look sane, take the
+   Live-mode screenshots (New Play Live, a completed real-search Run Detail, Quality Search section,
+   real-shaped Prospect Detail) the task's final acceptance checklist asks for — these were not possible
+   this session without real credentials.
+2. **`CompanyRow.profile`/company header refresh post-research** — real discovered companies currently
+   keep their discovery-time `"unknown"` industry/size placeholders in `CompanyRow.profile` even after
+   research independently grounds the real `IndustryProfileFact`/`EmployeeCountProfileFact` — a known,
+   minor UX gap (see "Deviations" above), not urgent, not a scoring/correctness issue.
+3. **Deployment** — currently local-only by design (§27); optional.
+4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
+5. **Polish backlog** (not required, noted for completeness):
    - A graphical trace waterfall instead of `TraceTable` (explicitly cut from P0, §5/§34).
    - A standalone cross-run evaluation page (the Quality tab is the P0 scope; §16 names a standalone
      page as P1).
@@ -2105,6 +2398,25 @@ MCP shim → polish**. Concretely:
   NEEDS_REVIEW logic belongs in `runner.py::_derive_final_status`, never as an eighth guardrail.
   `domain/psl.py`'s `TLDExtract(suffix_list_urls=(), ...)` construction must not gain a real
   `suffix_list_urls` value or a bare `TLDExtract()` default — either reintroduces a runtime PSL network
-  fetch. H2 must not write `providers/live/tavily_search.py` or perform live search without the user
-  explicitly authorizing Checkpoint H2 — see "H2 invariants" under Next Task above for what that adapter
-  must satisfy when it's built.
+  fetch.
+- **Checkpoint H2's own do-not-touch:** `providers/live/tavily_search.py::TavilySearchProvider.
+  _call_tavily()` — ONE flat transport-retry loop, ONE `_issue()` call site, mirrors
+  `OpenAILLMProvider.structured()`'s discipline exactly; do not nest retries or add a `tenacity`-style
+  decorator. `engine/discovery.py::discover_live()` is the ONLY place that orchestrates Stage A-D — do
+  not move any of that LLM-calling logic into `providers/live/tavily_search.py` itself (it would break
+  the "providers never touch the `llm_calls` repository seam" boundary
+  `test_provider_purity_no_repository_or_sqlalchemy_imports` enforces by AST inspection, not just
+  convention). `engine/steps/research.py`'s Evidence construction must keep reading
+  `origin`/`source_url`/`retrieved_at` off the winning `SourceDocument` — do not reintroduce the
+  hardcoded `DEMO_FIXTURE`/`None` this checkpoint fixed as a real bug. `engine/search_budget.py::
+  SearchCallBudget.reserve_search_call()`/`reserve_extract_call()` must stay a single atomic
+  check-and-increment under one lock — splitting gate-then-charge into two steps reintroduces a race
+  two concurrent prospects could both win. `domain/discovery.py::domain_label_matches_company()` strips
+  non-alnum characters from BOTH the domain label and the company name before comparing — removing that
+  normalization silently breaks matching for any hyphenated real domain (found and fixed via a real
+  failing test this session, not by inspection). `providers/registry.py::build_provider_bundle` must
+  keep requiring BOTH `live_runtime` AND `search_runtime` for `Mode.LIVE` — never let one become
+  optional again. `scripts/search_smoke.py` must not be run automatically by anything, and its
+  `include_usage`/`credits` field-name assumption (see "What Checkpoint H2 added" → Deviations) should
+  be the first thing double-checked against real output before trusting `search_credits_used`/
+  `search_cost_usd` in a real run.
