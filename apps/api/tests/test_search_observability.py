@@ -102,3 +102,39 @@ def httpx_timeout():
     import httpx
 
     return httpx.ConnectTimeout("boom")
+
+
+async def test_duplicate_real_url_collapses_at_discovery_stage_persistence(session_factory) -> None:
+    """H2 post-smoke item 8: the real first smoke's 35 result occurrences
+    all being unique sources is plausibly just true for those particular
+    diverse queries — not evidence dedupe was bypassed. This proves
+    canonicalization IS actually applied for run-scoped (prospect_id=None)
+    Stage-A discovery occurrences specifically, the one path this
+    checkpoint newly added persistence for, not just the already-covered
+    per-prospect retrieval path."""
+    repos, play_id, run_id = await _make_run(session_factory)
+    same_url = "https://acme.example.com/news/funding"
+
+    provider, transport = make_search_provider(
+        [
+            (200, search_response(results=[search_result(id="a", url=same_url, content="Acme raised funding.")])),
+            (200, search_response(results=[search_result(id="b", url=same_url, content="Acme raised funding.")])),
+            (200, search_response(results=[])),
+            (200, search_response(results=[])),
+        ]
+    )
+    spec = PlaySpec(objective_text="find companies", target_industries=["robotics"])
+    raw = await provider.raw_discover(spec, ctx_key=f"{run_id}:discovery", max_queries=4)
+    assert len(raw.documents) == 2  # two occurrences of the same URL
+
+    recorder = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
+    await recorder.record(telemetry=raw.telemetry, documents=raw.documents)
+
+    persisted = await repos.search.source_documents_for_run(run_id)
+    assert len(persisted) == 2
+    winners = [d for d in persisted if d.is_winner]
+    losers = [d for d in persisted if not d.is_winner]
+    assert len(winners) == 1  # collapsed to exactly one winner
+    assert len(losers) == 1
+    assert losers[0].canonical_source_id == winners[0].id
+    assert winners[0].prospect_id is None  # run-scoped, no prospect exists yet

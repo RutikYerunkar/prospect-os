@@ -128,6 +128,7 @@ async def discover_and_dedupe(
             limit=play_spec.target_count,
             max_plan_queries=discovery_bounds.max_plan_queries,
             max_domain_resolution_queries=discovery_bounds.max_domain_resolution_queries,
+            discovery_llm_call_deadline_s=discovery_bounds.discovery_llm_call_deadline_s,
         )
     else:
         discovery_search_calls = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)

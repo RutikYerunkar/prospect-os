@@ -215,7 +215,9 @@ async def test_null_domain_selection_drops_candidate() -> None:
     llm.structured = structured
     result, events, repos = await _discover(search, llm)
     assert result.companies == []
-    assert any(t == "discovery.candidate_rejected" and p.get("reason") == "unresolved_domain" for t, p in events.log)
+    # H2 post-smoke: a null LLM selection is now distinguished from "no
+    # safe candidates existed at all" — see domain/discovery.py.
+    assert any(t == "discovery.candidate_rejected" and p.get("reason") == "domain_selection_null" for t, p in events.log)
 
 
 async def test_invalid_selected_ref_treated_as_unresolved() -> None:
@@ -270,7 +272,9 @@ async def test_aggregator_only_candidates_dropped() -> None:
     llm.structured = structured
     result, events, repos = await _discover(search, llm)
     assert result.companies == []
-    assert any(t == "discovery.candidate_rejected" and p.get("reason") == "unresolved_domain" for t, p in events.log)
+    # H2 post-smoke: aggregator-only rejections now carry their own reason
+    # distinct from a generic "unresolved" — see domain/discovery.py.
+    assert any(t == "discovery.candidate_rejected" and p.get("reason") == "domain_aggregator" for t, p in events.log)
 
 
 async def test_duplicate_company_across_results_deduped() -> None:

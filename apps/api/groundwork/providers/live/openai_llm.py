@@ -113,6 +113,11 @@ class OpenAILLMProvider:
         self, envelope: PromptEnvelope, schema: type[T], *, ctx_key: str, operation: LLMOperation
     ) -> LLMResult[T]:
         schema_payload = to_strict_json_schema(schema)
+        # H2 post-smoke: a caller may ask for more time than the runtime's
+        # shared default (`envelope.metadata["call_deadline_s"]`) — used by
+        # `engine/discovery.py` for the bulkier DISCOVERY_EXTRACTION call.
+        # Every other operation keeps the runtime default unchanged.
+        deadline_s = envelope.metadata.get("call_deadline_s", self.runtime.call_deadline_s)
 
         if self.run_budget is not None and await self.run_budget.is_tripped():
             now = datetime.now(timezone.utc)
@@ -148,7 +153,7 @@ class OpenAILLMProvider:
                 await asyncio.sleep(_backoff_s(transport_retries_consumed))
 
             started = datetime.now(timezone.utc)
-            classified = await self._issue(current_input, schema, schema_payload)
+            classified = await self._issue(current_input, schema, schema_payload, deadline_s)
             finished = datetime.now(timezone.utc)
 
             cost = self.runtime.estimate_cost_usd(classified.tokens_in, classified.tokens_out)
@@ -224,7 +229,8 @@ class OpenAILLMProvider:
         return [*base_input, {"role": "user", "content": repair_note}]
 
     async def _issue(
-        self, input_messages: list[dict[str, Any]], schema: type[T], schema_payload: dict[str, Any]
+        self, input_messages: list[dict[str, Any]], schema: type[T], schema_payload: dict[str, Any],
+        deadline_s: float,
     ) -> _Classified:
         kwargs: dict[str, Any] = dict(
             model=self.runtime.model,
@@ -232,7 +238,7 @@ class OpenAILLMProvider:
             text={"format": schema_payload},
             max_output_tokens=self.runtime.max_output_tokens,
             store=False,
-            timeout=self.runtime.call_deadline_s,
+            timeout=deadline_s,
         )
         if self.runtime.reasoning_effort:
             kwargs["reasoning"] = {"effort": self.runtime.reasoning_effort}

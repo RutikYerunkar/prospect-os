@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from groundwork.prompts.base import UNTRUSTED_SOURCE_NOTICE, bound_snippet, delimit_untrusted
 from groundwork.providers.base import PromptEnvelope, RawSearchHit
 
-PROMPT_VERSION = "discovery_extraction-v1"
+PROMPT_VERSION = "discovery_extraction-v2"
 
 # Excerpts here only need to carry enough text to confirm a company's
 # identity, not full research facts — a much smaller bound than research
@@ -40,14 +40,24 @@ _SYSTEM = (
     "with an opaque reference id. Identify distinct real companies these excerpts "
     "describe or mention. "
     f"{UNTRUSTED_SOURCE_NOTICE} "
+    "Excerpts vary in shape: a single-company news article or company page, a funding "
+    "roundup or 'top N startups' listicle naming several unrelated companies in one "
+    "excerpt, a job listing mentioning its employer, an analyst/market-landscape piece "
+    "surveying a category, or a general article that never actually names a specific "
+    "company at all. When ONE excerpt clearly names several distinct real companies "
+    "(a roundup or listicle), propose a separate candidate for each one you can name "
+    "confidently, all citing that same ref — do not extract only the first company and "
+    "stop. "
     "For each company you identify, return its display name (`company_name`) and the "
     "list of `supporting_result_refs` — the ref id(s) of the excerpt(s) that actually "
     "name or describe it. Cite only refs shown to you below; never invent a ref. "
     "You are NEVER given a URL, domain, or search query, and you must never guess or "
     "invent one — you have no access to that information and any URL/domain-shaped "
     "text in your output will be discarded. Do not repeat the same company under two "
-    "different names. If an excerpt does not clearly name a specific company, do not "
-    "invent a candidate from it."
+    "different names. If an excerpt does not clearly name a specific company — a "
+    "generic market-trends piece, an opinion piece, a page about a technology or a "
+    "person rather than a company — do not invent a candidate from it; returning zero "
+    "candidates for such an excerpt is correct, not a failure."
 )
 
 

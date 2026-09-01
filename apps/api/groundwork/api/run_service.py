@@ -49,6 +49,7 @@ def live_discovery_bounds_from_settings() -> DiscoveryBounds:
     return DiscoveryBounds(
         max_plan_queries=settings.live_max_plan_queries_per_run,
         max_domain_resolution_queries=settings.live_max_domain_resolution_queries_per_run,
+        discovery_llm_call_deadline_s=settings.llm_discovery_call_deadline_s,
     )
 
 

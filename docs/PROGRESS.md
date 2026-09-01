@@ -1243,6 +1243,144 @@ separate, explicit user approval before ever running it for real.**
 
 ---
 
+## First real H2 smoke — findings and post-smoke hardening
+
+The user ran `make search-smoke` for real (`--i-understand-this-costs-money`, real `OPENAI_API_KEY` +
+`TAVILY_API_KEY`) after H2's initial PR. This is the first-ever real network call anything in this
+checkpoint made. **No further real smoke was run in this hardening pass** — every fix below was made and
+verified offline only, per the user's explicit instruction.
+
+**Observed facts (verified runtime facts, not assumptions):**
+
+- OpenAI `gpt-5.6-terra`, reasoning effort `low`; Tavily provider `tavily`, query plan `v1`; prospect cap 1.
+- Real Tavily discovery search succeeded cleanly: 4 `discover` calls, all `status=OK`, all with real
+  `request_id`s, results `10, 9, 10, 6` — **35 result occurrences, 35 unique sources** (no duplicates
+  among these particular results — see the dedupe-verification finding below for why this is not itself
+  a bug).
+- **Tavily `usage.credits` = 4.0** — the first real confirmation that `include_usage`'s response shape
+  is `{"usage": {"credits": <float>}}` as the adapter assumed (see "What Checkpoint H2 added"'s
+  Deviations note, now resolved: the assumption was correct).
+- **3 `llm_calls` rows, 4 `search_calls` rows, zero domain-resolution calls, final run status
+  `COMPLETED`, zero prospects in the `discovered prospects` section.**
+
+**Root cause, established from code inspection (no direct access to the real run's persisted
+`llm_calls`/`search_calls` rows — that database lives in the environment the smoke actually ran in, not
+this session's) — but the arithmetic match is exact and this session's own architecture (see below)
+makes the mechanism unambiguous:**
+
+`search_smoke.py` never calls `parse_objective()` (it builds `PlaySpec` directly), and zero prospects
+were created, so no per-prospect step (`research_extraction`/`score_explanation`/`personalization`) ever
+ran. Every one of the 3 `llm_calls` rows is therefore an attempt of the SAME logical
+`DISCOVERY_EXTRACTION` call — the only LLM operation this smoke configuration can possibly invoke before
+any prospect exists. `LLM_MAX_TRANSPORT_RETRIES=2` means a transport-class failure (`TIMEOUT`/
+`RATE_LIMITED`/`PROVIDER_ERROR`) exhausts after **exactly** `1 + 2 = 3` attempts
+(`providers/live/openai_llm.py`'s flat retry loop — `test_timeout_exhausts_transport_budget` already
+pins this exact "3 attempts, `transport_retry_index` sequence `[0, 1, 2]`" shape for any transport-class
+failure). `engine/discovery.py::discover_live()`'s Stage B `except ProviderError:` branch — added
+deliberately for graceful degradation (Phase 21: "a total DISCOVERY_EXTRACTION LLM failure degrades to
+zero candidates, never a crash") — then converts that exhausted-retry `ProviderError` into a plain
+`discovery.candidate_rejected reason="discovery_extraction_unavailable"` event and returns zero
+companies, **with no distinguishing detail in that event about what the failure actually was**. This
+exactly explains every observed number: 4 search calls (Stage A only — Stage B never got a usable result
+to hand to Stage C), 3 llm_calls (the exhausted retry sequence), zero prospects, and `COMPLETED` (not
+`FAILED`) because the graceful-degradation design working as intended is not itself an error at the run
+level.
+
+The most likely specific transport-class failure is **`TIMEOUT`**: `DISCOVERY_EXTRACTION` reads up to
+`MAX_DISCOVERY_HITS=40` real search-result excerpts in one call (35 in this run) — a genuinely bulkier,
+slower read-and-classify task than any other Live LLM operation — against the SAME shared
+`LLM_CALL_DEADLINE_S=30s` every smaller per-prospect operation already uses successfully. `RATE_LIMITED`/
+`PROVIDER_ERROR` recurring identically 3 times in a row for one isolated, low-volume smoke run are less
+plausible but not ruled out by the evidence available. The fix below hardens against all three by giving
+this one operation more time; the new diagnostics (below) capture the real `last_attempt_status` on the
+next real run regardless of which one it actually is, closing this ambiguity for good.
+
+**Fixes made (all offline-verified, zero real provider calls):**
+
+1. **Per-operation LLM call deadline.** New `config.py::llm_discovery_call_deadline_s` (default 60s, vs.
+   the shared 30s). `providers/live/openai_llm.py::OpenAILLMProvider.structured()` now reads an optional
+   `envelope.metadata["call_deadline_s"]` override (falls back to the runtime default when absent — every
+   other operation is completely unaffected); `engine/discovery.py::discover_live()` sets it on the
+   `DISCOVERY_EXTRACTION` envelope only. Verified with a new deterministic test
+   (`test_call_deadline_override_from_envelope_metadata_reaches_request`) that wraps the real (scripted-
+   transport-backed) `responses.create()` to capture the actual `timeout=` kwarg sent — proves the
+   override reaches the outbound request, not just that a config value exists.
+2. **Full discovery funnel diagnostics**, reusing the existing `run_events`/rejection-reason architecture
+   — no second telemetry system. `discover_live()` now emits a `discovery.extraction_completed` event
+   (`hits`, `candidates_proposed`, `candidates_valid`) after Stage B, and the `discovery_extraction_
+   unavailable` rejection event now carries `attempts_made`/`last_attempt_status`/`last_attempt_error`
+   from the exhausted `ProviderError`'s own attempt telemetry — so the *next* real smoke will show the
+   real status directly instead of requiring code-reading to infer it. Stage C rejection reasons were
+   split from one generic `"unresolved_domain"` into `no_domain_candidates_served`, `domain_aggregator`,
+   `domain_unsafe_url`, `domain_unresolvable_domain`, `domain_not_served`, and `domain_selection_null` —
+   computed by a new diagnostic-only `domain/discovery.py::classify_domain_candidate()` (agrees with, and
+   never overrides, `resolve_candidate_domain()`'s actual trust decision). `search_smoke.py` prints the
+   whole funnel (`_print_discovery_funnel`), derived by reading `run_events` directly — the same source
+   `evaluation/metrics.py::search_quality.discovery_rejection_reasons`/`domain_resolution_method_counts`
+   already reconciles from.
+3. **Zero-prospect smoke acceptance rule (smoke script only).** `search_smoke.py` now exits nonzero with
+   `"H2 smoke incomplete: live search succeeded, but no real prospect survived discovery/domain
+   resolution."` when `prospects >= 1` was requested, real search calls were made, and zero prospects
+   resulted — this is what actually happened and the prior `"OK — no structural invariant violated"` exit
+   was too weak to catch it. This is deliberately **smoke-script-only**: a normal production run legitimately
+   discovering zero real companies for a genuinely quiet objective is not touched — `execute_run()`/
+   `discover_live()` themselves are unchanged in this respect.
+4. **`DISCOVERY_EXTRACTION` prompt quality** (`prompts/discovery_extraction.py`, bumped to
+   `discovery_extraction-v2`): explicitly tells the model excerpts may be funding roundups/listicles
+   naming several unrelated companies (extract all of them, not just the first), news articles, job
+   listings, analyst/market pieces, or generic pieces naming no company at all — and that proposing zero
+   candidates for the last two shapes is correct, not a failure. Verified with 8 new tests against
+   realistic content shapes actually seen in the wild (funding roundup, Crunchbase-style article, job
+   listing, AI-infra market-analysis piece, no-company article) —
+   `test_discovery_extraction_realworld.py` — proving legitimate names survive server-side validation and
+   a market-analysis piece naming no specific company supports nothing, including one full
+   `discover_live()`-level test proving all three companies in one roundup excerpt survive Stage B, not
+   just the first.
+5. **Legal-suffix-aware name support** (`domain/discovery.py::company_name_textually_supported`): a
+   candidate's own name now has generic legal-entity-suffix tokens (`Inc`/`LLC`/`Ltd`/`Corp`/`Corporation`/
+   `Co`/`Company`/`PLC`/`GmbH` — mirrors `domain/dedupe.py`'s own reviewed suffix list) discounted before
+   computing the support ratio, so a source that never spells out "Inc." doesn't sink an otherwise fully-
+   supported name. Deliberately narrow — never broadened to identity-bearing words like "AI"/"Labs"/
+   "Technologies" that could let two genuinely different companies collapse onto the same "supported"
+   verdict (verified: `"Acme AI Technologies, Inc."` is still correctly rejected against an excerpt that
+   only says `"Acme AI"`, since "Technologies" carries real identifying signal and isn't a legal suffix).
+   New public `domain/grounding.py::tokenize()` wrapper exports the existing `_tokens()` normalization for
+   reuse rather than a second implementation.
+6. **Discovery-stage dedupe re-verified, not changed.** `repositories/search.py::SearchRepository.
+   record_search()` already applied `group_occurrences()`/`pick_winner()` to run-scoped (`prospect_id=
+   None`) Stage-A occurrences before this pass — confirmed by reading the code, not assumed. The real
+   smoke's 35 occurrences / 35 unique sources is consistent with genuinely diverse results across 4
+   different query templates for one objective, not a dedupe bypass. Added
+   `test_duplicate_real_url_collapses_at_discovery_stage_persistence` — the one gap in existing coverage:
+   proof that TWO occurrences of the SAME URL collapse to exactly one `is_winner=True` row specifically
+   for the `prospect_id=None` discovery-stage persistence path (the per-prospect retrieval path already
+   had equivalent coverage).
+
+**New smoke acceptance rule** (added to `scripts/search_smoke.py`, stated precisely): for the dedicated
+real H2 smoke only, `prospects >= 1` requested AND real search calls were made AND zero prospects survive
+discovery is a smoke FAILURE (nonzero exit), because it means the smoke did not actually exercise
+domain resolution, per-company retrieval, extraction, or the per-prospect pipeline — it did not prove the
+checkpoint end-to-end. This is never applied to a normal product run; an honestly empty discovery result
+is still legitimate application behavior outside this one smoke script's own acceptance bar.
+
+**Test count**: 246 (H1) + 48 (H2 as merged) + 10 (this hardening pass — 1 deadline-override test, 8
+realistic-fixture/multi-company tests, 1 discovery-stage dedupe test) = **304/304**, all offline. Two
+existing H2 tests' assertions were updated to match the new, more specific rejection-reason strings
+(`domain_selection_null`/`domain_aggregator` replacing the old undifferentiated `unresolved_domain` in
+those two scenarios) — a deliberate, reviewed change, not a weakened check. Canonical Demo re-verified
+byte-identical after every fix in this pass. No provider/request architecture changed — `TavilySearchProvider`,
+`LiveSearchRuntime`, and the Stage A-D control flow are structurally the same; only the LLM call's deadline
+became per-operation-overridable, and diagnostics/prompt/normalization got more precise.
+
+**Whether another real smoke is required**: recommended before declaring H2 fully validated
+end-to-end, but not run in this session per the user's explicit instruction. The next real
+`make search-smoke` should now either produce at least one real discovered prospect (confirming the fix),
+or — if it still doesn't — print a discovery funnel with the real `last_attempt_status`/`last_attempt_error`
+for `discovery_extraction_unavailable`, finally removing the ambiguity between TIMEOUT/RATE_LIMITED/
+PROVIDER_ERROR this session could only narrow down from code, not observe directly.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -2253,16 +2391,24 @@ introduced.
 
 ## Next task
 
-**Checkpoint H2 is complete. Do not begin another checkpoint without the user explicitly asking.**
-All Checkpoints A–H1 behavior remains unchanged and verified byte-identical; H2 adds the real Tavily
-search adapter, real multi-stage discovery/domain-resolution, real per-company retrieval/extraction, and
-fixes a real Evidence-provenance bug — with zero real (paid) provider calls made by anything, anywhere,
-this session (every test is offline/scripted; `scripts/search_smoke.py` exists but was not run).
+**Checkpoint H2 is complete, including a post-first-real-smoke hardening pass. Do not begin another
+checkpoint without the user explicitly asking.** All Checkpoints A–H1 behavior remains unchanged and
+verified byte-identical; H2 adds the real Tavily search adapter, real multi-stage discovery/domain-
+resolution, real per-company retrieval/extraction, and fixed two real bugs — the Evidence-provenance
+hardcoding bug found before the first real smoke, and the DISCOVERY_EXTRACTION deadline/diagnostics gap
+found from the first real smoke's own output (see "First real H2 smoke — findings and post-smoke
+hardening" above for the full root cause and fix). Zero real (paid) provider calls were made in either
+this checkpoint's implementation or its post-smoke hardening pass — only the one real smoke the user ran
+directly. `scripts/search_smoke.py` exists and was hardened but **not run again** this session.
 
-**Before any real spend happens:** the user must explicitly run `make search-smoke` (or approve it) —
-this is the first time `include_usage`'s real response shape (in particular the `credits` key name
-assumption noted in "What Checkpoint H2 added") gets verified against the live API, and the smoke
-script's output should be read carefully for that specifically.
+**Recommended next step, not yet done:** run `make search-smoke` again to confirm the deadline fix
+actually resolves the zero-prospect outcome — this is the only way to close the remaining ambiguity
+between TIMEOUT/RATE_LIMITED/PROVIDER_ERROR as DISCOVERY_EXTRACTION's exact real failure mode (the new
+diagnostics will show `last_attempt_status` directly if it still fails), and to see the real discovery
+funnel, real per-company retrieval, and real `LIVE_FETCH` evidence this checkpoint has only ever been
+verified against offline fixtures for. Also the first real confirmation that `include_usage`'s response
+shape (`{"usage": {"credits": <float>}}`) matches what the adapter assumes — the first real smoke already
+confirmed this (`credits=4.0` observed), so that specific ambiguity is resolved.
 
 **What a future session should look at next**, in `docs/IMPLEMENTATION_PLAN.md` §5's remaining order —
 **deployment → MCP shim → polish**:
@@ -2416,7 +2562,22 @@ script's output should be read carefully for that specifically.
   normalization silently breaks matching for any hyphenated real domain (found and fixed via a real
   failing test this session, not by inspection). `providers/registry.py::build_provider_bundle` must
   keep requiring BOTH `live_runtime` AND `search_runtime` for `Mode.LIVE` — never let one become
-  optional again. `scripts/search_smoke.py` must not be run automatically by anything, and its
-  `include_usage`/`credits` field-name assumption (see "What Checkpoint H2 added" → Deviations) should
-  be the first thing double-checked against real output before trusting `search_credits_used`/
-  `search_cost_usd` in a real run.
+  optional again. `scripts/search_smoke.py` must not be run automatically by anything.
+  `include_usage`'s `{"usage": {"credits": <float>}}` shape (see "What Checkpoint H2 added" → Deviations)
+  is now CONFIRMED against the real API — the first real smoke observed `credits=4.0` — this assumption
+  no longer needs double-checking.
+- **Post-first-real-smoke hardening's own do-not-touch:** `providers/live/openai_llm.py::
+  OpenAILLMProvider.structured()`'s `envelope.metadata["call_deadline_s"]` override must keep falling
+  back to `self.runtime.call_deadline_s` when absent — every operation except `DISCOVERY_EXTRACTION`
+  must keep using the shared runtime default unchanged. `engine/discovery.py`'s Stage C rejection reasons
+  (`domain_aggregator`/`domain_unsafe_url`/`domain_unresolvable_domain`/`domain_not_served`/
+  `domain_selection_null`/`no_domain_candidates_served`) are deliberately more granular than the old
+  single `unresolved_domain` — don't collapse them back for convenience; `evaluation/metrics.py`'s
+  generic `reason: count` aggregation already handles any string without code changes. `domain/
+  discovery.py::_LEGAL_SUFFIX_TOKENS` must stay narrow (unambiguous legal-entity words only) — do not add
+  identity-bearing words like "ai"/"labs"/"technologies" to it; that would let two genuinely different
+  companies collapse onto the same "textually supported" verdict, which is exactly the kind of safety
+  weakening the post-smoke task explicitly forbade. `search_smoke.py`'s zero-prospect-is-a-failure rule
+  is scoped to the smoke script only (`prospects >= 1 AND search_calls made AND resolved_company_count ==
+  0`) — never port this into `execute_run()`/`discover_live()` themselves, where a genuinely empty
+  discovery result is legitimate product behavior.

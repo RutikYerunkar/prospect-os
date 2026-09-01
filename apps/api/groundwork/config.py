@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     live_step_timeout_s: float = 45.0
     live_run_wall_clock_timeout_s: float = 600.0
     llm_call_deadline_s: float = 30.0
+    # H2 post-smoke: DISCOVERY_EXTRACTION reads up to MAX_DISCOVERY_HITS
+    # (40) real search-result excerpts in one call — a real first smoke
+    # exhausted LLM_MAX_TRANSPORT_RETRIES against the shared 30s deadline
+    # on exactly this operation (35 hits), producing zero candidates with
+    # no distinguishing signal from a genuine "no companies found." This
+    # is a dedicated, larger deadline for that one bulkier operation only
+    # — every other Live LLM operation (research/score/personalize/
+    # domain_selection) keeps the shared, already-verified 30s budget.
+    llm_discovery_call_deadline_s: float = 60.0
     # Measurement-selected (see docs/PROGRESS.md, Checkpoint G Phase 4): the
     # largest measured operation (research_extraction, worst-case padded
     # facts) serializes to ~3KB / ~800 visible tokens. 2048 leaves headroom

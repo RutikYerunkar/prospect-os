@@ -38,6 +38,15 @@ def _tokens(text: str) -> set[str]:
     return {w for w in words if w not in _STOPWORDS and len(w) > 1}
 
 
+def tokenize(text: str) -> set[str]:
+    """Public alias of `_tokens()` (H2 post-smoke) — lets callers outside
+    this module (e.g. `domain/discovery.py`'s company-name support check)
+    build their own token-overlap-style comparisons from the exact same
+    normalization this module's own `token_overlap()` uses, rather than
+    re-implementing tokenization a second time."""
+    return _tokens(text)
+
+
 def token_overlap(claim: str, snippet: str) -> float:
     """Fraction of the claim's meaningful tokens that occur in the snippet."""
     claim_tokens = _tokens(claim)

@@ -39,7 +39,12 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from groundwork.domain.discovery import company_name_textually_supported, domain_label_matches_company, resolve_candidate_domain
+from groundwork.domain.discovery import (
+    classify_domain_candidate,
+    company_name_textually_supported,
+    domain_label_matches_company,
+    resolve_candidate_domain,
+)
 from groundwork.models.llm_io import DiscoveryExtractionOutput, DomainSelectionOutput
 from groundwork.models.schemas import CompanySeed, PlaySpec
 from groundwork.observability.events import EventEmitter
@@ -58,6 +63,11 @@ class DiscoveryBounds:
 
     max_plan_queries: int = 4
     max_domain_resolution_queries: int = 8
+    # H2 post-smoke: DISCOVERY_EXTRACTION reads far more source text in one
+    # call than any other Live LLM operation — give it more time than the
+    # shared `LLM_CALL_DEADLINE_S` before its transport-retry budget is
+    # spent chasing a call that was simply too slow, not actually failing.
+    discovery_llm_call_deadline_s: float = 60.0
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -135,6 +145,7 @@ async def discover_live(
     limit: int,
     max_plan_queries: int,
     max_domain_resolution_queries: int,
+    discovery_llm_call_deadline_s: float = 60.0,
 ) -> DiscoveryResult:
     search = providers.search  # TavilySearchProvider — has raw_discover()
     ctx_key = f"{run_id}:discovery"
@@ -147,12 +158,18 @@ async def discover_live(
     if not raw.hits:
         # Legitimate zero-result outcome (SearchEmptyResult), not a crash —
         # the run simply discovers nothing this time.
+        await events.emit("discovery.extraction_completed", hits=0, candidates_proposed=0, candidates_valid=0)
         return DiscoveryResult(companies=[], telemetry=[])
 
     # -- Stage B ----------------------------------------------------------
     industry_hint = play_spec.target_industries[0] if play_spec.target_industries else ""
     extraction_input = discovery_extraction.DiscoveryExtractionInput.from_hits(raw.hits, industry_hint=industry_hint)
     envelope = discovery_extraction.build_envelope(ctx_key, extraction_input)
+    # H2 post-smoke: this one call reads far more source text than any
+    # other Live LLM operation — give it its own, larger deadline rather
+    # than sharing the per-prospect operations' budget (see DiscoveryBounds
+    # docstring and config.py::llm_discovery_call_deadline_s).
+    envelope.metadata["call_deadline_s"] = discovery_llm_call_deadline_s
     try:
         result = await providers.llm.structured(
             envelope, DiscoveryExtractionOutput, ctx_key=ctx_key, operation=LLMOperation.DISCOVERY_EXTRACTION
@@ -162,7 +179,20 @@ async def discover_live(
             repos, run_id=run_id, operation=LLMOperation.DISCOVERY_EXTRACTION.value,
             provider=providers.llm.name, prompt_version=discovery_extraction.PROMPT_VERSION, attempts=exc.attempts,
         )
-        await events.emit("discovery.candidate_rejected", reason="discovery_extraction_unavailable")
+        # Enriched with the actual last-attempt status/error (H2 post-smoke)
+        # — a real first smoke found this call silently degrading to "zero
+        # candidates" with no way to tell "the LLM found nothing" apart
+        # from "the LLM call itself failed repeatedly" (e.g. exhausted
+        # transport retries against too tight a deadline).
+        last_attempt = exc.attempts[-1] if exc.attempts else None
+        await events.emit(
+            "discovery.candidate_rejected",
+            reason="discovery_extraction_unavailable",
+            hits=len(raw.hits),
+            attempts_made=len(exc.attempts),
+            last_attempt_status=(last_attempt.status.value if last_attempt else None),
+            last_attempt_error=(last_attempt.error_message if last_attempt else None),
+        )
         return DiscoveryResult(companies=[], telemetry=[])
 
     await _record_llm_attempts(
@@ -190,6 +220,13 @@ async def discover_live(
         seen_names.add(name_key)
         valid_candidates.append(candidate.company_name.strip())
 
+    await events.emit(
+        "discovery.extraction_completed",
+        hits=len(raw.hits),
+        candidates_proposed=len(result.parsed.candidates),
+        candidates_valid=len(valid_candidates),
+    )
+
     # -- Stage C + D --------------------------------------------------------
     company_seeds: list[CompanySeed] = []
     seen_domains: set[str] = set()
@@ -207,12 +244,25 @@ async def discover_live(
         candidates_result = await search.resolve_domain(name, ctx_key=domain_ctx_key)
         await search_calls.record(telemetry=candidates_result.telemetry, documents=[])
 
+        if not candidates_result.candidates:
+            await events.emit("discovery.candidate_rejected", reason="no_domain_candidates_served", company=name)
+            continue
+
         served_domains = frozenset(d for d in candidates_result.domains if d)
         safe_candidates: list[tuple[DomainCandidate, str]] = []
+        # Diagnostic-only classification of every served candidate this
+        # round (H2 post-smoke) — never itself the trust decision, which
+        # stays `resolve_candidate_domain()` below; this just lets a
+        # rejection reason distinguish "every candidate was an aggregator"
+        # from "every candidate had an unsafe/unresolvable URL" instead of
+        # collapsing both into one undifferentiated "unresolved."
+        rejection_reasons: set[str] = set()
         for candidate in candidates_result.candidates:
             resolved = resolve_candidate_domain(candidate.url, served_domains)
             if resolved:
                 safe_candidates.append((candidate, resolved))
+            else:
+                rejection_reasons.add(classify_domain_candidate(candidate.url, served_domains))
 
         selected_domain: str | None = None
         method: str | None = None
@@ -229,9 +279,21 @@ async def discover_live(
                 match = next(((c, d) for c, d in safe_candidates if c.ref == selected_ref), None)
                 if match:
                     selected_domain, method = match[1], "llm"
+            if not selected_domain:
+                # Entered the ambiguous LLM fallback but it returned null
+                # or an unserved ref — distinct from "no safe candidates
+                # existed at all" (the branches below).
+                await events.emit("discovery.candidate_rejected", reason="domain_selection_null", company=name)
+                continue
 
         if not selected_domain:
-            await events.emit("discovery.candidate_rejected", reason="unresolved_domain", company=name)
+            # No safe_candidates at all — report the most specific reason
+            # available, in priority order (most informative first).
+            reason = next(
+                (r for r in ("aggregator", "unsafe_url", "unresolvable_domain", "not_served") if r in rejection_reasons),
+                "unresolved_domain",
+            )
+            await events.emit("discovery.candidate_rejected", reason=f"domain_{reason}", company=name)
             continue
         if selected_domain in seen_domains:
             await events.emit("discovery.candidate_rejected", reason="duplicate_domain", company=name)

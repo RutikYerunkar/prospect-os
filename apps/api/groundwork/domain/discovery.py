@@ -20,7 +20,7 @@ Three gates, all enforced together by `resolve_candidate_domain()`:
 
 from __future__ import annotations
 
-from groundwork.domain.grounding import token_overlap
+from groundwork.domain.grounding import token_overlap, tokenize
 from groundwork.domain.psl import canonical_domain, decompose
 from groundwork.domain.url_safety import is_safe_source_url
 
@@ -30,6 +30,21 @@ from groundwork.domain.url_safety import is_safe_source_url
 # claim-grounding default (§Phase 7) — a display label is either
 # essentially the name the source used, or it isn't.
 NAME_SUPPORT_THRESHOLD = 0.8
+
+# Generic legal-entity suffix words (H2 post-smoke) — discounted from a
+# candidate's own name before computing support, never from the source
+# text. A real first smoke run's failure mode turned out to be a call
+# timeout (fixed separately), not this specifically, but real company
+# names routinely carry a legal suffix the source prose omits (a press
+# excerpt says "Acme AI raised..." while the model reasonably proposes the
+# fuller "Acme AI, Inc.") — deliberately narrow to unambiguous legal-entity
+# words only (mirrors `domain/dedupe.py::_LEGAL_SUFFIXES`'s own reviewed
+# list), never broadened to identity-bearing words like "labs"/
+# "technologies"/"ai" that could let two genuinely different companies
+# collapse onto the same "supported" verdict.
+_LEGAL_SUFFIX_TOKENS = frozenset(
+    {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "plc", "gmbh"}
+)
 
 # Aggregator/directory/social hosts that are never a company's own official
 # domain, even though they legitimately appear in search results about that
@@ -63,6 +78,28 @@ STRUCTURAL_AGGREGATOR_DOMAINS: frozenset[str] = frozenset(
 def is_structural_aggregator(domain: str) -> bool:
     normalized = canonical_domain(domain) or domain.strip().lower()
     return normalized in STRUCTURAL_AGGREGATOR_DOMAINS
+
+
+def classify_domain_candidate(url: str | None, served_domains: frozenset[str]) -> str:
+    """Diagnostic-only sibling of `resolve_candidate_domain()` (H2 post-
+    smoke) — returns WHICH gate a candidate failed, so a rejection reason
+    can distinguish "every served candidate was a structural aggregator"
+    from "every served candidate had an unsafe/unresolvable URL" instead of
+    collapsing every Stage C failure into one undifferentiated
+    "unresolved." Never itself the trust decision — `resolve_candidate_
+    domain()` alone still decides whether a domain is trusted; this
+    function must always agree with it (same three gates, same order).
+    """
+    if not url or not is_safe_source_url(url):
+        return "unsafe_url"
+    normalized = canonical_domain(url)
+    if not normalized:
+        return "unresolvable_domain"
+    if is_structural_aggregator(normalized):
+        return "aggregator"
+    if normalized not in served_domains:
+        return "not_served"
+    return "ok"
 
 
 def resolve_candidate_domain(url: str | None, served_domains: frozenset[str]) -> str | None:
@@ -99,11 +136,24 @@ def company_name_textually_supported(
     of the refs it cited. Reuses the same `domain/grounding.py` primitive
     the research-extraction grounding check already uses, rather than a
     second, parallel definition of "supported by text." A candidate with
-    no cited excerpts is never supported, regardless of its name."""
+    no cited excerpts is never supported, regardless of its name.
+
+    Generic legal-entity suffix tokens (`_LEGAL_SUFFIX_TOKENS`) in the
+    CANDIDATE's own name are discounted before computing the ratio — a
+    source that never spells out "Inc."/"LLC"/etc. shouldn't sink an
+    otherwise fully-supported name over words that carry no identifying
+    signal. Never discounted from the source text side, and never applied
+    to any other word — a name that is entirely suffix words (unlikely,
+    but not impossible) falls back to the plain, undiscounted check."""
     if not company_name.strip() or not cited_excerpts:
         return False
     combined = "\n".join(cited_excerpts)
-    return token_overlap(company_name, combined) >= threshold
+    name_tokens = tokenize(company_name)
+    core_tokens = name_tokens - _LEGAL_SUFFIX_TOKENS
+    if not core_tokens:
+        return token_overlap(company_name, combined) >= threshold
+    matched = core_tokens & tokenize(combined)
+    return (len(matched) / len(core_tokens)) >= threshold
 
 
 def domain_label_matches_company(domain: str, company_name: str) -> bool:

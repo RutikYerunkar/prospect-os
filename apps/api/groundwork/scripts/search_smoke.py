@@ -96,6 +96,60 @@ def _print_review(review) -> None:
         print(f"  [{mark}] {check.id:<20} ({check.severity:<4}) — {check.detail}")
 
 
+async def _print_discovery_funnel(repos, run_id: str) -> int:
+    """H2 post-smoke: the real first smoke could only tell us zero
+    prospects survived, not WHERE in the discovery funnel they were lost.
+    Reconstructed entirely from `run_events` — the same architecture
+    `evaluation/metrics.py::search_quality` already reads, never a second
+    telemetry system. Returns the final CompanySeed count so the caller can
+    decide the smoke's own pass/fail.
+    """
+    events = await repos.events.after(run_id, 0)
+    extraction_completed = [e for e in events if e.type == "discovery.extraction_completed"]
+    rejected = [e for e in events if e.type == "discovery.candidate_rejected"]
+    resolved = [e for e in events if e.type == "discovery.domain_resolved"]
+
+    print("\n--- discovery funnel ---")
+    if extraction_completed:
+        payload = extraction_completed[-1].payload
+        print(f"search-result hits fed to DISCOVERY_EXTRACTION: {payload.get('hits')}")
+        print(f"candidates proposed by DISCOVERY_EXTRACTION:     {payload.get('candidates_proposed')}")
+        print(f"candidates surviving server-side support check:  {payload.get('candidates_valid')}")
+    else:
+        print("DISCOVERY_EXTRACTION never completed for this run (see rejection reasons below)")
+
+    reason_counts: dict[str, int] = {}
+    for e in rejected:
+        reason = e.payload.get("reason", "unknown")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    if reason_counts:
+        print("candidates rejected, by reason:")
+        for reason, count in sorted(reason_counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {reason:<40} {count}")
+    else:
+        print("candidates rejected, by reason: none")
+
+    # The one non-generic rejection reason worth surfacing in full — it
+    # means the LLM call itself failed, not that it found nothing.
+    unavailable = [e for e in rejected if e.payload.get("reason") == "discovery_extraction_unavailable"]
+    for e in unavailable:
+        print(
+            f"  -> DISCOVERY_EXTRACTION unavailable: attempts_made={e.payload.get('attempts_made')} "
+            f"last_status={e.payload.get('last_attempt_status')} "
+            f"last_error={e.payload.get('last_attempt_error')!r}"
+        )
+
+    method_counts: dict[str, int] = {}
+    for e in resolved:
+        method = e.payload.get("method", "unknown")
+        method_counts[method] = method_counts.get(method, 0) + 1
+    print(f"domains resolved deterministically: {method_counts.get('deterministic', 0)}")
+    print(f"domains resolved via DOMAIN_SELECTION fallback: {method_counts.get('llm', 0)}")
+    print(f"final CompanySeed count: {len(resolved)}")
+
+    return len(resolved)
+
+
 async def main(prospect_cap: int) -> int:
     if not settings.openai_api_key:
         print("OPENAI_API_KEY is not configured — aborting.", file=sys.stderr)
@@ -145,6 +199,7 @@ async def main(prospect_cap: int) -> int:
     discovery_bounds = DiscoveryBounds(
         max_plan_queries=settings.live_max_plan_queries_per_run,
         max_domain_resolution_queries=settings.live_max_domain_resolution_queries_per_run,
+        discovery_llm_call_deadline_s=settings.llm_discovery_call_deadline_s,
     )
 
     failures: list[str] = []
@@ -186,7 +241,11 @@ async def main(prospect_cap: int) -> int:
     for url in unique_sources:
         print(f"  - {url}")
 
+    resolved_company_count = await _print_discovery_funnel(repos, run_id)
+
     print("\n--- discovered prospects ---")
+    if not summary.outcomes:
+        print("(none)")
     for outcome in summary.outcomes:
         print(f"\n{outcome.company.name} ({outcome.company.domain})")
         print(f"  status: {outcome.status.value}")
@@ -231,6 +290,25 @@ async def main(prospect_cap: int) -> int:
         print("\nFAILURE — structural invariant violated:", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
+        return 1
+
+    # H2 post-smoke acceptance rule — SMOKE-SCRIPT ONLY, not a production
+    # invariant: a run that performed real discovery (live search actually
+    # ran, `search_calls` is non-empty) but produced zero surviving
+    # prospects does not prove this checkpoint end-to-end — domain
+    # resolution, per-company retrieval, extraction, and the whole
+    # per-prospect pipeline never got exercised. A legitimate empty result
+    # set is still valid *product* behavior (a genuinely quiet search
+    # topic) and must never make a normal run fail — see the discovery
+    # funnel printed above for exactly where candidates were lost before
+    # concluding this is a bug rather than a truthful empty result.
+    if prospect_cap >= 1 and search_calls and resolved_company_count == 0:
+        print(
+            "\nH2 smoke incomplete: live search succeeded, but no real prospect survived "
+            "discovery/domain resolution. See the discovery funnel above for exactly where "
+            "candidates were lost.",
+            file=sys.stderr,
+        )
         return 1
 
     print("\nOK — no structural invariant violated. (Final status need not be PASS.)")

@@ -125,6 +125,43 @@ async def test_timeout_exhausts_transport_budget():
     assert [a.transport_retry_index for a in exc_info.value.attempts] == [0, 1, 2]
 
 
+async def test_call_deadline_override_from_envelope_metadata_reaches_request(monkeypatch) -> None:
+    """H2 post-smoke: `engine/discovery.py` requests a longer deadline for
+    DISCOVERY_EXTRACTION than the runtime default
+    (`config.py::llm_discovery_call_deadline_s`) via
+    `envelope.metadata["call_deadline_s"]`. Proves that value — not the
+    runtime's own default — is the one actually passed to the outbound
+    `responses.create(timeout=...)` call: wraps the real (scripted-
+    transport-backed) `create()` to capture its kwargs while still letting
+    the normal request/response flow execute, rather than hand-faking an
+    SDK response object."""
+    runtime, transport = make_runtime([_ok_body(), _ok_body()])
+    captured: list[dict] = []
+    original_create = runtime.client.responses.create
+
+    async def capturing_create(**kwargs):
+        captured.append(kwargs)
+        return await original_create(**kwargs)
+
+    monkeypatch.setattr(runtime.client.responses, "create", capturing_create)
+    provider = OpenAILLMProvider(runtime=runtime)
+
+    # No override -> the runtime's own default deadline.
+    await provider.structured(ENVELOPE, Out, ctx_key=ENVELOPE.ctx_key, operation=LLMOperation.SCORE_EXPLANATION)
+    assert captured[0]["timeout"] == runtime.call_deadline_s
+
+    # An envelope carrying an override -> that value, not the default.
+    long_envelope = PromptEnvelope(
+        ctx_key=ENVELOPE.ctx_key, system=ENVELOPE.system, user=ENVELOPE.user,
+        metadata={"call_deadline_s": 999.0},
+    )
+    await provider.structured(
+        long_envelope, Out, ctx_key=long_envelope.ctx_key, operation=LLMOperation.DISCOVERY_EXTRACTION
+    )
+    assert captured[1]["timeout"] == 999.0
+    await runtime.close()
+
+
 async def test_rate_limited_maps_to_provider_rate_limited():
     steps = [(429, {"error": {"message": "slow down", "type": "rate_limit"}})] * 3
     with pytest.raises(ProviderRateLimited):
