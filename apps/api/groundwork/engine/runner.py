@@ -20,10 +20,12 @@ from groundwork.domain.dedupe import find_duplicate, normalize_domain, normalize
 from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.pipeline import build_prospect_pipeline
-from groundwork.models.enums import ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
+from groundwork.engine.search import call_discover
+from groundwork.models.enums import ExclusionEvaluation, ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
 from groundwork.models.schemas import CompanySeed, PlaySpec, ProspectOutcome
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
+from groundwork.observability.search_calls import SearchCallRecorder
 from groundwork.observability.trace import TraceRecorder
 from groundwork.providers.base import ProviderBundle
 from groundwork.repositories.events import EventRepository
@@ -31,6 +33,7 @@ from groundwork.repositories.llm_calls import LLMCallRepository
 from groundwork.repositories.prospect_data import ProspectDataRepository
 from groundwork.repositories.prospects import CompanyRepository, ProspectRepository
 from groundwork.repositories.runs import RunRepository
+from groundwork.repositories.search import SearchRepository
 from groundwork.repositories.tasks import TaskRepository
 
 
@@ -43,6 +46,7 @@ class Repos:
     tasks: TaskRepository
     events: EventRepository
     llm_calls: LLMCallRepository
+    search: SearchRepository
 
     @classmethod
     def build(cls, session_factory) -> "Repos":
@@ -54,6 +58,7 @@ class Repos:
             tasks=TaskRepository(session_factory),
             events=EventRepository(session_factory),
             llm_calls=LLMCallRepository(session_factory),
+            search=SearchRepository(session_factory),
         )
 
 
@@ -66,7 +71,16 @@ class RunSummary(BaseModel):
 
 def _derive_final_status(ctx: ProspectContext) -> ProspectStatus:
     """Combine the score's hard-disqualifier modifier with the review
-    verdict into the single status the board shows."""
+    verdict into the single status the board shows.
+
+    H1 Phase 7 — tri-state exclusion: an UNKNOWN exclusion evaluation (the
+    industry was never independently grounded) must never silently pass.
+    It doesn't outrank an existing REJECTED/NEEDS_REVIEW (a review FAIL or
+    a hard disqualifier is already the worse outcome), but a status that
+    would otherwise be PASS is downgraded to NEEDS_REVIEW — this is
+    deliberately NOT an eighth review guardrail; the seven deterministic
+    checks stay exactly seven.
+    """
     if ctx.score is not None and ctx.score.disqualified:
         return ProspectStatus.REJECTED
     if ctx.review is not None:
@@ -74,6 +88,8 @@ def _derive_final_status(ctx: ProspectContext) -> ProspectStatus:
             return ProspectStatus.REJECTED
         if ctx.review.verdict == ReviewVerdict.NEEDS_REVIEW:
             return ProspectStatus.NEEDS_REVIEW
+    if ctx.score is not None and ctx.score.exclusion_status == ExclusionEvaluation.UNKNOWN:
+        return ProspectStatus.NEEDS_REVIEW
     return ProspectStatus.PASS
 
 
@@ -82,8 +98,20 @@ async def discover_and_dedupe(
 ) -> tuple[list[tuple[str, CompanySeed, str, str | None]], set[str]]:
     """Sequential, cheap (§7 diagram). Returns per-prospect seeds plus the
     full set of company identifiers in this run (for the cross-prospect-leak
-    guardrail)."""
-    company_seeds = await providers.search.discover(play_spec, play_spec.target_count)
+    guardrail).
+
+    Discovery telemetry is persisted through the same `engine/search.py`
+    seam `fetch_sources()` already uses — never a duplicated persistence
+    path here (H1 Phase 1 deviation closure). `prospect_id=None` on the
+    recorder is correct, not a placeholder: `discover()` runs once, before
+    any prospect exists to attribute it to.
+    """
+    discovery_search_calls = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
+    discovery = await call_discover(
+        providers=providers, play_spec=play_spec, limit=play_spec.target_count,
+        search_calls=discovery_search_calls,
+    )
+    company_seeds = discovery.companies
 
     seen_keys: dict[str, str] = {}
     prospect_seeds: list[tuple[str, CompanySeed, str, str | None]] = []
@@ -153,6 +181,7 @@ async def execute_run(
             llm_calls=LLMCallRecorder(
                 run_id=run_id, prospect_id=prospect_id, provider=providers.llm.name, repo=repos.llm_calls
             ),
+            search_calls=SearchCallRecorder(run_id=run_id, prospect_id=prospect_id, repo=repos.search),
             other_dedupe_keys=frozenset(other_dedupe_keys_by_prospect[prospect_id]),
             other_company_identifiers=frozenset(all_identifiers - own_identifiers),
         )

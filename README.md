@@ -197,6 +197,22 @@ Every provider attempt (not just every step) is persisted to `llm_calls`, with f
 cost telemetry, redacted of any secret before it's written. See `docs/PROGRESS.md`'s Checkpoint G
 section for the full implementation and measurement-selected `LLM_MAX_OUTPUT_TOKENS`.
 
+**Checkpoint H1** hardened the domain/search/provenance/scoring foundation to safely accept arbitrary
+real companies later, without adding a live search vendor yet. Two real bugs fixed (evidence-retry
+duplication, a substring-based cross-prospect-leak false positive on short company names); offline
+public-suffix-aware domain normalization (`domain/psl.py`, pinned `tldextract`, no runtime PSL network
+fetch); pure URL-safety/source-identity helpers (`domain/url_safety.py`, `domain/source_identity.py`);
+independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` company profile facts (industry
+and size scoring now read *only* these — never `CompanySeed` directly); a tri-state
+`DimensionSupport`/`ExclusionEvaluation` (an ungrounded industry forces `NEEDS_REVIEW`, never a silent
+pass, without adding an eighth review guardrail — the seven checks are unchanged); `source_documents`/
+`search_calls` persistence with deterministic retrieval-occurrence dedupe
+(`domain/source_identity.py::select_winners`) so a page returned by three queries still contributes at
+most one `Evidence` row; retrieval state (`ctx.sources`) split from accepted Evidence state
+(`ctx.evidence`); a refined, still-Tavily-free `SearchProvider` contract `DemoSearchProvider` was ported
+to; and offline, deterministic query-plan/discovery-identity-gate primitives for H2. **No live search
+provider was written or called — that is still Checkpoint H2.** Full detail in `docs/PROGRESS.md`.
+
 ---
 
 ## Local setup
@@ -221,6 +237,9 @@ make demo-reset   # wipe the local SQLite DB and recreate the schema — determi
 make demo         # run the full Demo Mode engine headlessly (no FastAPI, no React) and print the trace
 make live-smoke   # OPTIONAL — one real, billed OpenAI call. Requires OPENAI_API_KEY and
                   # --i-understand-this-costs-money. Never runs as part of make test/CI.
+make search-spike # OPTIONAL, H2 fact-finding only — verifies the real Tavily SDK. Requires
+                  # TAVILY_API_KEY, --i-understand-this-makes-real-calls, and the `tavily`
+                  # package installed separately. Never runs as part of make test/CI.
 ```
 
 `make demo-reset && make dev` is the reliable way to get back to a rehearsal-ready state before a
@@ -247,7 +266,7 @@ with a message telling you to reset, rather than a raw stack trace mid-run.
 |---|---|
 | Orchestrator, scoring, review, dedupe, grounding | Real code, real arithmetic, unit-tested |
 | Evidence, signals, scores, contacts, outreach, review verdicts on screen | Computed live from fixture evidence by the real engine — nothing precomputed |
-| Search results (both Demo and Live Mode) | **Simulated** — `providers/demo/` implementations reading `demo_pack.yaml`, no network call. Live web search is Checkpoint H, not built. |
+| Search results (both Demo and Live Mode) | **Simulated** — `providers/demo/` implementations reading `demo_pack.yaml`, no network call. Live web search is Checkpoint H2, not built. `source_documents`/`search_calls` persistence and dedupe (H1) are real, running against these fixture retrievals. |
 | LLM extraction/explanation/personalization in Demo Mode | **Simulated** — deterministic templating, no network call |
 | LLM extraction/explanation/personalization in Live Mode | **Real** — the actual OpenAI API, real tokens, real (optional) cost, persisted per-attempt in `llm_calls` |
 | Outbound email / LinkedIn / CRM | **Does not exist.** Approve/reject is a state transition in an audit table; there is no provider wired in to send anything |
@@ -279,7 +298,8 @@ built the way a distributed system would need it to work anyway — not because 
 
 ```
 apps/api/groundwork/
-  domain/        pure — scoring, dedupe, grounding, review. No I/O, no provider/repo imports.
+  domain/        pure — scoring, dedupe, grounding, review, psl, url_safety, source_identity,
+                 industry, query_plan, discovery (H1). No I/O, no provider/repo imports.
   engine/        context, step, pipeline, runner — the isolation + concurrency + retry machinery.
   providers/     LLMProvider / SearchProvider Protocols; demo/ (Checkpoints B–F) and live/ (Checkpoint G,
                  real OpenAI LLM + fixture search) implementations.

@@ -189,6 +189,58 @@ measurement: `docs/PROGRESS.md`'s Checkpoint G section.
 
 ---
 
+## H1 — demo-neutral, real-company-safe foundation (no live search yet)
+
+Checkpoint H is split: **H1** hardens the domain/search/provenance/scoring foundation so it can safely
+accept an arbitrary real company later; **H2** (not built) adds the actual live search vendor. Nothing
+in H1 performs live web search or writes a vendor adapter.
+
+**Two real bugs fixed.** (1) `research.py` used to append `Evidence` *before* the LLM call, so a
+step-level retry appended the same sources' evidence a second time — fixed by separating retrieval
+state (`ctx.sources`, fetched at most once) from accepted Evidence state (`ctx.evidence`, committed by
+one assignment, only on a successful extraction, with deterministic uuid5 ids). (2) `cross_prospect_leak`
+used a plain substring check, false-positiving on real short company names ("Ramp" inside "cramping")
+— replaced with a word-boundary-aware match.
+
+**Offline domain normalization** (`domain/psl.py`) routes through a pinned `tldextract`
+(`suffix_list_urls=()`, `include_psl_private_domains=True`) — no runtime PSL network fetch, ever;
+`acme.co.uk` keeps its two-label suffix, `acme.github.io` stays distinct from bare `github.io`, a bare
+suffix is rejected as having no company identity.
+
+**Company profile facts are field-provenance independent.** `IndustryProfileFact`/
+`EmployeeCountProfileFact` each carry their own `evidence_ids`, populated only after their own
+independent deterministic grounding (`engine/steps/signals.py`): industry classification against a
+Play-derived allowed-category set (`domain/industry.py`, `OTHER` vs `UNKNOWN` distinct), employee count
+against an explicit numeric match in the cited text (`domain/grounding.numeric_claim_supported` — never
+inferred from "a large team"). `domain/scoring.py`'s `industry_fit`/`size_fit` read *only* these grounded
+facts now — the old "always-supported from `CompanySeed`" exemption is gone, closing the "naked seed
+metadata earns score support" gap. `DimensionScore.support` is now tri-state
+(`SUPPORTED`/`UNSUPPORTED`/`UNKNOWN`); `UNKNOWN` is excluded from the confidence denominator entirely.
+Exclusion policy is tri-state too (`ExclusionEvaluation`): `UNKNOWN` (industry never grounded) forces
+`NEEDS_REVIEW` in `runner.py::_derive_final_status` rather than silently passing — without adding an
+eighth review guardrail; the seven deterministic checks are unchanged.
+
+**Retrieval provenance is now persisted and deduplicated.** `source_documents` (one row per retrieval
+*occurrence*) and `search_calls` (one row per provider call attempt) are new, additive tables —
+`engine/search.py::call_search()` owns their persistence, exactly like `engine/llm.py::call_structured()`
+owns `llm_calls`, and stays out of the SSE `run_events` log. `domain/source_identity.py` computes source
+identity (canonical URL, or `source_ref` when there's no URL — the required Demo Mode fallback) and picks
+a deterministic winner per identity group (`select_winners`) — the same URL returned by three queries
+persists as three occurrences but contributes at most one `Evidence` row, with deterministic, idempotent
+uuid5 Evidence ids (`domain/source_identity.evidence_id_for`).
+
+**`SearchProvider` contract refined, no vendor added.** `discover`/`resolve_domain`/`fetch_sources` each
+return their payload alongside `SearchAttemptTelemetry` (`providers/base.py`); `DemoSearchProvider` is
+ported to it (Phase 13) with zero credentials. `domain/query_plan.py`/`domain/discovery.py` are pure,
+offline, versioned query-template and identity-gate primitives for H2 — never exercised against a real
+provider in H1. `scripts/search_spike.py` exists as a manual, opt-in fact-finding script for H2's Tavily
+SDK — never run automatically.
+
+Full detail, canonical-output verification at every phase gate, and deviations: `docs/PROGRESS.md`'s H1
+section.
+
+---
+
 ## Where things live
 
 See `docs/IMPLEMENTATION_PLAN.md` §22 for the full folder structure. The load-bearing boundary:

@@ -12,8 +12,9 @@ from datetime import datetime
 from typing import Any
 
 from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_evidence
+from groundwork.domain.scoring import exclusion_status_from_persisted
 from groundwork.engine.runner import Repos
-from groundwork.models.enums import EvidenceOrigin, ProspectStatus, SignalType
+from groundwork.models.enums import EvidenceOrigin, ExclusionEvaluation, ProspectStatus, SignalType
 from groundwork.models.schemas import Evidence
 
 
@@ -210,6 +211,7 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
     ]
 
     llm_usage = await _compute_llm_usage(run_id, repos)
+    search_quality = await _compute_search_quality(run_id, repos, score_rows=score_rows)
 
     return {
         "run_id": run_id,
@@ -218,6 +220,90 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
         "reliability": reliability,
         "guardrails": guardrails,
         "llm_usage": llm_usage,
+        "search_quality": search_quality,
+    }
+
+
+async def _compute_search_quality(run_id: str, repos: Any, *, score_rows: list) -> dict[str, Any]:
+    """H1 Phase 16 — unambiguous source/quality definitions, computed on
+    read from `source_documents`/`search_calls`/`icp_scores`. Several of
+    these are legitimately zero/null in H1 (no live search has ever run
+    against a real provider), but the metric *definitions* and computation
+    exist now so H2 doesn't invent them under time pressure:
+
+        result_occurrences        = every source_documents row for this run
+        sources_retrieved_unique  = distinct is_winner=True rows
+        sources_used_as_evidence  = winners whose evidence_id resolved to a
+                                     real, persisted Evidence row
+        source_utilization_rate   = sources_used_as_evidence /
+                                     sources_retrieved_unique
+        duplicate_retrieval_rate  = 1 - sources_retrieved_unique /
+                                     result_occurrences
+    """
+    docs = await repos.search.source_documents_for_run(run_id)
+    calls = await repos.search.search_calls_for_run(run_id)
+
+    result_occurrences = len(docs)
+    winners = [d for d in docs if d.is_winner]
+    sources_retrieved_unique = len(winners)
+
+    evidence_ids_persisted: set[str] = set()
+    for e in await repos.prospect_data.evidence_for_run(run_id):
+        evidence_ids_persisted.add(e.id)
+    sources_used_as_evidence = sum(1 for w in winners if w.evidence_id and w.evidence_id in evidence_ids_persisted)
+
+    source_utilization_rate = (
+        sources_used_as_evidence / sources_retrieved_unique if sources_retrieved_unique else None
+    )
+    duplicate_retrieval_rate = (
+        1 - (sources_retrieved_unique / result_occurrences) if result_occurrences else None
+    )
+
+    # Grounded profile coverage — read straight off the already-persisted
+    # `dimensions` JSON (each entry carries `support`; H1 Phase 7). Counted
+    # over non-duplicate prospects that reached a score at all.
+    industry_grounded = 0
+    size_grounded = 0
+    for row in score_rows:
+        for dim in row.dimensions:
+            if dim.get("name") == "industry_fit" and dim.get("support") == "SUPPORTED":
+                industry_grounded += 1
+            if dim.get("name") == "size_fit" and dim.get("support") == "SUPPORTED":
+                size_grounded += 1
+    scored_count = len(score_rows)
+    industry_grounded_coverage = industry_grounded / scored_count if scored_count else None
+    employee_count_grounded_coverage = size_grounded / scored_count if scored_count else None
+    # Reconstructed purely from persisted `ICPScoreRow` fields (H1
+    # deviation-closure pass) — `exclusion_status_from_persisted` never
+    # touches an in-memory `ICPScore`/`ProspectContext`, so this is exactly
+    # what a fresh process reading the DB after a restart would compute.
+    unevaluable_exclusion_count = sum(
+        1
+        for row in score_rows
+        if exclusion_status_from_persisted(disqualified=row.disqualified, modifiers=row.modifiers)
+        == ExclusionEvaluation.UNKNOWN
+    )
+
+    search_error_counts: dict[str, int] = {}
+    latencies: list[float] = []
+    for c in calls:
+        if c.error_type:
+            search_error_counts[c.error_type] = search_error_counts.get(c.error_type, 0) + 1
+        latencies.append(c.latency_ms)
+
+    return {
+        "result_occurrences": result_occurrences,
+        "sources_retrieved_unique": sources_retrieved_unique,
+        "sources_used_as_evidence": sources_used_as_evidence,
+        "source_utilization_rate": source_utilization_rate,
+        "duplicate_retrieval_rate": duplicate_retrieval_rate,
+        "industry_grounded_coverage": industry_grounded_coverage,
+        "employee_count_grounded_coverage": employee_count_grounded_coverage,
+        "unevaluable_exclusion_count": unevaluable_exclusion_count,
+        "search_calls": len(calls),
+        "search_error_counts": search_error_counts,
+        "p50_search_latency_ms": _percentile(latencies, 0.5),
+        "search_cost_usd": None,  # H2: sum only once every call has a non-null cost, same rule as llm_usage
     }
 
 

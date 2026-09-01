@@ -66,6 +66,24 @@ async def test_full_demo_run_produces_expected_distribution(session_factory) -> 
     quarry = next(o for o in summary.outcomes if o.company.slug == "quarry-systems")
     assert quarry.status == ProspectStatus.FAILED
 
+    # H1 canonical invariants — Cobalt's hard disqualifier still fires via
+    # the independently grounded industry profile fact (Phase 7 deleted the
+    # old CompanySeed-based exemption; this proves the replacement still
+    # produces the same real-world outcome).
+    cobalt = next(o for o in summary.outcomes if o.company.slug == "cobalt-retail-systems")
+    assert cobalt.status == ProspectStatus.REJECTED
+    assert cobalt.score is not None and cobalt.score.disqualified is True
+    assert cobalt.score.overall == 25
+
+    # Canonical H1 scores, byte-identical to the pre-H1 baseline.
+    riverbend = next(o for o in summary.outcomes if o.company.slug == "riverbend-analytics")
+    ferrous = next(o for o in summary.outcomes if o.company.slug == "ferrous-grid")
+    sable = next(o for o in summary.outcomes if o.company.slug == "sable-compute")
+    assert northwind.score.overall == 92
+    assert riverbend.score is not None and riverbend.score.overall == 35
+    assert ferrous.score is not None and ferrous.score.overall == 58
+    assert sable.score is not None and sable.score.overall == 79
+
     events = await repos.events.after(run_id, 0)
     assert events, "expected run_events to have been emitted"
     assert events == sorted(events, key=lambda e: e.seq), "run_events must be strictly ordered by seq"

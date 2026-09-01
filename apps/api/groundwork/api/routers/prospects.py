@@ -50,6 +50,7 @@ def _signal_dict(row) -> dict[str, Any]:
         "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
         "confidence": row.confidence,
         "evidence_ids": row.evidence_ids,
+        "grounded": row.grounded,
     }
 
 

@@ -47,7 +47,8 @@ companies:
         snippet: >
           Northwind Labs today announced it has closed a $42M Series B
           financing round led by Alluvium Partners to scale its real-time
-          inference infrastructure.
+          inference infrastructure. Northwind Labs operates in the ai
+          infrastructure industry and has approximately 140 employees.
         signal_type: FUNDING
         confidence: 0.92
       - ref: hiring-note
@@ -107,6 +108,8 @@ companies:
         source_ref: leadership-note
     failure_script:
       research: { fail_attempts: 1, error: ProviderTimeout }
+    industry_profile_source_ref: funding-note
+    employee_profile_source_ref: funding-note
 
   # 2. Riverbend Analytics — a funding claim that cannot be grounded (the
   #    snippet only hints at capital, never confirming round/amount), plus
@@ -126,7 +129,8 @@ companies:
         claim: "Riverbend Analytics continues to expand its self-serve analytics platform"
         snippet: >
           Riverbend Analytics continues to expand its self-serve analytics
-          platform for mid-market data teams.
+          platform for mid-market data teams. Riverbend Analytics operates
+          in the data tooling industry and has approximately 90 employees.
         confidence: 0.70
       - ref: funding-note
         title: Riverbend Analytics funding chatter
@@ -157,6 +161,8 @@ companies:
         title: Head of Sales
         is_persona_match: true
         source_ref: leadership-note
+    industry_profile_source_ref: market-note
+    employee_profile_source_ref: market-note
 
   # 3. Northwind Labs Inc. — a duplicate of #1 (same normalized domain).
   #    Caught by dedupe before the pipeline runs; shown, not hidden.
@@ -187,7 +193,9 @@ companies:
         claim: "Cobalt Retail Systems raised a $30M Series B"
         snippet: >
           Cobalt Retail Systems announced a $30M Series B round to expand
-          its point-of-sale platform into new regional markets.
+          its point-of-sale platform into new regional markets. Cobalt
+          Retail Systems operates in the retail pos industry and has
+          approximately 180 employees.
         signal_type: FUNDING
         confidence: 0.85
       - ref: hiring-note
@@ -243,6 +251,8 @@ companies:
         title: VP of Sales
         is_persona_match: true
         source_ref: leadership-note
+    industry_profile_source_ref: funding-note
+    employee_profile_source_ref: funding-note
 
   # 5. Ferrous Grid — good funding evidence, but no discoverable buyer at
   #    all. Contact resolves UNAVAILABLE (never fabricated), personalization
@@ -261,7 +271,9 @@ companies:
         claim: "Ferrous Grid raised a Series A round"
         snippet: >
           Ferrous Grid closed a Series A round to expand its distributed
-          GPU scheduling platform for AI training workloads.
+          GPU scheduling platform for AI training workloads. Ferrous Grid
+          operates in the ai infrastructure industry and has approximately
+          70 employees.
         signal_type: FUNDING
         confidence: 0.85
     funding_events:
@@ -272,6 +284,8 @@ companies:
     hiring_roles: []
     tech_mentions: []
     leadership: []
+    industry_profile_source_ref: funding-note
+    employee_profile_source_ref: funding-note
 
   # 6. Quarry Systems — a scripted, unrecoverable provider failure. Research
   #    exhausts its retries; the prospect ends FAILED while its five
@@ -290,7 +304,8 @@ companies:
         claim: "Quarry Systems raised a Series A round"
         snippet: >
           Quarry Systems raised a Series A round to expand its vector
-          database infrastructure.
+          database infrastructure. Quarry Systems operates in the ai
+          infrastructure industry and has approximately 110 employees.
         signal_type: FUNDING
         confidence: 0.80
     funding_events:
@@ -303,6 +318,8 @@ companies:
     leadership: []
     failure_script:
       research: { fail_attempts: 99, error: ProviderUnavailable }
+    industry_profile_source_ref: funding-note
+    employee_profile_source_ref: funding-note
 
   # 7. Sable Compute — optional second PASS (§23), added because the base
   #    six landed comfortably. A solid but less overwhelming fit than
@@ -322,7 +339,8 @@ companies:
         claim: "Sable Compute raised a $20M Series A"
         snippet: >
           Sable Compute announced a $20M Series A round to expand its
-          managed training cluster offering.
+          managed training cluster offering. Sable Compute operates in the
+          ai infrastructure industry and has approximately 200 employees.
         signal_type: FUNDING
         confidence: 0.85
       - ref: hiring-note
@@ -373,3 +391,5 @@ companies:
         title: VP of Sales
         is_persona_match: true
         source_ref: leadership-note
+    industry_profile_source_ref: funding-note
+    employee_profile_source_ref: funding-note

@@ -77,6 +77,48 @@ async def test_brand_new_empty_database_reports_no_problems():
                 pass
 
 
+@pytest_asyncio.fixture
+async def pre_h1_engine():
+    """A schema mimicking a pre-H1 local DB: the full Checkpoint G schema,
+    but `signals` predates the H1 `grounded` column and `search_calls`/
+    `source_documents` don't exist yet."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    test_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    async with test_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE runs (id VARCHAR PRIMARY KEY, play_id VARCHAR, status VARCHAR, "
+                "mode VARCHAR, seed INTEGER, plan JSON, counters JSON, provider_profile JSON, "
+                "started_at DATETIME, finished_at DATETIME, error TEXT)"
+            )
+        )
+        await conn.execute(text("CREATE TABLE llm_calls (id VARCHAR PRIMARY KEY)"))
+        await conn.execute(
+            text(
+                "CREATE TABLE signals (id VARCHAR PRIMARY KEY, prospect_id VARCHAR, type VARCHAR, "
+                "summary TEXT, occurred_at DATETIME, confidence FLOAT, evidence_ids JSON)"
+            )
+        )
+    yield test_engine
+    await test_engine.dispose()
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.unlink(path + suffix)
+        except FileNotFoundError:
+            pass
+
+
+async def test_detects_missing_h1_search_tables_and_signals_grounded_column(pre_h1_engine):
+    problems = await schema_upgrade_problems(pre_h1_engine)
+    assert any("search_calls" in p for p in problems)
+    assert any("source_documents" in p for p in problems)
+    assert any("signals.grounded" in p for p in problems)
+    # This fixture's `runs`/`llm_calls` ARE current — must not false-positive.
+    assert not any("provider_profile" in p for p in problems)
+    assert not any(p == "llm_calls table is missing" for p in problems)
+
+
 async def test_never_mutates_the_database(pre_checkpoint_g_engine):
     await schema_upgrade_problems(pre_checkpoint_g_engine)
     async with pre_checkpoint_g_engine.connect() as conn:

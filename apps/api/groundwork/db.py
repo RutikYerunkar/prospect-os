@@ -52,6 +52,16 @@ def _inspect_schema_problems(sync_conn) -> list[str]:
     if table_names and "llm_calls" not in table_names:
         problems.append("llm_calls table is missing")
 
+    # H1 Phase 9: search_calls/source_documents, and signals.grounded.
+    if table_names and "search_calls" not in table_names:
+        problems.append("search_calls table is missing")
+    if table_names and "source_documents" not in table_names:
+        problems.append("source_documents table is missing")
+    if "signals" in table_names:
+        signal_columns = {c["name"] for c in inspector.get_columns("signals")}
+        if "grounded" not in signal_columns:
+            problems.append("signals.grounded column is missing")
+
     return problems
 
 

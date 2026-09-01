@@ -51,12 +51,31 @@ def _no_fabricated_contact(contact: Contact | None) -> ReviewCheck:
     return ReviewCheck(id="no_fabricated_contact", passed=passed, severity="hard", detail=detail)
 
 
+def _identifier_pattern(identifier: str) -> re.Pattern[str]:
+    """Word/token-boundary-aware match for one cross-prospect identifier.
+
+    A plain `identifier.lower() in text` substring check (the pre-H1
+    behavior) hard-fails on real short company names — `"Ramp"` inside
+    `"...the momentum is really cRAMPing..."`, `"Box"` inside `"mailbox"`,
+    `"Arc"` inside `"March"` — purely because the character sequence occurs,
+    with no actual reference to that prospect. `(?<!\\w)...(?!\\w)` requires
+    a non-word (or string-boundary) character on both sides, so the
+    identifier must appear as its own token/phrase, not embedded inside a
+    longer word. Domain identifiers (`acme.com`) are unaffected — `.`/`-`
+    are already non-word characters, so a real domain reference still
+    matches. Real cross-prospect leaks — the identifier used as itself, at a
+    word boundary — are still caught; see `tests/test_review.py`'s
+    regression cases for both directions.
+    """
+    return re.compile(rf"(?<!\w){re.escape(identifier)}(?!\w)", re.IGNORECASE)
+
+
 def _cross_prospect_leak(drafts: list[OutreachDraft], other_identifiers: set[str]) -> ReviewCheck:
     leaked: list[str] = []
     for draft in drafts:
-        text = f"{draft.subject}\n{draft.body}".lower()
+        text = f"{draft.subject}\n{draft.body}"
         for identifier in other_identifiers:
-            if identifier and identifier.lower() in text:
+            if identifier and _identifier_pattern(identifier).search(text):
                 leaked.append(identifier)
     passed = not leaked
     detail = "no other prospect's name or domain found in outreach" if passed else (

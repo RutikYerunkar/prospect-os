@@ -1,4 +1,4 @@
-from groundwork.domain.grounding import is_grounded, token_overlap, verify_claim_evidence
+from groundwork.domain.grounding import is_grounded, numeric_claim_supported, token_overlap, verify_claim_evidence
 from groundwork.models.enums import EvidenceOrigin
 from groundwork.models.schemas import Evidence
 
@@ -54,3 +54,36 @@ def test_verify_claim_evidence_accepts_valid_same_prospect_citation() -> None:
     evidence = _evidence(prospect_id="p-1")
     by_id = {evidence.id: evidence}
     assert verify_claim_evidence(evidence.claim, evidence.id, by_id, "p-1") is True
+
+
+# --- H1 Phase 6: numeric provenance -----------------------------------------
+
+
+def test_numeric_claim_supported_exact_digit_match() -> None:
+    assert numeric_claim_supported("Northwind Labs has approximately 140 employees.", 140) is True
+
+
+def test_numeric_claim_supported_thousands_separator() -> None:
+    assert numeric_claim_supported("The company reports 1,200 employees worldwide.", 1200) is True
+
+
+def test_numeric_claim_supported_k_shorthand() -> None:
+    assert numeric_claim_supported("Headcount has grown to 12k employees.", 12000) is True
+
+
+def test_numeric_claim_unsupported_vague_prose() -> None:
+    assert numeric_claim_supported("The company has a large team of employees.", 140) is False
+    assert numeric_claim_supported("Hundreds of employees work here.", 200) is False
+
+
+def test_numeric_claim_unsupported_wrong_number() -> None:
+    assert numeric_claim_supported("Northwind Labs has approximately 140 employees.", 150) is False
+
+
+def test_numeric_claim_rejects_out_of_range_count() -> None:
+    assert numeric_claim_supported("The filing lists 0 employees.", 0) is False
+    assert numeric_claim_supported("The filing lists 50000000 employees.", 50_000_000) is False
+
+
+def test_numeric_claim_empty_snippet() -> None:
+    assert numeric_claim_supported("", 140) is False

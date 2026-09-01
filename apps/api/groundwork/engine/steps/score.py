@@ -24,6 +24,8 @@ async def score(ctx: ProspectContext) -> StepResult:
         contact=ctx.contact,
         evidence=ctx.evidence,
         reference_date=ctx.reference_date,
+        industry_fact=ctx.facts.profile.industry,
+        employee_count_fact=ctx.facts.profile.employee_count,
     )
     computed = compute_score(ctx.prospect_id, inputs)
 

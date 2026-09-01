@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from groundwork.domain.psl import canonical_domain as _psl_canonical_domain
+
 _LEGAL_SUFFIXES = (
     " inc.",
     " inc",
@@ -28,13 +30,18 @@ _LEGAL_SUFFIXES = (
 
 
 def normalize_domain(raw: str) -> str:
-    """`https://www.Acme.com/` -> `acme.com`."""
-    value = raw.strip().lower()
-    value = re.sub(r"^[a-z]+://", "", value)
-    value = value.split("/")[0]
-    if value.startswith("www."):
-        value = value[len("www.") :]
-    return value
+    """`https://www.Acme.com/` -> `acme.com`.
+
+    Routed through `domain/psl.py` (H1 Phase 2) for offline, public-suffix-
+    aware normalization: `acme.co.uk` keeps its two-label suffix rather than
+    being truncated at the last dot, `acme.github.io` stays distinct from a
+    bare `github.io`, and a bare public/private suffix on its own (no
+    registrable company identity) normalizes to `""` — the same "no usable
+    domain" signal `dedupe_key` already falls back on for a missing domain.
+    """
+    if not raw:
+        return ""
+    return _psl_canonical_domain(raw) or ""
 
 
 def normalize_name(raw: str) -> str:
