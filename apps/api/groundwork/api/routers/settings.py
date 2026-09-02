@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from groundwork.api.deps import LiveRuntimeDep
+from groundwork.api.deps import LiveRuntimeDep, LiveSearchRuntimeDep
 from groundwork.api.schemas import LiveAvailability, ProviderInfo, ProviderSettingsResponse
 from groundwork.config import settings
-from groundwork.providers.profile import prompt_versions
+from groundwork.domain.query_plan import QUERY_PLAN_VERSION
+from groundwork.providers.profile import prompt_versions, search_hard_bounds
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 @router.get("/providers", response_model=ProviderSettingsResponse)
-async def get_provider_settings(live_runtime: LiveRuntimeDep) -> ProviderSettingsResponse:
+async def get_provider_settings(
+    live_runtime: LiveRuntimeDep, search_runtime: LiveSearchRuntimeDep
+) -> ProviderSettingsResponse:
     # Never returns key values (§21) — only whether a live-mode key is present.
     if settings.mode == "demo":
         llm = ProviderInfo(name="demo_llm", configured=True)
@@ -23,19 +26,29 @@ async def get_provider_settings(live_runtime: LiveRuntimeDep) -> ProviderSetting
     pricing_configured = (
         settings.openai_price_input_usd_per_mtok is not None and settings.openai_price_output_usd_per_mtok is not None
     )
+    # H2: real availability requires BOTH runtimes — never a silent
+    # fixture-search fallback when only OpenAI is configured.
+    llm_available = live_runtime is not None and bool(settings.openai_api_key)
+    search_available = search_runtime is not None and bool(settings.tavily_api_key)
     live = LiveAvailability(
-        # Availability is the real runtime, never a silent Demo fallback —
-        # `available` reflects whether Live Mode would actually work right now.
-        available=live_runtime is not None and bool(settings.openai_api_key),
+        available=llm_available and search_available,
+        llm_available=llm_available,
+        search_available=search_available,
         model=settings.openai_model,
         reasoning_effort=settings.openai_reasoning_effort or None,
         prompt_versions=prompt_versions(),
+        search_provider="tavily",
+        synthetic_search=False,
+        query_plan_version=QUERY_PLAN_VERSION,
         live_max_prospects_per_run=settings.live_max_prospects_per_run,
         llm_max_output_tokens=settings.llm_max_output_tokens,
         llm_max_transport_retries=settings.llm_max_transport_retries,
         llm_max_schema_retries=settings.llm_max_schema_retries,
         llm_call_deadline_s=settings.llm_call_deadline_s,
         live_step_timeout_s=settings.live_step_timeout_s,
+        search_hard_bounds=search_hard_bounds(settings),
+        search_usage_capable=True,
+        search_pricing_configured=settings.tavily_price_usd_per_credit is not None,
         pricing_configured=pricing_configured,
         soft_budget_usd=settings.live_run_soft_budget_usd if pricing_configured else None,
         soft_budget_enforceable=pricing_configured and settings.live_run_soft_budget_usd is not None,

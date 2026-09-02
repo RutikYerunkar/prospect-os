@@ -295,6 +295,7 @@ class SearchCallRow(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     chars_retrieved: Mapped[int] = mapped_column(Integer, default=0)
+    credits_used: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (UniqueConstraint("call_group_id", "attempt", name="uq_search_calls_group_attempt"),)
 
@@ -311,7 +312,11 @@ class SourceDocumentRow(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     search_call_id: Mapped[str | None] = mapped_column(ForeignKey("search_calls.id"), nullable=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
-    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"))
+    # Nullable (H2): a Stage A discovery-time occurrence is run-scoped, not
+    # prospect-scoped — no `ProspectContext`/prospect exists yet when
+    # `engine/discovery.py` persists it, exactly like `search_calls.
+    # prospect_id` already allows `None` for the run-level `discover()` call.
+    prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
 
     ref: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)

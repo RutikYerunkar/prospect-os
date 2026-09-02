@@ -66,3 +66,37 @@ class ObjectiveParseOutput(BaseModel):
     size_band_max: int | None = None
     min_score: int | None = None
     min_confidence: float | None = None
+
+
+class DiscoveryCandidate(BaseModel):
+    """One candidate company the model believes the served search-result
+    excerpts describe. `company_name` is a DISPLAY LABEL ONLY — never a
+    domain, URL, or provider id (the model is never shown any of those).
+    `supporting_result_refs` must be a subset of the refs actually served
+    this call; the server drops any candidate that cites a ref it wasn't
+    served, or whose name isn't textually supported by the cited
+    excerpt(s) — see `domain/discovery.py`.
+    """
+
+    company_name: str
+    supporting_result_refs: list[str] = Field(default_factory=list)
+
+
+class DiscoveryExtractionOutput(BaseModel):
+    """H2 Stage B (LLMOperation.DISCOVERY_EXTRACTION): bounded search-result
+    excerpts -> candidate company names. The model never sees a URL,
+    domain, provider result id, or search query — only opaque refs and
+    excerpt text."""
+
+    candidates: list[DiscoveryCandidate] = Field(default_factory=list)
+
+
+class DomainSelectionOutput(BaseModel):
+    """H2 Stage C ambiguous-fallback (LLMOperation.DOMAIN_SELECTION): pick
+    the one served domain-resolution candidate ref that is this company's
+    own official site, or `null` if none of them plausibly is. The model
+    may select ONLY from refs it was actually served — never author a URL
+    or domain itself; `null` is a legitimate, expected answer, not an
+    error."""
+
+    selected_candidate_ref: str | None = None

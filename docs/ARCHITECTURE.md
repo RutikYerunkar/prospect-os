@@ -241,6 +241,74 @@ section.
 
 ---
 
+## H2 — real live web search (`LIVE LLM · LIVE SEARCH`)
+
+H2 replaces Checkpoint G's fixture-backed search with a real `providers/live/tavily_search.py::
+TavilySearchProvider` (pinned `tavily-python==0.8.0`, `AsyncTavilyClient`, process-scoped
+`LiveSearchRuntime` created once in `main.py`'s lifespan exactly like `LiveProviderRuntime`).
+**NEW Live Mode requires BOTH a configured OpenAI runtime AND a configured Tavily runtime** — never a
+silent fallback to fixture search for either half; `api/routers/plays.py::start_run` 422s cleanly if
+either is missing. A historical Checkpoint G run's `provider_profile` JSON (`LIVE LLM · FIXTURE SEARCH`)
+is a persisted snapshot, never rewritten — it renders exactly as it was recorded.
+
+**Real multi-stage discovery** (`engine/discovery.py::discover_live()`, invoked by
+`engine/runner.py::discover_and_dedupe()` only when the wired search provider sets
+`requires_llm_discovery = True`; Demo Mode's single-shot `discover()` path is untouched):
+
+- **Stage A** — bounded, deterministic query plan (`domain/query_plan.py`, `LIVE_MAX_PLAN_QUERIES_PER_RUN`)
+  issued as real Tavily searches (`TavilySearchProvider.raw_discover()`). Persisted as
+  `source_documents` occurrences (run-scoped, `prospect_id=NULL` — no prospect exists yet) and
+  `search_calls` telemetry, exactly like every other retrieval.
+- **Stage B** — `LLMOperation.DISCOVERY_EXTRACTION`: bounded search-result excerpts (opaque refs, NO
+  URLs) → candidate company names + supporting refs (`prompts/discovery_extraction.py`). Server
+  independently re-verifies every candidate before it survives: every cited ref must have been served
+  this call, and the company name must be textually supported by the cited excerpt(s)
+  (`domain/discovery.py::company_name_textually_supported`, token-overlap, not a bare LLM assertion).
+- **Stage C** — one deterministic domain-resolution query per surviving candidate
+  (`"<company_name> official site"`). The engine — never the model — maps a served candidate's URL to a
+  canonical domain (`domain/discovery.py::resolve_candidate_domain`: safety + PSL normalization + served-
+  domain check + non-aggregator). Exactly one structurally-safe, label-matching candidate → accepted
+  deterministically, zero LLM calls. Otherwise → the bounded `LLMOperation.DOMAIN_SELECTION` fallback,
+  which may only select among refs already independently verified safe — the model can return `null`
+  (a legitimate "unresolved," not an error) but can never author a domain itself.
+- **Stage D** — the identity gate is Stage C's own served-ref/safety/aggregator check plus this module's
+  domain-uniqueness dedupe; a candidate that can't establish a safe canonical domain is dropped, never
+  turned into a fake prospect, and never consumes a `target_count` slot.
+
+Every rejection/acceptance reason is emitted as a `run_events` row (`discovery.candidate_rejected`,
+`discovery.domain_resolved`), replayed both as Activity Stream narrative and as `/evaluation`'s
+`search_quality.discovery_rejection_reasons`/`domain_resolution_method_counts` — no second telemetry
+table invented for something this lightweight.
+
+**Real per-company retrieval** (`TavilySearchProvider.fetch_sources()`, called through the *same*
+`engine/search.py::call_search()` seam `engine/steps/research.py` already used in H1 — no engine-level
+change needed here): deterministic, domain-scoped category queries (funding / careers / leadership,
+`include_domains=[canonical_domain]`, `domain/query_plan.py::build_source_queries`, bounded at
+`LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT`) → the exact same deterministic winner selection H1 built
+(`domain/source_identity.py::select_winners`) → ONE batched Tavily `extract()` call per prospect for
+the winners only (never one call per URL, never every discovery result blindly). A failed URL inside
+that batch (`failed_results`) degrades that one source (`PARTIAL_EXTRACTION` telemetry, `SourceStatus.
+PARTIAL`), never the whole prospect. Groundwork never issues an arbitrary `httpx.get(result_url)` —
+provider-managed extraction only.
+
+**Evidence provenance, fixed for real.** `engine/steps/research.py` used to hardcode
+`origin=EvidenceOrigin.DEMO_FIXTURE, source_url=None` on every Evidence row regardless of what actually
+produced it — harmless while only `DemoSearchProvider` existed, but it would have silently mislabeled
+every real `TavilySearchProvider` result as synthetic fixture data (and dropped its real URL) the moment
+Live search existed. H2 fixes this: Evidence now reads `origin`/`source_url`/`retrieved_at` off the
+winning `SourceDocument` itself — `Evidence`'s own §12 model validator still enforces the invariant
+structurally (only LIVE_FETCH may carry a URL) regardless.
+
+Published dates stay nullable and never inferred (the verification spike found no reliably-populated
+`published_date` field on ordinary Tavily search results); persisted content is a bounded excerpt
+(`LIVE_MAX_SOURCE_EXCERPT_CHARS`), never a raw page body; Tavily's `include_usage` credits are mapped
+into search telemetry independently of whether a trustworthy USD rate is configured (`cost_usd` stays
+null without one — the UI shows "—", never "$0.00"; hard call/query/result/extract caps are the real
+spend control). Full verified SDK facts, response-shape mapping, and the pinned version:
+`docs/PROGRESS.md`'s H2 section.
+
+---
+
 ## Where things live
 
 See `docs/IMPLEMENTATION_PLAN.md` §22 for the full folder structure. The load-bearing boundary:

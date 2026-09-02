@@ -29,10 +29,22 @@ async def lifespan(app: FastAPI):
 
         app.state.live_runtime = LiveProviderRuntime.create(settings)
 
+    # H2: process-scoped Tavily search runtime, same lifecycle discipline —
+    # created once here, closed once at shutdown, only when TAVILY_API_KEY
+    # is actually configured. Live Mode requires BOTH this and
+    # `live_runtime` to be non-null (see `providers/registry.py`).
+    app.state.live_search_runtime = None
+    if settings.tavily_api_key:
+        from groundwork.providers.live.search_runtime import LiveSearchRuntime
+
+        app.state.live_search_runtime = LiveSearchRuntime.create(settings)
+
     yield
 
     if app.state.live_runtime is not None:
         await app.state.live_runtime.close()
+    if app.state.live_search_runtime is not None:
+        await app.state.live_search_runtime.close()
     await engine.dispose()
 
 

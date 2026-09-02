@@ -72,6 +72,7 @@ class SearchRepository:
                         error_message=redact(t.error_message),
                         cost_usd=t.cost_usd,
                         chars_retrieved=t.chars_retrieved,
+                        credits_used=t.credits_used,
                     )
                 )
             if call_ids:
@@ -117,7 +118,13 @@ class SearchRepository:
                     identity_key=source_identity(doc),
                     is_winner=is_winner,
                     canonical_source_id=None if is_winner else winner_row_id,
-                    evidence_id=evidence_id_for(prospect_id, doc) if is_winner else None,
+                    # Run-scoped (prospect_id=None) discovery-stage occurrences
+                    # never become Evidence — nothing downstream ever creates
+                    # an Evidence row for them, so there is no real id to
+                    # point at.
+                    evidence_id=(
+                        evidence_id_for(prospect_id, doc) if (is_winner and prospect_id is not None) else None
+                    ),
                 )
 
             # Two passes, winners first: `canonical_source_id` is a

@@ -22,6 +22,7 @@ from groundwork.providers.base import (
     ProviderAuthError,
     ProviderContentFiltered,
     ProviderOutputTruncated,
+    ProviderQuotaExceeded,
     ProviderRateLimited,
     ProviderRefusal,
     ProviderTimeout,
@@ -125,10 +126,165 @@ async def test_timeout_exhausts_transport_budget():
     assert [a.transport_retry_index for a in exc_info.value.attempts] == [0, 1, 2]
 
 
+async def test_call_deadline_override_from_envelope_metadata_reaches_request(monkeypatch) -> None:
+    """H2 post-smoke: `engine/discovery.py` requests a longer deadline for
+    DISCOVERY_EXTRACTION than the runtime default
+    (`config.py::llm_discovery_call_deadline_s`) via
+    `envelope.metadata["call_deadline_s"]`. Proves that value — not the
+    runtime's own default — is the one actually passed to the outbound
+    `responses.create(timeout=...)` call: wraps the real (scripted-
+    transport-backed) `create()` to capture its kwargs while still letting
+    the normal request/response flow execute, rather than hand-faking an
+    SDK response object."""
+    runtime, transport = make_runtime([_ok_body(), _ok_body()])
+    captured: list[dict] = []
+    original_create = runtime.client.responses.create
+
+    async def capturing_create(**kwargs):
+        captured.append(kwargs)
+        return await original_create(**kwargs)
+
+    monkeypatch.setattr(runtime.client.responses, "create", capturing_create)
+    provider = OpenAILLMProvider(runtime=runtime)
+
+    # No override -> the runtime's own default deadline.
+    await provider.structured(ENVELOPE, Out, ctx_key=ENVELOPE.ctx_key, operation=LLMOperation.SCORE_EXPLANATION)
+    assert captured[0]["timeout"] == runtime.call_deadline_s
+
+    # An envelope carrying an override -> that value, not the default.
+    long_envelope = PromptEnvelope(
+        ctx_key=ENVELOPE.ctx_key, system=ENVELOPE.system, user=ENVELOPE.user,
+        metadata={"call_deadline_s": 999.0},
+    )
+    await provider.structured(
+        long_envelope, Out, ctx_key=long_envelope.ctx_key, operation=LLMOperation.DISCOVERY_EXTRACTION
+    )
+    assert captured[1]["timeout"] == 999.0
+    await runtime.close()
+
+
 async def test_rate_limited_maps_to_provider_rate_limited():
     steps = [(429, {"error": {"message": "slow down", "type": "rate_limit"}})] * 3
     with pytest.raises(ProviderRateLimited):
         await _call(steps)
+
+
+## H2 second post-smoke fix — quota/credit exhaustion vs. an ordinary
+## transient rate limit. A real smoke hit exactly this: a 429 whose body
+## carried `type=insufficient_quota, code=credit_balance_exhausted` was
+## being misclassified as RATE_LIMITED and burned all 3 transport retries
+## chasing an account balance retrying can never refill.
+
+
+async def test_temporary_rate_limit_429_is_retried_then_succeeds():
+    """(A) An ordinary transient 429 (no quota/billing signal in the body)
+    stays RATE_LIMITED and transport-retryable, unchanged."""
+    steps = [(429, {"error": {"message": "slow down", "type": "rate_limit"}}), _ok_body()]
+    result = await _call(steps)
+    assert [a.status for a in result.attempts] == [LLMAttemptStatus.RATE_LIMITED, LLMAttemptStatus.OK]
+    assert result.attempts[1].attempt_kind == LLMAttemptKind.TRANSPORT_RETRY
+
+
+async def test_quota_exhausted_429_is_permanent_single_attempt():
+    """(B) A 429 identifying account/project quota or billing exhaustion
+    is classified QUOTA_EXHAUSTED and raised immediately — no transport
+    retry, no schema repair, exactly one attempt total, regardless of how
+    many retries would otherwise be available."""
+    error_body = {
+        "error": {
+            "message": (
+                "You exceeded your current quota, please check your plan and billing details. "
+                "https://platform.openai.com/account/billing"
+            ),
+            "type": "insufficient_quota",
+            "code": "credit_balance_exhausted",
+        }
+    }
+    steps = [(429, error_body)]
+    with pytest.raises(ProviderQuotaExceeded) as exc_info:
+        await _call(steps, max_transport_retries=2, max_schema_retries=1)
+    assert len(exc_info.value.attempts) == 1
+    attempt = exc_info.value.attempts[0]
+    assert attempt.status == LLMAttemptStatus.QUOTA_EXHAUSTED
+    assert attempt.attempt_kind == LLMAttemptKind.INITIAL
+
+
+async def test_quota_exhausted_detected_from_code_alone():
+    """`code=credit_balance_exhausted` alone (without a matching `type`)
+    is still enough — the real smoke's observed body had both, but the
+    classifier checks either field."""
+    steps = [(429, {"error": {"message": "boom", "type": "some_other_type", "code": "credit_balance_exhausted"}})]
+    with pytest.raises(ProviderQuotaExceeded) as exc_info:
+        await _call(steps)
+    assert len(exc_info.value.attempts) == 1
+
+
+async def test_quota_exhausted_telemetry_persists_correctly(session_factory) -> None:
+    """(C) The single QUOTA_EXHAUSTED attempt persists to `llm_calls` like
+    any other attempt — no special-cased persistence path. Uses the
+    repository directly (bypassing `LLMCallRecorder`'s per-prospect
+    binding) so this doesn't need a real `plays`/`runs`/`prospects` row —
+    the same run-scoped, no-prospect-yet pattern `engine/discovery.py`
+    already uses for its own LLM operations."""
+    from groundwork.repositories.llm_calls import LLMCallRepository
+
+    steps = [(429, {"error": {"message": "boom", "type": "insufficient_quota", "code": "credit_balance_exhausted"}})]
+    runtime, transport = make_runtime(steps)
+    provider = OpenAILLMProvider(runtime=runtime)
+    repo = LLMCallRepository(session_factory)
+    try:
+        with pytest.raises(ProviderQuotaExceeded) as exc_info:
+            await provider.structured(ENVELOPE, Out, ctx_key=ENVELOPE.ctx_key, operation=LLMOperation.SCORE_EXPLANATION)
+        await repo.record_attempts(
+            call_group_id="cg1", operation=LLMOperation.SCORE_EXPLANATION.value, provider=provider.name,
+            prompt_version="v1", attempts=exc_info.value.attempts,
+        )
+    finally:
+        await runtime.close()
+
+    async with session_factory() as session:
+        from sqlalchemy import select
+
+        from groundwork.models.tables import LLMCallRow
+
+        result = await session.execute(select(LLMCallRow).where(LLMCallRow.call_group_id == "cg1"))
+        persisted = list(result.scalars())
+    assert len(persisted) == 1
+    assert persisted[0].status == "QUOTA_EXHAUSTED"
+    assert persisted[0].attempt == 1
+
+
+async def test_quota_exhausted_error_message_redacted_of_configured_secret(monkeypatch) -> None:
+    """(D) No secret leakage: a configured OPENAI_API_KEY embedded in the
+    raw provider error text is stripped before it would ever be persisted
+    — `redact()` is secret-agnostic and needs no QUOTA_EXHAUSTED-specific
+    change, but this proves that stays true for this new status too."""
+    import groundwork.config as config_module
+    from groundwork.observability.redact import redact
+
+    monkeypatch.setattr(config_module.settings, "openai_api_key", "sk-super-secret-test-key")
+    steps = [(429, {"error": {
+        "message": "invalid key sk-super-secret-test-key: insufficient_quota",
+        "type": "insufficient_quota", "code": "credit_balance_exhausted",
+    }})]
+    with pytest.raises(ProviderQuotaExceeded) as exc_info:
+        await _call(steps)
+    raw_message = exc_info.value.attempts[0].error_message
+    assert "sk-super-secret-test-key" in raw_message  # not redacted in-memory (matches existing LLM telemetry contract)
+    assert "sk-super-secret-test-key" not in redact(raw_message)
+    assert "[REDACTED]" in redact(raw_message)
+
+
+def test_search_smoke_quota_message_never_echoes_raw_billing_url() -> None:
+    """(D) The smoke script's own clean diagnostic never contains a URL,
+    regardless of what the real provider error text says."""
+    from groundwork.scripts.search_smoke import _QUOTA_EXHAUSTED_MESSAGE, _describe_error
+
+    assert "http" not in _QUOTA_EXHAUSTED_MESSAGE
+    raw = "You exceeded your quota: insufficient_quota. See https://platform.openai.com/account/billing"
+    described = _describe_error(raw)
+    assert described == _QUOTA_EXHAUSTED_MESSAGE
+    assert "http" not in described
 
 
 async def test_provider_5xx_maps_to_provider_unavailable():

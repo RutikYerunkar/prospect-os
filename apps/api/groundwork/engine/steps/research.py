@@ -49,20 +49,29 @@ async def research(ctx: ProspectContext) -> StepResult:
 
     # Candidate Evidence, built LOCALLY — never appended to `ctx.evidence`
     # until extraction actually succeeds (see module docstring).
+    #
+    # Origin/URL/retrieved_at are read from the winning `SourceDocument`
+    # itself, never hardcoded — H2 fix: this used to hardcode
+    # `origin=DEMO_FIXTURE, source_url=None` unconditionally, which would
+    # have silently mislabeled real `TavilySearchProvider` evidence as
+    # synthetic fixture data (and dropped its real, clickable URL) the
+    # moment Live search existed. `Evidence`'s own §12 model validator
+    # still enforces the invariant structurally: only a genuinely
+    # LIVE_FETCH-origin document may carry a `source_url` at all.
     candidate_evidence = [
         Evidence(
             id=evidence_id_for(ctx.prospect_id, doc),
             prospect_id=ctx.prospect_id,
-            source_url=None,
+            source_url=doc.url if doc.origin == EvidenceOrigin.LIVE_FETCH else None,
             source_ref=doc.ref,
             source_provider=doc.source_provider,
             title=doc.title,
             claim=doc.claim,
             snippet=doc.text,
             signal_type=SignalType(doc.signal_type) if doc.signal_type else None,
-            retrieved_at=None,
+            retrieved_at=doc.retrieved_at,
             confidence=doc.confidence,
-            origin=EvidenceOrigin.DEMO_FIXTURE,
+            origin=doc.origin,
         )
         for doc in winners
     ]

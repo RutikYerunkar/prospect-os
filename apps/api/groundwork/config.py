@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     live_step_timeout_s: float = 45.0
     live_run_wall_clock_timeout_s: float = 600.0
     llm_call_deadline_s: float = 30.0
+    # H2 post-smoke: DISCOVERY_EXTRACTION reads up to MAX_DISCOVERY_HITS
+    # (40) real search-result excerpts in one call — a real first smoke
+    # exhausted LLM_MAX_TRANSPORT_RETRIES against the shared 30s deadline
+    # on exactly this operation (35 hits), producing zero candidates with
+    # no distinguishing signal from a genuine "no companies found." This
+    # is a dedicated, larger deadline for that one bulkier operation only
+    # — every other Live LLM operation (research/score/personalize/
+    # domain_selection) keeps the shared, already-verified 30s budget.
+    llm_discovery_call_deadline_s: float = 60.0
     # Measurement-selected (see docs/PROGRESS.md, Checkpoint G Phase 4): the
     # largest measured operation (research_extraction, worst-case padded
     # facts) serializes to ~3KB / ~800 visible tokens. 2048 leaves headroom
@@ -76,8 +85,23 @@ class Settings(BaseSettings):
     live_max_extract_calls_per_run: int = 25
     live_max_search_results_per_query: int = 10
 
+    # --- H2: real Tavily adapter runtime bounds ---
+    search_call_deadline_s: float = 20.0
+    search_max_concurrency: int = 2
+    # Bounded persisted excerpt length for LIVE_FETCH source content (Phase
+    # 11) — raw HTML/full page bodies are never persisted, only a bounded
+    # extracted excerpt.
+    live_max_source_excerpt_chars: int = 1200
+    tavily_search_depth: str = "basic"
+    # Tavily pricing is NOT baked into code unless verified/configured —
+    # unset -> cost_usd stays null everywhere for search telemetry, exactly
+    # like the OpenAI pricing fields above. There is no publicly documented,
+    # stable per-credit USD rate to hardcode, so this defaults unset.
+    tavily_price_usd_per_credit: float | None = None
+
     @field_validator(
         "openai_price_input_usd_per_mtok", "openai_price_output_usd_per_mtok", "live_run_soft_budget_usd",
+        "tavily_price_usd_per_credit",
         mode="before",
     )
     @classmethod

@@ -40,6 +40,7 @@ __all__ = [
     "ProviderAuthError",
     "ProviderNotConfigured",
     "ProviderBudgetExceeded",
+    "ProviderQuotaExceeded",
     "FAILURE_TYPES",
     "STEP_RETRYABLE",
     "SourceDocument",
@@ -48,8 +49,17 @@ __all__ = [
     "SearchAttemptStatus",
     "SearchAttemptTelemetry",
     "SearchProviderError",
+    "SearchTimeout",
+    "SearchRateLimited",
+    "SearchProviderUnavailable",
+    "SearchAuthError",
+    "SearchInvalidResponse",
+    "SourceExtractionFailed",
     "DiscoveryResult",
+    "DomainCandidate",
     "DomainCandidates",
+    "RawSearchHit",
+    "RawDiscoveryResult",
     "SourceBundle",
     "PromptEnvelope",
     "LLMProvider",
@@ -100,6 +110,13 @@ class LLMOperation(StrEnum):
     SCORE_EXPLANATION = "score_explanation"
     PERSONALIZATION = "personalization"
     OBJECTIVE_PARSE = "objective_parse"
+    # H2 Stage B: bounded search-result excerpts -> candidate company names.
+    # Run-scoped (no prospect exists yet) — see `engine/discovery.py`.
+    DISCOVERY_EXTRACTION = "discovery_extraction"
+    # H2 Stage C ambiguous-fallback: pick one served domain-resolution
+    # candidate ref, or null. Never invoked when the deterministic path
+    # (exactly one acceptable domain) already resolved the candidate.
+    DOMAIN_SELECTION = "domain_selection"
 
 
 class LLMAttemptKind(StrEnum):
@@ -120,6 +137,14 @@ class LLMAttemptStatus(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     PROVIDER_ERROR = "PROVIDER_ERROR"
     AUTH_ERROR = "AUTH_ERROR"
+    # H2 second post-smoke fix: a real 429 whose body identifies account/
+    # project quota or billing exhaustion (`type=insufficient_quota`,
+    # `code=credit_balance_exhausted`, or an equivalent signal) — distinct
+    # from an ordinary transient `RATE_LIMITED` 429. Permanent: retrying
+    # cannot recover an exhausted balance. Never confused with
+    # `NOT_ATTEMPTED_BUDGET`, which is Groundwork's own soft `RunBudget`
+    # tripwire, not anything the provider itself reported.
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
     NOT_ATTEMPTED_BUDGET = "NOT_ATTEMPTED_BUDGET"
 
 
@@ -245,6 +270,17 @@ class ProviderBudgetExceeded(ProviderError):
     already-in-flight calls are unaffected, only *new* calls are blocked."""
 
 
+class ProviderQuotaExceeded(ProviderError):
+    """The PROVIDER's own account/project quota or billing balance is
+    exhausted (`type=insufficient_quota`, `code=credit_balance_exhausted`,
+    or an equivalent provider signal on a 429) — never Groundwork's own
+    `RunBudget` soft threshold (that's `ProviderBudgetExceeded`, a
+    completely different thing: our spending guess vs. the provider's own
+    authoritative account state). Permanent — no amount of retrying
+    recovers an exhausted balance, so this is raised immediately after
+    exactly one attempt, never transport-retried, never schema-repaired."""
+
+
 # Legacy name kept for the demo fixture pack's `failure_script.error` string
 # lookup (`ProviderTimeout` / `ProviderUnavailable` / `SchemaViolation`).
 FAILURE_TYPES: dict[str, type[ProviderError]] = {
@@ -270,6 +306,13 @@ class SearchOperation(StrEnum):
     DISCOVER = "discover"
     RESOLVE_DOMAIN = "resolve_domain"
     FETCH_SOURCES = "fetch_sources"
+    # H2: the two real Tavily operations `fetch_sources()`/`raw_discover()`
+    # issue internally — DemoSearchProvider never emits these, only
+    # `TavilySearchProvider` does. Kept distinct from FETCH_SOURCES (which
+    # stays the Demo Mode single-shot operation label) so real telemetry
+    # distinguishes "searched" from "extracted content for."
+    DOMAIN_SEARCH = "domain_search"
+    EXTRACT = "extract"
 
 
 class SearchAttemptKind(StrEnum):
@@ -279,10 +322,14 @@ class SearchAttemptKind(StrEnum):
 
 class SearchAttemptStatus(StrEnum):
     OK = "OK"
-    NO_RESULTS = "NO_RESULTS"
+    NO_RESULTS = "NO_RESULTS"  # legitimate zero-result outcome (Demo + H1)
+    EMPTY_RESULT = "EMPTY_RESULT"  # H2 alias of the same concept for a real provider call
     TIMEOUT = "TIMEOUT"
     RATE_LIMITED = "RATE_LIMITED"
     PROVIDER_ERROR = "PROVIDER_ERROR"
+    AUTH_ERROR = "AUTH_ERROR"
+    INVALID_RESPONSE = "INVALID_RESPONSE"
+    PARTIAL_EXTRACTION = "PARTIAL_EXTRACTION"
     NOT_ATTEMPTED_BUDGET = "NOT_ATTEMPTED_BUDGET"
 
 
@@ -316,6 +363,12 @@ class SearchAttemptTelemetry(BaseModel):
     error_message: str | None = None  # redacted before this is set
     cost_usd: float | None = None
     chars_retrieved: int = 0
+    # H2 Phase 16: provider-native usage/credits from Tavily's
+    # `include_usage` response field, kept distinct from `cost_usd` — a
+    # real credits figure can be known even when no trustworthy USD
+    # conversion is configured (`cost_usd` stays null in that case, per the
+    # "never fabricate cost" rule; `credits_used` still reports the truth).
+    credits_used: float | None = None
 
 
 class SearchProviderError(Exception):
@@ -331,6 +384,38 @@ class SearchProviderError(Exception):
         self.telemetry: list[SearchAttemptTelemetry] = telemetry or []
 
 
+# H2 Phase 5 — typed search error taxonomy, the search-side analogue of the
+# LLM `Provider*` hierarchy above. `SourceExtractionFailed` is deliberately
+# NOT step-fatal by convention (callers decide whether enough sources
+# survive); the rest are raised by `TavilySearchProvider` after its own
+# bounded transport-retry budget is exhausted.
+class SearchTimeout(SearchProviderError):
+    pass
+
+
+class SearchRateLimited(SearchProviderError):
+    pass
+
+
+class SearchProviderUnavailable(SearchProviderError):
+    pass
+
+
+class SearchAuthError(SearchProviderError):
+    """Permanent — invalid/missing TAVILY_API_KEY. Never retried."""
+
+
+class SearchInvalidResponse(SearchProviderError):
+    """The provider returned 200 with a body this adapter can't parse."""
+
+
+class SourceExtractionFailed(SearchProviderError):
+    """One source's Extract call failed — a per-source degradation, not
+    necessarily a failed prospect. Never raised for the whole logical call;
+    callers persist a PARTIAL_EXTRACTION telemetry row and keep going with
+    whatever sources did extract."""
+
+
 class DiscoveryResult(BaseModel):
     """`SearchProvider.discover()` return shape — a roster of candidate
     companies plus the telemetry of however many provider calls it took."""
@@ -339,12 +424,53 @@ class DiscoveryResult(BaseModel):
     telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
 
 
-class DomainCandidates(BaseModel):
-    """`SearchProvider.resolve_domain()` return shape (H2 groundwork, not
-    exercised by the H1 pipeline — no caller invokes it yet; it exists so
-    the full Phase 12 contract is offline-tested ahead of a real adapter)."""
+class DomainCandidate(BaseModel):
+    """One served domain-resolution candidate (H2 Stage C) — an opaque
+    `ref` the model may cite (never a URL/domain), plus the provider-
+    returned `url`/`title` the engine (never the model) uses to compute a
+    canonical domain via `domain/discovery.py::resolve_candidate_domain`."""
 
-    domains: list[str]
+    ref: str
+    url: str
+    title: str = ""
+
+
+class DomainCandidates(BaseModel):
+    """`SearchProvider.resolve_domain()` return shape. `domains` is the
+    original H1-era plain list (still what `DemoSearchProvider` returns —
+    a resolved domain per fixture lookup, no candidate/ref structure
+    needed). `candidates` is the H2 real-provider shape: every domain-
+    resolution query result served this round, so the engine's identity
+    gate can pick among them (deterministically, or via the bounded
+    `DOMAIN_SELECTION` LLM fallback) without ever trusting a model-typed
+    domain string."""
+
+    domains: list[str] = Field(default_factory=list)
+    candidates: list[DomainCandidate] = Field(default_factory=list)
+    telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
+
+
+class RawSearchHit(BaseModel):
+    """One Stage-A discovery search result, reduced to exactly what the
+    DISCOVERY_EXTRACTION LLM call is allowed to see: an opaque `ref` and a
+    bounded text `excerpt`. `url`/`domain` are carried here for the
+    engine's own `source_documents` persistence and are never read by any
+    prompt-building code — see `prompts/discovery_extraction.py`."""
+
+    ref: str
+    title: str
+    excerpt: str
+    url: str | None = None
+
+
+class RawDiscoveryResult(BaseModel):
+    """`TavilySearchProvider.raw_discover()` return shape — Stage A only,
+    never a resolved company roster. `hits` is what Stage B's LLM call
+    sees; `documents` is the same results reduced to `SourceDocument`
+    retrieval-occurrence rows for persistence."""
+
+    hits: list[RawSearchHit] = Field(default_factory=list)
+    documents: list[SourceDocument] = Field(default_factory=list)
     telemetry: list[SearchAttemptTelemetry] = Field(default_factory=list)
 
 
