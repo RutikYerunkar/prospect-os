@@ -231,8 +231,10 @@ export function useRunStream(runId: string) {
 
       // `withCredentials` — the operator session cookie has to ride along
       // on a Live run's SSE connection the same way it does on every REST
-      // call (Checkpoint I1 Phase 8/9); without it a cross-origin
-      // EventSource never sends cookies at all.
+      // call (Checkpoint I1 Phase 8/9). The stream URL is same-origin as of
+      // Checkpoint I2 (proxied through app/api/[...path]/route.ts), so a
+      // plain EventSource would already send the cookie by default — this
+      // is kept for robustness and because it's harmless same-origin.
       const es = new EventSource(eventStreamUrl(runId, lastSeqRef.current), { withCredentials: true });
       esRef.current = es;
 

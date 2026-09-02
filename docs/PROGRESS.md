@@ -19,19 +19,29 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **G — Live Mode LLM provider** | `1e7586c` (merged to `master` via PR #7, branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
 | **H1 — demo-neutral, real-company-safe foundation** | `acdd769`/`f44c33b` (merged to `master` via PR #8, branch `claude/checkpoint-h1-caz9gn`) | Fixed two real bugs (evidence-retry duplication; substring-based cross-prospect-leak false positive on short names); offline PSL-aware domain normalization (`domain/psl.py`, pinned `tldextract`); pure `url_safety`/`source_identity` helpers; independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` — scoring's `industry_fit`/`size_fit` now read *only* these, never `CompanySeed`; tri-state `DimensionSupport`/`ExclusionEvaluation` (ungrounded industry forces `NEEDS_REVIEW`, seven review checks unchanged); `source_documents`/`search_calls` persistence with deterministic retrieval-occurrence dedupe; `ctx.sources` (retrieval) split from `ctx.evidence` (accepted); refined `SearchProvider` contract, `DemoSearchProvider` ported, zero live vendor. Demo Mode preserved byte-identical at every gate. **No live search was performed; no vendor adapter was written.** |
 | **H2 — real live web search** | *(merged after this row was written — see repo history for the exact commit)* (branch `claude/checkpoint-h2-implementation-w7upys`) | **REAL OpenAI LLM + REAL TAVILY SEARCH** — `LIVE LLM · LIVE SEARCH`. Pinned `tavily-python==0.8.0`, process-scoped `LiveSearchRuntime`, real `TavilySearchProvider` behind the same `SearchProvider` Protocol; real multi-stage discovery (`engine/discovery.py` — bounded search → `DISCOVERY_EXTRACTION` LLM → deterministic/`DOMAIN_SELECTION`-fallback domain resolution → identity gate), never a model-authored domain; real per-company retrieval reusing H1's winner-selection + one batched Tavily `extract()` call per prospect; a real bug fixed in `engine/steps/research.py` (Evidence origin/URL used to be hardcoded to `DEMO_FIXTURE`/`None` regardless of what actually produced it); NEW Live Mode requires BOTH OpenAI and Tavily runtimes, never a fixture-search fallback; historical Checkpoint G `provider_profile` rows render unchanged. Demo Mode preserved byte-identical at every gate. |
-| **I1 — Production Foundation** | *this commit* (branch `claude/checkpoint-i1-foundation-i1raj1`) | Makes the prototype deployable without changing what it computes. DB-correct atomic SSE sequencing (`UPDATE...RETURNING`, replacing app-level `MAX(seq)+1`); an ownership-safe execution lease (`executor_id`/heartbeat/reaper) so a second local process or a fast restart never double-finalizes a run, with no auto-resume by design; optional Postgres support behind the same `DATABASE_URL` seam (SQLite unchanged as local-dev default; Alembic manages Postgres, drift-tested against a real instance); a non-persisting play-preview endpoint; an operator-gated Live Mode (signed session cookie + CSRF) on top of the existing provider-configuration gate, with Live cost/abuse controls (active-run cap, daily allowance, in-process rate limits); security/observability hardening (request-id middleware, body-size cap, trusted-host check, catch-all error handler, dual-point secret redaction, structured JSON logging); a `/api/ready` endpoint distinct from `/api/health`; a single API `Dockerfile` + frontend prod config; PR CI (SQLite + Postgres service container + migration drift + frontend lint/typecheck/build + Docker build), zero paid provider calls. **Zero cloud resources provisioned — that's Checkpoint I2, explicitly not started.** Demo Mode preserved byte-identical at every phase gate. |
+| **I1 — Production Foundation** | `2fb704c` (merged to `master` via PR #10) | Makes the prototype deployable without changing what it computes. DB-correct atomic SSE sequencing (`UPDATE...RETURNING`, replacing app-level `MAX(seq)+1`); an ownership-safe execution lease (`executor_id`/heartbeat/reaper) so a second local process or a fast restart never double-finalizes a run, with no auto-resume by design; optional Postgres support behind the same `DATABASE_URL` seam (SQLite unchanged as local-dev default; Alembic manages Postgres, drift-tested against a real instance); a non-persisting play-preview endpoint; an operator-gated Live Mode (signed session cookie + CSRF) on top of the existing provider-configuration gate, with Live cost/abuse controls (active-run cap, daily allowance, in-process rate limits); security/observability hardening (request-id middleware, body-size cap, trusted-host check, catch-all error handler, dual-point secret redaction, structured JSON logging); a `/api/ready` endpoint distinct from `/api/health`; a single API `Dockerfile` + frontend prod config; PR CI (SQLite + Postgres service container + migration drift + frontend lint/typecheck/build + Docker build), zero paid provider calls. Demo Mode preserved byte-identical at every phase gate. |
+| **I2 — Deployment hardening (same-origin API proxy)** | *this commit* | **Real cloud deployment already exists** (Render frontend + API, Neon Postgres — provisioned outside any committed session; see "Current checkpoint" below for why this doc is only catching up now, not describing new provisioning work). This slice fixes the one blocker in that deployment: the frontend and API are two separate `*.onrender.com` origins with no custom domain, so the operator session's host-only cookie couldn't represent a real same-site session. Added a same-origin Next.js Route Handler proxy (`apps/web/app/api/[...path]/route.ts`) so the browser only ever talks to the frontend's own origin at relative `/api/...` paths; the proxy forwards server-to-server to a new server-only `GROUNDWORK_API_ORIGIN` env var. No backend change, no auth/CSRF/cookie model change — see "What Checkpoint I2 added" below. |
 
 ---
 
 ## Current checkpoint
 
-**I1 — Production Foundation, complete.** Checkpoints A–H2 remain intact and byte-identical; I1 adds
-the deployability work described above. See "What Checkpoint I1 added" below for the full
-phase-by-phase implementation, verification, and deviations.
+**I2 — Deployment hardening, in progress.** A real deployment (Render frontend + API, Neon Postgres)
+already exists in production and Demo Mode already works end-to-end there — **this happened outside
+any committed session**, so `docs/DEPLOYMENT.md`'s "What a real deployment still needs" checklist and
+this file's prior "Checkpoint I2 explicitly not started" note were both stale the moment that
+provisioning happened; nothing here tracked it until now. This is flagged explicitly per `CLAUDE.md`'s
+instruction to surface a documents-vs-reality conflict rather than silently resolve it — a future
+session (or the user) should treat `docs/DEPLOYMENT.md`'s environment-variable/provisioning specifics
+as needing a re-verify-against-Render pass, not as ground truth.
+
+This slice of I2 closed the one specific blocker named for it: the operator session cookie's intended
+same-site topology, broken by the frontend/API being separate origins with no custom domain. See "What
+Checkpoint I2 added" below. Checkpoints A–I1 remain intact and byte-identical — this is a frontend-only
+change; nothing in `apps/api` was touched.
 
 A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-further work. **Do not begin Checkpoint I2 (real cloud deployment) without the user explicitly
-asking** — see `docs/DEPLOYMENT.md` for what it would need.
+further work.
 
 ---
 
@@ -2773,40 +2783,169 @@ already-built local working directory.
 
 ---
 
+## What Checkpoint I2 added (same-origin API proxy)
+
+**Problem.** Production already runs the frontend and API as two separate `*.onrender.com` sites (no
+custom domain, and the task explicitly ruled one out). `apps/api/groundwork/api/routers/operator.py`'s
+operator session cookie is deliberately host-only (`_cookie_kwargs()` never passes `domain=`), Secure,
+HttpOnly, SameSite=Lax — correct for a same-site deployment, but the browser was previously calling the
+API's own origin directly (`NEXT_PUBLIC_API_URL`, build-time-inlined), which is a cross-site request from
+the cookie's point of view even though both apps belong to the same product. Demo Mode (no cookie
+involved) already worked end-to-end; the operator/Live session was the specific thing this topology
+couldn't represent correctly.
+
+**Architecture chosen.** A same-origin Next.js Route Handler proxy — the catch-all
+`apps/web/app/api/[...path]/route.ts` — rather than a config-level rewrite (`next.config.ts`
+`rewrites()`), because the requirements (exact Set-Cookie passthrough including multiple cookies,
+true non-buffered SSE streaming, explicit hop-by-hop header stripping, faithful status-code/redirect
+handling) need real control over both the outbound `fetch` and the returned `Response`, not a
+declarative URL rewrite. The browser now only ever talks to
+`https://groundwork-web-febu.onrender.com/api/...`; the route handler forwards each request
+server-to-server to a new server-only env var, `GROUNDWORK_API_ORIGIN` (never `NEXT_PUBLIC_`-prefixed —
+read only inside the handler, at request time, so the API's real URL can change without a frontend
+rebuild).
+
+**Files changed** (all `apps/web`, nothing in `apps/api`):
+- `app/api/[...path]/route.ts` — the proxy itself. One `proxy()` function handles GET/POST/PUT/PATCH/
+  DELETE/HEAD identically: reads `request.nextUrl.pathname`/`.search` (already exactly the upstream
+  path — no manual reconstruction from dynamic-route params needed), buffers the request body (bounded;
+  this API's largest legitimate body is 256KB — `MAX_REQUEST_BODY_BYTES` — so buffering rather than
+  streaming avoids Node's `duplex: "half"` requirement for no real cost), issues the upstream `fetch`
+  with `redirect: "manual"`, `cache: "no-store"`, and `signal: request.signal` (aborts the upstream call
+  the instant the browser disconnects — load-bearing for SSE, see below), then wires
+  `upstreamResponse.body` directly into the returned `Response` without ever buffering it.
+  `export const dynamic = "force-dynamic"` — a route serving a signed session cookie and a live SSE
+  stream must never be statically optimized/cached.
+- `lib/proxyHeaders.ts` — pure, unit-tested header-forwarding rules, factored out of the route handler
+  specifically so they're testable without a fake HTTP server: `buildProxyRequestHeaders` allow-lists
+  exactly `content-type`/`accept`/`cookie`/`origin` from browser to API (never `host` — the outbound
+  `fetch` must address the real API origin, and letting `fetch` compute `Host` itself is what makes
+  requirement 7, "don't forward the browser Host header," true for free); `buildProxyResponseHeaders`
+  strips the eight RFC 9110 §7.6.1 hop-by-hop headers plus `content-encoding`/`content-length` (undici
+  already transparently decoded any compressed upstream body before this code ever sees it, so relaying
+  either would mislabel the re-wrapped stream), and relays `Set-Cookie` via `Headers.getSetCookie()` —
+  appended one at a time — rather than through the generic header loop, which would otherwise join
+  multiple `Set-Cookie` values into one invalid comma-joined header.
+- `lib/api.ts` — `API_BASE_URL` is now `""` (relative); `NEXT_PUBLIC_API_URL` is gone entirely, per the
+  task's explicit instruction not to expose the API origin through a `NEXT_PUBLIC_`-prefixed var.
+  `eventStreamUrl()` now returns a relative `/api/runs/{id}/events?...` path.
+- `lib/useRunStream.ts` — no behavior change, comment updated (the `EventSource` URL is same-origin now,
+  so `withCredentials: true` is redundant-but-harmless rather than load-bearing).
+- `.env.example` — documents `GROUNDWORK_API_ORIGIN` (server-only) in place of the old
+  `NEXT_PUBLIC_API_URL`; the route handler falls back to `http://localhost:8000` when unset, matching
+  the old default's local-dev convenience.
+- `app/api/[...path]/route.test.ts`, `lib/proxyHeaders.test.ts` — new; see "Tests written" below.
+  `vitest`/`vitest.config.mts` added as a new dev dependency — this is the first test runner
+  `apps/web` has ever had (Checkpoints D–I1 verified the frontend via lint/build/browser rehearsal only;
+  see the now-resolved "Frontend automated tests" polish-backlog item from I1).
+
+**Exact security behavior.**
+- **Cookie**: unchanged server-side. The proxy relays the `Set-Cookie` header from the API's response
+  byte-for-byte (value, `Path`, `HttpOnly`, `Secure`, `SameSite=Lax`, no `Domain=`) — the browser now
+  receives it from `groundwork-web-febu.onrender.com`, so the host-only cookie is scoped to the origin
+  the browser actually talks to, which is the fix. `SESSION_SIGNING_KEY`/`OPERATOR_PASSPHRASE`/session
+  verification logic in `operator_auth.py` is untouched.
+- **CSRF**: `api/live_gate.py::require_allowed_origin` still checks the `Origin` header against
+  `settings.cors_origins` on unsafe methods — the proxy relays whatever `Origin` the browser sent
+  (`https://groundwork-web-febu.onrender.com`, per the Fetch spec's own rule for same-origin unsafe
+  requests) unmodified to the API. `CORS_ORIGINS` on the API does not need to change: it already had to
+  include the frontend's origin for the pre-proxy cross-origin+credentials setup to have worked at all.
+- **`mode="live"` alone still grants nothing** — `enforce_live_gate`/`require_operator` are untouched;
+  the proxy has no auth logic of its own, it relays the API's decision.
+- **No client-side token storage introduced** — the proxy is a pure relay; it never reads, stores, or
+  inspects the cookie's value, only forwards the header.
+- **`TRUSTED_HOSTS` on the API does not need to change** — the proxy's outbound `fetch` is never given
+  the browser's `Host` header (see `buildProxyRequestHeaders`'s allow-list above), so it naturally sends
+  the real API's own host, matching whatever `TRUSTED_HOSTS` already had configured.
+
+**Known limitation, surfaced rather than silently accepted**: `operator.py`'s login-attempt rate limiter
+and `rate_limit.py`'s public-write/preview limiters key on `request.client.host` — the literal TCP peer
+FastAPI sees. Once all browser traffic is relayed through the Next.js server, the API sees the proxy's
+own outbound IP for every request, not each visitor's real IP, collapsing per-IP rate limiting to a
+single shared bucket. This was true to some degree even before this proxy (Render's own edge network
+already sits in front of the API; `main.py` has no `ProxyHeadersMiddleware`/`X-Forwarded-For` trust
+today), but the proxy makes it unconditionally true. Fixing this would mean forwarding a client-IP
+header from a trusted single hop and teaching the API to trust it only from that hop — real backend
+attack-surface work, explicitly out of scope for "the smallest robust proxy" and not requested. Left as
+a named follow-up, not fixed here.
+
+**Tests written** (`apps/web`, `pnpm test` via `vitest`, 19 tests, all against a `node:http` server
+bound to `127.0.0.1` — zero real network calls, zero OpenAI/Tavily calls anywhere in the suite):
+- `lib/proxyHeaders.test.ts` — pure unit tests: the request allow-list forwards exactly
+  content-type/accept/cookie/origin and never host/user-agent/x-forwarded-for; the response filter
+  strips every one of the nine hop-by-hop/re-encoding headers case-insensitively while preserving an
+  ordinary header; multiple `Set-Cookie` values come back as distinct cookies, never comma-joined.
+- `app/api/[...path]/route.test.ts` — integration tests against a fake upstream: normal GET forwarded
+  with status/body preserved; query strings preserved exactly; Cookie header forwarded to upstream;
+  upstream 404 (status + body) preserved verbatim; hop-by-hop response headers stripped while ordinary
+  ones survive; POST body forwarded and echoed back correctly; a single and a double `Set-Cookie` both
+  come back as distinct cookies; `Origin` forwarded (the literal signal `require_allowed_origin` reads);
+  bodyless DELETE forwarded; an SSE response is proven to stream — the handler resolves before the
+  upstream's second chunk is even written (asserted via elapsed-time bounds), and both chunks are
+  readable individually off `res.body`'s `ReadableStream` as they arrive; upstream-unreachable returns a
+  502 problem-JSON body instead of the route handler throwing.
+
+**Verification (I2, this slice)**:
+- `pnpm test` (new): 19/19 passed.
+- `pnpm lint`: clean.
+- `pnpm typecheck` (`next typegen && tsc --noEmit`): clean.
+- `pnpm build` (Next.js production build): clean; `/api/[...path]` reports as `ƒ (Dynamic)` in the route
+  summary, confirming `force-dynamic` took effect (not accidentally statically optimized).
+- Backend regression (nothing in `apps/api` changed, run anyway to confirm): `uv run pytest` — **429
+  passed, 1 skipped**, identical to I1's documented SQLite-only baseline.
+- Canonical Demo Mode (`rm -f groundwork.db* && uv run python -m groundwork.scripts.run_demo`) —
+  byte-identical to every prior checkpoint's reference output: Northwind Labs 92/PASS, Riverbend
+  Analytics 35/NEEDS_REVIEW, Northwind Labs Inc./DUPLICATE, Cobalt Retail Systems 25/REJECTED, Ferrous
+  Grid 58/NEEDS_REVIEW, Quarry Systems/FAILED, Sable Compute 79/PASS,
+  `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`.
+- **Not done in this session** (explicitly out of scope per the task): no real Live Mode call, no
+  connection to the actual Render/Neon deployment — see "Manual production validation checklist" in the
+  PR description for what a human should still check against the live URLs after this merges.
+
+**Render environment-variable change required after merge**: set `GROUNDWORK_API_ORIGIN` on the
+**frontend** (`groundwork-web-febu`) Render service to the API's real URL
+(`https://groundwork-api-iu17.onrender.com`), server-side only (not prefixed `NEXT_PUBLIC_`). No other
+env var changes are required on either service — `CORS_ORIGINS`/`TRUSTED_HOSTS` on the API were already
+correctly set for this frontend origin (Demo Mode already worked end-to-end before this change).
+
+---
+
 ## Next task
 
-**Checkpoint I1 — Production Foundation is complete. Do not begin Checkpoint I2 (real cloud deployment)
-without the user explicitly asking.** All Checkpoints A–H2 behavior remains unchanged and verified
-byte-identical; I1 adds the deployability work in "What Checkpoint I1 added" above. Zero cloud resources
-were provisioned; zero real (paid) OpenAI/Tavily calls were made anywhere in I1's implementation, tests,
-or CI.
+**This I2 slice (same-origin proxy) is complete.** Checkpoints A–I1 remain unchanged and verified
+byte-identical; nothing in `apps/api` was touched. Zero real (paid) OpenAI/Tavily calls were made
+anywhere in this session's implementation or tests.
 
 **What a future session should look at next, in order:**
 
-1. **Checkpoint I2 — real cloud deployment**, only if the user explicitly asks for it. Everything it
-   needs is enumerated in `docs/DEPLOYMENT.md`'s "What a real deployment still needs" section: provision
-   Postgres, provision an API host (the committed Dockerfile), provision a frontend host, set
-   `CORS_ORIGINS`/`TRUSTED_HOSTS` for the real domain, decide on horizontal scaling (requires moving the
-   in-process rate limiters to shared state first — see `docs/RUNBOOK.md`), decide on secrets management
-   for the chosen platform, then run `alembic upgrade head` once and `scripts/prod_smoke.py` before
-   trusting it with traffic.
-2. **Run `make search-smoke` for real** (H2's own still-open item, with explicit user approval) —
+1. **Re-verify `docs/DEPLOYMENT.md` against the actual Render/Neon setup** — it was written for a
+   deployment that didn't exist yet and is now stale in places (see "Current checkpoint" above). Confirm
+   `CORS_ORIGINS`/`TRUSTED_HOSTS`/`DATABASE_URL` on the real services match what's documented, and update
+   the doc to describe reality rather than a plan.
+2. **Manual production validation** of this proxy against the real deployment once
+   `GROUNDWORK_API_ORIGIN` is set on Render (see the PR description's checklist) — this session verified
+   the proxy against a fake local upstream only, never the real API/Neon/Render.
+3. **The rate-limiting-by-IP limitation** noted above, if per-IP granularity turns out to matter in
+   practice (a shared-bucket limiter is still a limiter, just a coarser one) — needs a trusted-hop
+   client-IP header design, not a quick fix.
+4. **Run `make search-smoke` for real** (H2's own still-open item, with explicit user approval) —
    confirm/correct the `include_usage`/`credits` shape assumption, take the Live-mode screenshots (New
    Play Live, a completed real-search Run Detail, Quality Search section, real-shaped Prospect Detail).
-3. **`CompanyRow.profile`/company header refresh post-research** (H2's own still-open item) — real
+5. **`CompanyRow.profile`/company header refresh post-research** (H2's own still-open item) — real
    discovered companies keep their discovery-time `"unknown"` industry/size placeholders even after
    research independently grounds the real facts. Minor UX gap, not a correctness issue.
-4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools. Not started.
-5. **Polish backlog** (not required, noted for completeness — unchanged by I1 except where marked):
+6. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools. Not started.
+7. **Polish backlog** (not required, noted for completeness — unchanged by I1/I2 except where marked):
    - A graphical trace waterfall instead of `TraceTable` (explicitly cut from P0, §5/§34).
    - A standalone cross-run evaluation page (the Quality tab is the P0 scope; §16 names a standalone
      page as P1).
    - `POST /runs/{id}/cancel` (explicitly cut from P0, §5, and explicitly re-confirmed out of scope for
      I1).
    - Draft edit/regenerate on outreach.
-   - Frontend automated tests — `apps/web/package.json` has no test runner configured; every checkpoint
-     has verified via build/lint gates and browser rehearsal instead. Worth adding Playwright/component
-     tests as first P1-adjacent hardening if this project continues.
+   - ~~Frontend automated tests — `apps/web/package.json` has no test runner configured~~ — **a runner
+     exists as of I2** (`vitest`, `pnpm test`), but only for the API proxy so far. Every other frontend
+     checkpoint (D–I1) still verified via build/lint gates and browser rehearsal only. Playwright/
+     component tests for the UI itself remain unstarted.
    - ~~Expose `max_concurrent_prospects` via `GET /settings/providers`~~ — **done in I1** (Phase 9); the
      old `lib/constants.ts` hand-kept constant is deleted.
    - A real per-run `plan.created` event / rendered plan panel, if a future checkpoint wants the DAG
@@ -2989,3 +3128,19 @@ or CI.
   "horizontal scaling is not supported" documentation in `docs/DEPLOYMENT.md`/`docs/RUNBOOK.md` must not
   be silently contradicted by a future change (e.g. bumping `--workers`) without first moving the
   in-process rate limiters (`api/rate_limit.py`) to shared state — see those docs for why.
+- **Checkpoint I2's own do-not-touch:** `apps/web/app/api/[...path]/route.ts` must stay a real proxy,
+  not a config-level `next.config.ts` rewrite — the Set-Cookie/SSE-streaming/hop-by-hop-header control
+  it needs isn't available through a declarative rewrite. `lib/proxyHeaders.ts::
+  buildProxyRequestHeaders`'s allow-list (`content-type`/`accept`/`cookie`/`origin` only) must stay an
+  allow-list, never a denylist — in particular, `host` must never be forwarded (letting `fetch` compute
+  it from the target URL is what keeps the outbound request addressed at the real API and keeps
+  `TRUSTED_HOSTS` correct). `buildProxyResponseHeaders` must keep handling `Set-Cookie` via
+  `Headers.getSetCookie()`/`append()`, never through the generic per-header copy loop (which would
+  comma-join multiple cookies into one invalid header). The response body must stay a direct
+  `upstreamResponse.body` passthrough — never `.text()`/`.json()`-then-re-wrap — and `signal:
+  request.signal` on the outbound `fetch` must stay wired; both are what let a dropped/reconnected SSE
+  connection actually cancel the upstream request instead of leaking it. `export const dynamic =
+  "force-dynamic"` must not be removed or relaxed to `"auto"`. `GROUNDWORK_API_ORIGIN` must stay
+  server-only (never `NEXT_PUBLIC_`-prefixed) and must stay read at request time inside the handler, not
+  hoisted to module scope — that's what makes the API's real URL changeable without a frontend rebuild.
+  `apps/api` has zero changes from this checkpoint; do not attribute any backend behavior change to I2.
