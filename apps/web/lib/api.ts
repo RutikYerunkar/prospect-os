@@ -13,7 +13,14 @@ import type {
   RunResponse,
 } from "@/lib/types";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Checkpoint I2: same-origin only. The browser never talks to the API's own
+// host directly — every request goes through this app's own
+// `app/api/[...path]/route.ts` proxy at a relative `/api/...` path, which
+// forwards it server-to-server to `GROUNDWORK_API_ORIGIN` (a server-only env
+// var, never NEXT_PUBLIC_-prefixed). See that file for why: the frontend and
+// API are separate *.onrender.com origins, and the operator session cookie
+// is host-only — same-origin is what makes that cookie work as intended.
+const API_BASE_URL = "";
 
 export class ApiError extends Error {
   status: number;
@@ -57,8 +64,10 @@ async function doFetch(path: string, init: RequestInit): Promise<Response> {
   try {
     // credentials:"include" — the operator session cookie is what every
     // Live-gated read/write actually authenticates with (Checkpoint I1
-    // Phase 8); without this, the browser never sends it cross-origin (API
-    // and web app are separate origins/ports even in local dev).
+    // Phase 8). The request itself is same-origin as of Checkpoint I2 (see
+    // API_BASE_URL above), so the browser would send the cookie by default
+    // regardless — "include" is kept because it's still correct and makes
+    // no behavioral difference for a same-origin request.
     return await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include" });
   } catch (err) {
     if (isAbortError(err)) throw err; // a superseded request, not a failure
@@ -99,7 +108,10 @@ export async function apiDelete<T>(path: string): Promise<T> {
 }
 
 export function eventStreamUrl(runId: string, afterSeq: number): string {
-  return `${API_BASE_URL}/api/runs/${runId}/events?after_seq=${afterSeq}`;
+  // Relative and same-origin (Checkpoint I2) — the proxy at
+  // app/api/[...path]/route.ts streams this through to the API without
+  // buffering, so resumable SSE behaves identically to a direct connection.
+  return `/api/runs/${runId}/events?after_seq=${afterSeq}`;
 }
 
 export interface HealthResponse {
