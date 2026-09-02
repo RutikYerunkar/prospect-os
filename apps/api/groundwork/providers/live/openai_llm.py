@@ -20,6 +20,18 @@ no step retry, raised immediately. `INVALID_JSON`/`SCHEMA_MISMATCH`/genuine
 `NO_OUTPUT` are schema-repairable, once. `TIMEOUT`/`RATE_LIMITED`/5xx
 `PROVIDER_ERROR` consume the shared transport-retry budget.
 
+H2 second post-smoke fix: a 429 is NOT automatically `RATE_LIMITED`. Every
+`openai.RateLimitError` is inspected for `type=insufficient_quota`/
+`code=credit_balance_exhausted` (or an equivalent quota/billing-exhaustion
+signal) and reclassified `QUOTA_EXHAUSTED` — permanent, raised after
+exactly one attempt, same as `AUTH_ERROR` — because retrying an exhausted
+account balance can never succeed. An ordinary transient 429 (no such
+type/code) stays `RATE_LIMITED` and transport-retryable, unchanged.
+`ProviderQuotaExceeded` is distinct from `ProviderBudgetExceeded`: the
+latter is Groundwork's own soft `RunBudget` estimate tripping *before* a
+call is even attempted; this is the provider's own authoritative account
+state, observed *from* a real attempt.
+
 CRITICAL BOUNDARY: this module never imports a repository, SQLAlchemy, or
 any DB table model — it only returns `LLMResult`/raises `ProviderError`,
 both carrying attempt telemetry. `engine/llm.py` alone persists it.
@@ -47,6 +59,7 @@ from groundwork.providers.base import (
     ProviderContentFiltered,
     ProviderError,
     ProviderOutputTruncated,
+    ProviderQuotaExceeded,
     ProviderRateLimited,
     ProviderRefusal,
     ProviderTimeout,
@@ -76,7 +89,24 @@ _PERMANENT_ERROR_BY_STATUS: dict[LLMAttemptStatus, type[ProviderError]] = {
     LLMAttemptStatus.TRUNCATED: ProviderOutputTruncated,
     LLMAttemptStatus.CONTENT_FILTERED: ProviderContentFiltered,
     LLMAttemptStatus.AUTH_ERROR: ProviderAuthError,
+    LLMAttemptStatus.QUOTA_EXHAUSTED: ProviderQuotaExceeded,
 }
+
+# H2 second post-smoke fix: a 429 whose parsed error body identifies
+# account/project quota or billing exhaustion, as opposed to an ordinary
+# transient rate limit. `openai.RateLimitError.type`/`.code` are populated
+# directly from the response body's own `error.type`/`error.code` fields
+# (see `openai._exceptions.APIError.__init__`) — real values observed:
+# `type="insufficient_quota"`, `code="credit_balance_exhausted"`. Kept as
+# its own reviewable set, not a substring/fuzzy match, so a provider
+# response shape we haven't seen yet fails safe (falls through to the
+# existing, retryable `RATE_LIMITED` classification) rather than silently
+# misclassifying something unrelated as permanent.
+_QUOTA_EXHAUSTED_SIGNALS = frozenset({"insufficient_quota", "credit_balance_exhausted"})
+
+
+def _is_quota_exhausted(exc: "openai.RateLimitError") -> bool:
+    return getattr(exc, "type", None) in _QUOTA_EXHAUSTED_SIGNALS or getattr(exc, "code", None) in _QUOTA_EXHAUSTED_SIGNALS
 
 
 class _Classified:
@@ -249,7 +279,8 @@ class OpenAILLMProvider:
             except openai.AuthenticationError as exc:
                 return _Classified(LLMAttemptStatus.AUTH_ERROR, error_text=str(exc), http_status=getattr(exc, "status_code", None))
             except openai.RateLimitError as exc:
-                return _Classified(LLMAttemptStatus.RATE_LIMITED, error_text=str(exc), http_status=getattr(exc, "status_code", None))
+                status = LLMAttemptStatus.QUOTA_EXHAUSTED if _is_quota_exhausted(exc) else LLMAttemptStatus.RATE_LIMITED
+                return _Classified(status, error_text=str(exc), http_status=getattr(exc, "status_code", None))
             except openai.APITimeoutError as exc:
                 return _Classified(LLMAttemptStatus.TIMEOUT, error_text=str(exc))
             except openai.APIConnectionError as exc:

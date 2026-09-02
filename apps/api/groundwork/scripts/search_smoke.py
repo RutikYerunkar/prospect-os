@@ -89,6 +89,23 @@ def _print_preamble(prospect_cap: int) -> None:
     print()
 
 
+_QUOTA_EXHAUSTED_MESSAGE = (
+    "OpenAI provider quota/credit exhausted (permanent — not retried). "
+    "Add API credits or use a funded project/key before rerunning."
+)
+
+
+def _describe_error(error_text: str | None) -> str | None:
+    """H2 second post-smoke fix: never echo a raw provider error that may
+    carry a billing/upgrade URL — this is a best-effort keyword check for
+    display contexts (`outcome.error`) that only carry a flat string, not
+    the structured `type`/`code` the classifier itself uses
+    (`providers/live/openai_llm.py::_is_quota_exhausted`)."""
+    if error_text and ("insufficient_quota" in error_text or "credit_balance_exhausted" in error_text):
+        return _QUOTA_EXHAUSTED_MESSAGE
+    return error_text
+
+
 def _print_review(review) -> None:
     print(f"\nreview verdict: {review.verdict.value}")
     for check in review.checks:
@@ -133,11 +150,19 @@ async def _print_discovery_funnel(repos, run_id: str) -> int:
     # means the LLM call itself failed, not that it found nothing.
     unavailable = [e for e in rejected if e.payload.get("reason") == "discovery_extraction_unavailable"]
     for e in unavailable:
-        print(
-            f"  -> DISCOVERY_EXTRACTION unavailable: attempts_made={e.payload.get('attempts_made')} "
-            f"last_status={e.payload.get('last_attempt_status')} "
-            f"last_error={e.payload.get('last_attempt_error')!r}"
-        )
+        last_status = e.payload.get("last_attempt_status")
+        if last_status == "QUOTA_EXHAUSTED":
+            # H2 second post-smoke fix: a real OpenAI 429 body can carry a
+            # billing/upgrade URL in its message text — never echoed here.
+            # This is the one actionable, unambiguous case worth a plain-
+            # language line instead of the raw provider error.
+            print(f"  -> {_QUOTA_EXHAUSTED_MESSAGE}")
+        else:
+            print(
+                f"  -> DISCOVERY_EXTRACTION unavailable: attempts_made={e.payload.get('attempts_made')} "
+                f"last_status={last_status} "
+                f"last_error={_describe_error(e.payload.get('last_attempt_error'))!r}"
+            )
 
     method_counts: dict[str, int] = {}
     for e in resolved:
@@ -249,6 +274,8 @@ async def main(prospect_cap: int) -> int:
     for outcome in summary.outcomes:
         print(f"\n{outcome.company.name} ({outcome.company.domain})")
         print(f"  status: {outcome.status.value}")
+        if outcome.error:
+            print(f"  error: {_describe_error(outcome.error)}")
         if outcome.score:
             industry_dim = next((d for d in outcome.score.dimensions if d.name == "industry_fit"), None)
             size_dim = next((d for d in outcome.score.dimensions if d.name == "size_fit"), None)

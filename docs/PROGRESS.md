@@ -1381,6 +1381,80 @@ PROVIDER_ERROR this session could only narrow down from code, not observe direct
 
 ---
 
+## Second real H2 smoke — quota/credit exhaustion misclassified as retryable
+
+The user ran `make search-smoke` for real a second time, after the deadline fix above. The new
+diagnostics worked exactly as designed: the funnel immediately identified the real cause instead of
+requiring code archaeology.
+
+**Observed facts:**
+
+- Tavily discovery search again succeeded cleanly: 4 `discover` calls, all `OK`, **34 result
+  occurrences, 34 unique sources**, `usage.credits=4.0` — the deadline fix did not change or regress
+  discovery search behavior at all, as expected (it only widened the LLM call's own deadline).
+- `DISCOVERY_EXTRACTION` failed with a real OpenAI HTTP 429 whose body read
+  `type=insufficient_quota, code=credit_balance_exhausted` — the OpenAI account/project funding this
+  smoke run had exhausted its credit balance.
+- Groundwork's classifier treated this exactly like an ordinary transient rate limit: `RATE_LIMITED`,
+  consuming all `1 + LLM_MAX_TRANSPORT_RETRIES = 3` attempts before giving up
+  (`attempts_made=3, last_status=RATE_LIMITED` in the funnel's own diagnostic — the post-first-smoke
+  hardening pass's new diagnostics is what made this immediately legible instead of requiring inference
+  from raw attempt counts again).
+
+**Root cause**: `providers/live/openai_llm.py::_issue()`'s `except openai.RateLimitError:` handler
+classified every HTTP 429 as `RATE_LIMITED` (transport-retryable) without inspecting *why* the provider
+returned 429. `openai.RateLimitError` (an `APIStatusError` subclass) actually exposes the response body's
+own `type`/`code` fields as `.type`/`.code` attributes — confirmed by reading `openai/_exceptions.py`
+directly and reproducing against a scripted 429 body — so the distinguishing signal was available the
+whole time and simply wasn't being read. A temporary rate limit and an exhausted account balance are not
+the same failure mode: one recovers on its own, the other never does no matter how many times it's
+retried — wasting the entire transport-retry budget on a call that can never succeed.
+
+**Fix** (`providers/base.py`, `providers/live/openai_llm.py`) — the smallest clean extension to the
+existing taxonomy, reusing every existing mechanism rather than inventing a parallel one:
+
+- New `LLMAttemptStatus.QUOTA_EXHAUSTED` and `ProviderQuotaExceeded(ProviderError)`. Deliberately
+  **not** `ProviderBudgetExceeded` — that type means Groundwork's own soft `RunBudget` estimate tripped
+  *before* a call was even attempted; this means the *provider's own account* is out of funds, observed
+  *from* a real attempt. Confusing the two would misreport whose money ran out.
+- `_issue()`'s 429 handler now checks `exc.type`/`exc.code` against a small, reviewable set
+  (`{"insufficient_quota", "credit_balance_exhausted"}`) before classifying: a match →
+  `QUOTA_EXHAUSTED`; no match → unchanged `RATE_LIMITED` behavior. Fails safe — an unrecognized 429 shape
+  stays retryable rather than being silently misclassified as permanent.
+- `QUOTA_EXHAUSTED` was added to `_PERMANENT_ERROR_BY_STATUS` — the exact same branch `AUTH_ERROR`/
+  `REFUSED`/`TRUNCATED`/`CONTENT_FILTERED` already use in the flat retry loop, so it inherits "raised
+  immediately, zero transport retries, zero schema repairs, exactly one persisted `llm_calls` attempt"
+  for free, with no new control flow.
+- `search_smoke.py`'s funnel printer special-cases `last_attempt_status=="QUOTA_EXHAUSTED"` with a plain-
+  language line ("OpenAI provider quota/credit exhausted (permanent — not retried). Add API credits or
+  use a funded project/key before rerunning.") instead of the raw provider error text — real OpenAI
+  quota-exhaustion messages embed a billing URL
+  (`https://platform.openai.com/account/billing`, confirmed by reproducing the real error shape), which
+  is never echoed. A `_describe_error()` helper applies the same substitution to any other printed error
+  text (e.g. a per-prospect `outcome.error`) that happens to contain the same signal, as a second line of
+  defense beyond the structured-status check.
+
+**Ordinary 429 behavior is completely unchanged** — verified explicitly
+(`test_temporary_rate_limit_429_is_retried_then_succeeds`, and the pre-existing
+`test_rate_limited_maps_to_provider_rate_limited`, both still passing unmodified): no quota/billing
+signal in the body still means `RATE_LIMITED`, transport-retried exactly as before.
+
+**No normal provider request shape changed.** Every `responses.create()` kwarg, the deadline-override
+mechanism from the first post-smoke pass, and every other classification branch are untouched — this fix
+only adds one new inspection of an already-caught exception's existing attributes.
+
+**Test count**: 304 (after the first post-smoke pass) + 6 new = **310/310**, all offline. Canonical Demo
+re-verified byte-identical; no frontend files touched, so `pnpm lint`/`pnpm build` were not re-run this
+pass (nothing to invalidate). No real OpenAI/Tavily calls made in this pass; `search-smoke` was not run
+again.
+
+**Whether another real smoke is required**: recommended to confirm the fix (and to finally see real
+discovery reach domain resolution / per-company retrieval / `LIVE_FETCH` evidence for the first time),
+but not run in this session per the user's explicit instruction — it also requires the account's credit
+balance to actually be topped up first, which is outside this session's control entirely.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -2391,24 +2465,25 @@ introduced.
 
 ## Next task
 
-**Checkpoint H2 is complete, including a post-first-real-smoke hardening pass. Do not begin another
+**Checkpoint H2 is complete, including two post-real-smoke hardening passes. Do not begin another
 checkpoint without the user explicitly asking.** All Checkpoints A–H1 behavior remains unchanged and
 verified byte-identical; H2 adds the real Tavily search adapter, real multi-stage discovery/domain-
-resolution, real per-company retrieval/extraction, and fixed two real bugs — the Evidence-provenance
-hardcoding bug found before the first real smoke, and the DISCOVERY_EXTRACTION deadline/diagnostics gap
-found from the first real smoke's own output (see "First real H2 smoke — findings and post-smoke
-hardening" above for the full root cause and fix). Zero real (paid) provider calls were made in either
-this checkpoint's implementation or its post-smoke hardening pass — only the one real smoke the user ran
-directly. `scripts/search_smoke.py` exists and was hardened but **not run again** this session.
+resolution, real per-company retrieval/extraction, and fixed three real bugs found across two real
+smokes — the Evidence-provenance hardcoding bug (found before the first real smoke), the
+DISCOVERY_EXTRACTION deadline/diagnostics gap (found from the first real smoke's output), and OpenAI
+quota/credit exhaustion being misclassified as a retryable rate limit (found from the second real
+smoke's output) — see "First real H2 smoke" and "Second real H2 smoke" above for the full root causes
+and fixes. Zero real (paid) provider calls were made in this checkpoint's implementation or either
+hardening pass — only the two real smokes the user ran directly. `scripts/search_smoke.py` exists and
+was hardened twice but **not run again** by this session either time.
 
-**Recommended next step, not yet done:** run `make search-smoke` again to confirm the deadline fix
-actually resolves the zero-prospect outcome — this is the only way to close the remaining ambiguity
-between TIMEOUT/RATE_LIMITED/PROVIDER_ERROR as DISCOVERY_EXTRACTION's exact real failure mode (the new
-diagnostics will show `last_attempt_status` directly if it still fails), and to see the real discovery
-funnel, real per-company retrieval, and real `LIVE_FETCH` evidence this checkpoint has only ever been
-verified against offline fixtures for. Also the first real confirmation that `include_usage`'s response
-shape (`{"usage": {"credits": <float>}}`) matches what the adapter assumes — the first real smoke already
-confirmed this (`credits=4.0` observed), so that specific ambiguity is resolved.
+**Recommended next step, not yet done:** once the OpenAI account/project's credit balance is topped up,
+run `make search-smoke` again — this is the only way to confirm the deadline fix AND the quota-
+classification fix together actually get a real run past `DISCOVERY_EXTRACTION` to real domain
+resolution, real per-company retrieval, and real `LIVE_FETCH` evidence, which this checkpoint has only
+ever been verified against offline fixtures for. `include_usage`'s response shape
+(`{"usage": {"credits": <float>}}`) is already confirmed correct by both real smokes (`credits=4.0`
+observed twice) — that specific ambiguity is resolved.
 
 **What a future session should look at next**, in `docs/IMPLEMENTATION_PLAN.md` §5's remaining order —
 **deployment → MCP shim → polish**:
@@ -2581,3 +2656,16 @@ confirmed this (`credits=4.0` observed), so that specific ambiguity is resolved.
   is scoped to the smoke script only (`prospects >= 1 AND search_calls made AND resolved_company_count ==
   0`) — never port this into `execute_run()`/`discover_live()` themselves, where a genuinely empty
   discovery result is legitimate product behavior.
+- **Second-real-smoke quota-classification fix's own do-not-touch:** `providers/base.py::
+  ProviderQuotaExceeded` must never be conflated with `ProviderBudgetExceeded` — the former is the
+  external provider's own account/billing state (observed from a real attempt), the latter is
+  Groundwork's own soft `RunBudget` estimate (checked *before* a call is attempted); merging them would
+  make either the run-budget UI or the real quota diagnostic lie about whose money is actually out.
+  `providers/live/openai_llm.py::_QUOTA_EXHAUSTED_SIGNALS` must stay a small, exact-match set
+  (`{"insufficient_quota", "credit_balance_exhausted"}`), never a substring/fuzzy match against the raw
+  error message — a broad match risks misclassifying a genuinely transient 429 as permanent and dropping
+  a recoverable call. `QUOTA_EXHAUSTED` must stay in `_PERMANENT_ERROR_BY_STATUS` (zero transport
+  retries, zero schema repairs, exactly one attempt) — do not add it to `STEP_RETRYABLE` or any transport-
+  retry set. `search_smoke.py::_describe_error()`/`_QUOTA_EXHAUSTED_MESSAGE` must never be replaced with
+  code that echoes a raw provider error string for this case — real OpenAI quota-exhaustion messages
+  embed a billing URL.

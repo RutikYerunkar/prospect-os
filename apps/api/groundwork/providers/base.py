@@ -40,6 +40,7 @@ __all__ = [
     "ProviderAuthError",
     "ProviderNotConfigured",
     "ProviderBudgetExceeded",
+    "ProviderQuotaExceeded",
     "FAILURE_TYPES",
     "STEP_RETRYABLE",
     "SourceDocument",
@@ -136,6 +137,14 @@ class LLMAttemptStatus(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     PROVIDER_ERROR = "PROVIDER_ERROR"
     AUTH_ERROR = "AUTH_ERROR"
+    # H2 second post-smoke fix: a real 429 whose body identifies account/
+    # project quota or billing exhaustion (`type=insufficient_quota`,
+    # `code=credit_balance_exhausted`, or an equivalent signal) — distinct
+    # from an ordinary transient `RATE_LIMITED` 429. Permanent: retrying
+    # cannot recover an exhausted balance. Never confused with
+    # `NOT_ATTEMPTED_BUDGET`, which is Groundwork's own soft `RunBudget`
+    # tripwire, not anything the provider itself reported.
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
     NOT_ATTEMPTED_BUDGET = "NOT_ATTEMPTED_BUDGET"
 
 
@@ -259,6 +268,17 @@ class ProviderBudgetExceeded(ProviderError):
     """The run's soft spending threshold had already tripped when this call
     would have started — see `engine/run_budget.py`. Not a hard ceiling:
     already-in-flight calls are unaffected, only *new* calls are blocked."""
+
+
+class ProviderQuotaExceeded(ProviderError):
+    """The PROVIDER's own account/project quota or billing balance is
+    exhausted (`type=insufficient_quota`, `code=credit_balance_exhausted`,
+    or an equivalent provider signal on a 429) — never Groundwork's own
+    `RunBudget` soft threshold (that's `ProviderBudgetExceeded`, a
+    completely different thing: our spending guess vs. the provider's own
+    authoritative account state). Permanent — no amount of retrying
+    recovers an exhausted balance, so this is raised immediately after
+    exactly one attempt, never transport-retried, never schema-repaired."""
 
 
 # Legacy name kept for the demo fixture pack's `failure_script.error` string
