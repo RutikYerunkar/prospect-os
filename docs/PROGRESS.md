@@ -2910,6 +2910,58 @@ correctly set for this frontend origin (Demo Mode already worked end-to-end befo
 
 ---
 
+## Production bug fix: `no_placeholders` missed bracket placeholders (post-I2)
+
+**Observed:** after the first successful real Live Mode run, the generated outreach ended with
+`Best,\n[Your Name]` and the deterministic review printed `no_placeholders: PASS — "no placeholder
+tokens or empty fields"`. A hard guardrail check reported PASS on a draft with an obviously unresolved
+template token.
+
+**Root cause:** `domain/review.py::_PLACEHOLDER_PATTERNS` was `(r"\{\{.*?\}\}", r"\[company\]",
+r"\btodo\b")`. The bracket pattern matched only the single literal string `[company]` — not the general
+*shape* of a bracket placeholder. `[Your Name]`, `[First Name]`, `[Company Name]`, and any angle-bracket
+form (`<YOUR_NAME>`) had no matching pattern at all, so `_no_placeholders` (`domain/review.py:101`)
+never flagged them. `{{...}}` and `TODO` detection were already correct; only the bracket/angle-bracket
+shapes were the gap.
+
+**Fix (`apps/api/groundwork/domain/review.py`):** replaced the one literal bracket pattern with three
+shape-based patterns, matched against the already-lowercased subject+body text (unchanged):
+`\{\{\s*[a-z0-9_. -]+?\s*\}\}` (double-brace, with or without inner spaces), `<[a-z][a-z0-9_ ]{0,40}>`
+(angle-bracket tokens), and `\[[a-z][a-z0-9_' -]{0,40}\]` (bracket tokens whose contents start with a
+letter, so numeric citation/footnote brackets like `[1]`/`[2024]` are not flagged). `TODO` detection is
+unchanged. Also changed the hit-reporting to record the actual matched substring (`match.group(0)`)
+instead of the raw regex source, so a review detail string now reads e.g. `placeholder(s) found:
+['[your name]']` instead of a regex literal.
+
+**No policy change.** `no_placeholders` was already documented (`IMPLEMENTATION_PLAN.md` §14, check #4)
+and coded as **hard** severity; `run_checks`' existing hard-fail → `FAIL` verdict logic
+(`domain/review.py::run_checks`) was untouched and already produces the correct verdict once detection
+is fixed — this was purely a detection gap, not a verdict-policy gap.
+
+**No scoring/discovery/search/provider/orchestration/auth/proxy/database/deployment code touched.**
+Only `domain/review.py` (pure, no I/O) and its tests changed.
+
+**Stored production run:** this session's sandbox has no local SQLite DB (an ephemeral container, per
+"Environment configuration") — the actual run's `review_results` row lives in the user's own local
+database, not here, mirroring the same limitation noted for the Sable Compute smoke run above ("Issue
+3"). The exact reported text (`"Best,\n[Your Name]"`) is reproduced verbatim as a regression test
+against the real, unmodified `run_checks()` function instead
+(`test_no_placeholders_catches_exact_production_case_your_name`), which is a stronger reproduction than
+reading a stored row would be: it proves the old pattern set passed it and the new one fails it, on the
+actual code path, without any provider call.
+
+**Regression coverage (`apps/api/tests/test_review.py`, 10 new tests):** the exact production string;
+`[Company]` in both subject and body; `[First Name]`; `{{ company }}` (spaced double-brace); `{{name}}`
+(unspaced); `<YOUR_NAME>`; a bare `TODO`; a clean ordinary outreach draft (must still PASS); and a
+numeric citation bracket (`[1]`, must still PASS — the false-positive guard). All 26 tests in
+`test_review.py` pass; full backend suite `uv run pytest -q` — 438 passed, 1 skipped (the pre-existing
+skip, unrelated). `test_run_integration.py` (the canonical Demo Mode regression) passes unchanged —
+canonical Demo's own outreach templates (`providers/demo/demo_llm.py::_personalization`, e.g. `"Best,
+\nThe Groundwork Team"`) contain no placeholder shapes and are unaffected. No frontend files were
+touched, so no frontend build/lint/typecheck/test was run. Zero OpenAI/Tavily calls made.
+
+---
+
 ## Next task
 
 **This I2 slice (same-origin proxy) is complete.** Checkpoints A–I1 remain unchanged and verified

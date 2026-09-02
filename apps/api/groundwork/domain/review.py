@@ -13,7 +13,21 @@ from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_
 from groundwork.models.enums import ContactVerification, ReviewVerdict
 from groundwork.models.schemas import Contact, Evidence, ICPScore, OutreachDraft, ReviewCheck, ReviewResult
 
-_PLACEHOLDER_PATTERNS = (r"\{\{.*?\}\}", r"\[company\]", r"\btodo\b")
+#: Production bug (post-Checkpoint-real-Live-Mode-run): the prior pattern set only
+#: matched the single literal string `[company]`, so any other bracket placeholder —
+#: `[Your Name]`, `[First Name]`, `[Company Name]` — sailed through as PASS. These
+#: patterns are matched against the already-lowercased subject+body text (see
+#: `_no_placeholders`), so every character class here is lowercase-only; they cover
+#: the general *shapes* a template placeholder takes rather than one literal token:
+#: `{{...}}` / `{{ ... }}` double-brace tokens, `<...>` angle-bracket tokens, and
+#: `[...]` square-bracket tokens whose contents start with a letter (so `[1]`- or
+#: `[2024]`-style numeric citation/footnote brackets are not flagged).
+_PLACEHOLDER_PATTERNS = (
+    r"\{\{\s*[a-z0-9_. -]+?\s*\}\}",
+    r"<[a-z][a-z0-9_ ]{0,40}>",
+    r"\[[a-z][a-z0-9_' -]{0,40}\]",
+    r"\btodo\b",
+)
 
 SCORE_SUPPORT_UNSUPPORTED_THRESHOLD = 2
 
@@ -92,8 +106,9 @@ def _no_placeholders(drafts: list[OutreachDraft]) -> ReviewCheck:
             continue
         text = f"{draft.subject}\n{draft.body}".lower()
         for pattern in _PLACEHOLDER_PATTERNS:
-            if re.search(pattern, text):
-                hits.append(pattern)
+            match = re.search(pattern, text)
+            if match:
+                hits.append(match.group(0))
     passed = not hits
     detail = "no placeholder tokens or empty fields" if passed else f"placeholder(s) found: {hits[:3]}"
     return ReviewCheck(id="no_placeholders", passed=passed, severity="hard", detail=detail)

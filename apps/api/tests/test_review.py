@@ -156,6 +156,86 @@ def test_no_placeholders_detects_template_tokens() -> None:
     assert check.passed is False
 
 
+# --- Production bug regression: the first real Live Mode run produced outreach
+# ending in "Best,\n[Your Name]" and the deterministic no_placeholders check
+# reported PASS. Root cause: the pattern set only matched the literal string
+# "[company]", not the general shape of a bracket/brace/angle-bracket
+# placeholder. See `_PLACEHOLDER_PATTERNS` in `domain/review.py`.
+
+
+def test_no_placeholders_catches_exact_production_case_your_name() -> None:
+    draft = _draft(body="Thanks for your time.\n\nBest,\n[Your Name]", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+    assert result.verdict == ReviewVerdict.FAIL
+
+
+def test_no_placeholders_detects_bracket_company_placeholder() -> None:
+    draft = _draft(subject="Quick note for [Company]", body="Hi there, loved what [Company] is building.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_detects_bracket_first_name_placeholder() -> None:
+    draft = _draft(body="Hi [First Name], congrats on the round.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_detects_double_brace_with_spaces() -> None:
+    draft = _draft(body="Hi {{ company }}, congrats on the round.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_detects_double_brace_name() -> None:
+    draft = _draft(body="Hi {{name}}, congrats on the round.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_detects_angle_bracket_placeholder() -> None:
+    draft = _draft(body="Thanks,\n<YOUR_NAME>", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_detects_todo() -> None:
+    draft = _draft(body="TODO: personalize this before sending.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is False
+
+
+def test_no_placeholders_clean_ordinary_outreach_passes() -> None:
+    draft = _draft(
+        subject="Congrats on the Series B, Acme",
+        body=(
+            "Hi Jane,\n\n"
+            "Congrats on the momentum at Acme — Acme raised a Series B.\n\n"
+            "Worth a quick conversation about how we could support your team?\n\n"
+            "Best,\nThe Groundwork Team"
+        ),
+        claim_map=[],
+    )
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is True
+
+
+def test_no_placeholders_no_false_positive_on_numeric_bracket_citation() -> None:
+    draft = _draft(body="Great progress this year [1] — worth a quick chat.", claim_map=[])
+    result = run_checks(**_base_kwargs(drafts=[draft]))
+    check = next(c for c in result.checks if c.id == "no_placeholders")
+    assert check.passed is True
+
+
 def test_duplicate_account_detects_key_collision() -> None:
     result = run_checks(**_base_kwargs(other_dedupe_keys={"domain:acme.com"}))
     check = next(c for c in result.checks if c.id == "duplicate_account")
