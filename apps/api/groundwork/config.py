@@ -1,7 +1,8 @@
-from typing import Literal
+import json
+from typing import Annotated, Literal
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -17,12 +18,129 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     mode: Literal["demo", "live"] = "demo"
 
+    # --- Checkpoint I1: environment/process identity ---
+    # Never branches engine/domain behavior (per CLAUDE.md's "never
+    # special-case if demo mode" invariant, extended here to environment) —
+    # it only governs process-level concerns: cookie Secure flag, opaque vs.
+    # detailed error responses, log formatting.
+    environment: Literal["development", "test", "production"] = "development"
+    log_level: str = "INFO"
+
     database_url: str = "sqlite+aiosqlite:///./groundwork.db"
+    # Small pool appropriate for ONE API instance, ONE uvicorn worker — see
+    # docs/DEPLOYMENT.md. Never sized for horizontal scaling that doesn't
+    # exist yet. Ignored entirely for the SQLite dialect (NullPool-equivalent
+    # single-file access; see `db.py`).
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_pre_ping: bool = True
 
     max_concurrent_prospects: int = 3
     run_wall_clock_timeout_s: float = 180.0
 
-    cors_origins: list[str] = ["http://localhost:3000"]
+    # `NoDecode`: pydantic-settings would otherwise try to JSON-decode any
+    # env value for a `list[str]` field *before* our own validator runs, and
+    # raise a hard `SettingsError` on a plain comma-separated string (invalid
+    # JSON) rather than ever handing it to `_parse_cors_origins` below.
+    # `NoDecode` disables that pre-parse so the raw string always reaches the
+    # validator, which then handles both forms itself.
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: object) -> object:
+        """Accepts a JSON list (`CORS_ORIGINS=["http://a","http://b"]`) *or*
+        a plain comma-separated string (`CORS_ORIGINS=http://a,http://b`) —
+        pydantic-settings' default env parsing for `list[str]` only accepts
+        the former and raises on the latter, which is the more natural form
+        to hand-type into a host's environment-variable UI. Runs `mode="before"`
+        so it sees the raw env string before pydantic's own list coercion."""
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            return json.loads(stripped)
+        return [origin.strip() for origin in stripped.split(",") if origin.strip()]
+
+    # --- Checkpoint I1: operator session (Phase 8) ---
+    # Live Mode is hard-disabled whenever `operator_passphrase` is unset —
+    # there is no other way to obtain a session. Never logged, never
+    # returned by any endpoint.
+    operator_passphrase: str | None = None
+    # Signs/verifies the operator session cookie (itsdangerous
+    # `URLSafeTimedSerializer`). Required for the operator-session endpoints
+    # to function; unset means Live stays locked even if a passphrase is set
+    # (fail closed, not an unsigned cookie).
+    session_signing_key: str | None = None
+    # Optional second key accepted for *verification only*, to allow one
+    # rotation without invalidating every existing session immediately —
+    # new cookies are always signed with `session_signing_key`.
+    session_signing_key_old: str | None = None
+    session_max_age_s: int = 60 * 60 * 12  # 12h
+    operator_login_rate_limit_attempts: int = 5
+    operator_login_rate_limit_window_s: float = 60.0
+
+    # --- Checkpoint I1: Live cost/abuse controls (Phase 8B) ---
+    live_max_active_runs: int = 1
+    live_daily_run_allowance: int = 10
+
+    # In-process, per-client-IP rate limits on the public (unauthenticated)
+    # write/preview surface — correct for ONE API instance, NOT a
+    # distributed rate limit (see `api/rate_limit.py`). Generous enough not
+    # to bother a legitimate user typing in the New Play form (preview
+    # debounces at 600ms => ~100/min sustained) while still bounding
+    # deliberate abuse.
+    public_write_rate_limit_attempts: int = 30
+    public_write_rate_limit_window_s: float = 60.0
+    preview_rate_limit_attempts: int = 120
+    preview_rate_limit_window_s: float = 60.0
+
+    # Hard cap on request body size (Content-Length), enforced by
+    # `MaxBodySizeMiddleware` in `main.py` before any route/Pydantic
+    # validation runs. Generous relative to any real request this API
+    # accepts (the largest legitimate body is a `PlayCreateRequest`/
+    # `PlayPreviewRequest`, and `objective` alone is already capped at 2000
+    # chars) — this exists to reject a deliberately oversized body outright,
+    # not to constrain normal use.
+    max_request_body_bytes: int = 256_000
+
+    # --- Checkpoint I1 Phase 9: request/host/error hardening ---
+    # `["*"]` (any host) preserves today's unrestricted behavior for local
+    # dev/tests. A production deployment should set this explicitly (see
+    # docs/DEPLOYMENT.md) to the API's real hostname(s) — TrustedHostMiddleware
+    # rejects a request whose Host header doesn't match, a defense against
+    # Host-header-based attacks (cache poisoning, password-reset-link
+    # poisoning) that CORS/Origin checks don't cover (Host is a request
+    # header the browser sets from the URL bar, not a CORS-governed one).
+    trusted_hosts: Annotated[list[str], NoDecode] = ["*"]
+
+    @field_validator("trusted_hosts", mode="before")
+    @classmethod
+    def _parse_trusted_hosts(cls, value: object) -> object:
+        """Same comma-or-JSON-list parsing as `cors_origins` — see
+        `_parse_cors_origins` above for why `NoDecode` is required too."""
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return ["*"]
+        if stripped.startswith("["):
+            return json.loads(stripped)
+        return [host.strip() for host in stripped.split(",") if host.strip()]
+
+    # --- Checkpoint I1: execution lease (Phase 4) ---
+    executor_heartbeat_interval_s: float = 10.0
+    # Reaper threshold — a RUNNING run whose heartbeat is older than this is
+    # considered abandoned by a dead/killed process. Must be comfortably
+    # larger than `executor_heartbeat_interval_s` so a single missed
+    # heartbeat under normal GC/scheduling jitter never trips it.
+    executor_stale_threshold_s: float = 60.0
+    executor_reaper_interval_s: float = 30.0
+    # Bounded drain window on graceful shutdown (SIGTERM) before in-flight
+    # runs are force-transitioned to INTERRUPTED.
+    shutdown_drain_timeout_s: float = 20.0
 
     # Live-mode provider keys (Checkpoint G). Never logged, never returned by
     # any endpoint — GET /settings/providers reports configured: bool only.

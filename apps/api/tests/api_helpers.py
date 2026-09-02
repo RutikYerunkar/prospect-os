@@ -7,6 +7,27 @@ import asyncio
 import time
 from typing import Any
 
+from groundwork.config import settings
+
+TEST_OPERATOR_PASSPHRASE = "test-operator-passphrase"
+TEST_SESSION_SIGNING_KEY = "test-session-signing-key-not-a-real-secret"
+
+
+async def login_as_operator(client, monkeypatch, *, passphrase: str = TEST_OPERATOR_PASSPHRASE) -> None:
+    """Configures operator login (unset by default in tests, matching a
+    fresh deployment with no OPERATOR_PASSPHRASE) and logs the given
+    `client` in — the resulting cookie rides along on every subsequent
+    request `client` makes, exactly like a real browser session. Callers
+    that need an UNauthenticated `client` after this should use a fresh
+    `httpx.AsyncClient`/the `unauthenticated_client` fixture instead of
+    trying to "log out" this one mid-test."""
+    monkeypatch.setattr(settings, "operator_passphrase", passphrase)
+    monkeypatch.setattr(settings, "session_signing_key", TEST_SESSION_SIGNING_KEY)
+    # `client`'s default `Origin` header (see conftest.py) satisfies Phase
+    # 8's CSRF guard here.
+    r = await client.post("/api/operator/session", json={"passphrase": passphrase})
+    assert r.status_code == 200, r.text
+
 DEMO_ICP_OVERRIDES = {
     "target_industries": ["ai_infrastructure"],
     "excluded_industries": ["retail_pos"],

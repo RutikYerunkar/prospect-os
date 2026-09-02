@@ -16,16 +16,35 @@ runtime caller H1 doesn't need, not closing a gap.
 
 from __future__ import annotations
 
+import logging
+
 from groundwork.engine.context import ProspectContext
 from groundwork.models.schemas import PlaySpec, SourceDocument
 from groundwork.observability.search_calls import SearchCallRecorder
 from groundwork.providers.base import DiscoveryResult, ProviderBundle, SearchProviderError
+
+logger = logging.getLogger(__name__)
+
+
+def _total_latency_ms(telemetry: list) -> float:
+    return sum(t.latency_ms for t in telemetry if t.latency_ms is not None)
 
 
 async def call_search(ctx: ProspectContext) -> list[SourceDocument]:
     ctx_key = ctx.step_key("research")
     bundle = await ctx.providers.search.fetch_sources(ctx.company, ctx_key=ctx_key)
     await ctx.search_calls.record(telemetry=bundle.telemetry, documents=bundle.documents)
+    # Checkpoint I1 Phase 9C — one summary line per call, never the
+    # retrieved excerpt/source bodies (those stay in `source_documents`
+    # only).
+    logger.info(
+        "search call attempts=%d documents=%d",
+        len(bundle.telemetry), len(bundle.documents),
+        extra={
+            "run_id": ctx.run_id, "prospect_id": ctx.prospect_id,
+            "latency_ms": _total_latency_ms(bundle.telemetry),
+        },
+    )
     return bundle.documents
 
 

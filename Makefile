@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke
+.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke db-upgrade db-downgrade db-current db-history docker-build prod-smoke
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -43,3 +43,32 @@ search-spike:
 # automatically by `make test`/CI.
 search-smoke:
 	cd apps/api && uv run python -m groundwork.scripts.search_smoke --i-understand-this-costs-money
+
+# Alembic migrations (Checkpoint I1 Phase 5) — explicit schema management
+# against whatever DATABASE_URL is currently set. SQLite local dev normally
+# doesn't need this (`make demo-reset`/`create_all()` cover it); Postgres
+# (local container or production) is managed exclusively through these.
+db-upgrade:
+	cd apps/api && uv run alembic upgrade head
+
+db-downgrade:
+	cd apps/api && uv run alembic downgrade -1
+
+db-current:
+	cd apps/api && uv run alembic current
+
+db-history:
+	cd apps/api && uv run alembic history
+
+# Checkpoint I1 Phase 10 — builds the API image locally. Never pushes
+# anywhere; no registry/cloud target exists yet (Checkpoint I2).
+docker-build:
+	cd apps/api && docker build -t groundwork-api .
+
+# Author-only, never run automatically (not by this target, `make test`, or
+# CI). Demo Mode only — zero paid provider calls regardless of what BASE_URL
+# points at. No real deployment exists yet (Checkpoint I2), so there is
+# nothing to run this against today; usage:
+#   make prod-smoke BASE_URL=https://api.example.com
+prod-smoke:
+	cd apps/api && uv run python -m groundwork.scripts.prod_smoke --base-url "$(BASE_URL)" --i-understand-this-targets-a-real-deployment

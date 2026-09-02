@@ -10,6 +10,7 @@ detail: one prospect raising must never cancel the others (§10).
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date
 
@@ -36,6 +37,8 @@ from groundwork.repositories.prospects import CompanyRepository, ProspectReposit
 from groundwork.repositories.runs import RunRepository
 from groundwork.repositories.search import SearchRepository
 from groundwork.repositories.tasks import TaskRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -175,6 +178,7 @@ async def execute_run(
     run_wall_clock_timeout_s: float,
     budget: PipelineBudget = DEMO_BUDGET,
     discovery_bounds: DiscoveryBounds = DiscoveryBounds(),
+    executor_id: str | None = None,
 ) -> RunSummary:
     prospect_seeds, all_identifiers = await discover_and_dedupe(
         run_id, play_spec, providers, repos, discovery_bounds=discovery_bounds
@@ -287,6 +291,25 @@ async def execute_run(
     if any(o.status in (ProspectStatus.FAILED, ProspectStatus.TIMED_OUT) for o in outcomes):
         run_status = RunStatus.PARTIAL
 
-    await repos.runs.finalize(run_id, status=run_status.value, counters=counters)
+    if executor_id is not None:
+        # Ownership-guarded: a `False` result means the reaper already
+        # reclaimed this run (its heartbeat went stale, e.g. this process
+        # was slow/stuck past `executor_stale_threshold_s`) or another
+        # process holds the lease now. Either way, this process must NOT
+        # overwrite whatever terminal state already landed — it lost the
+        # right to finalize this run the moment the lease went stale.
+        owned = await repos.runs.finalize_owned(run_id, executor_id, status=run_status.value, counters=counters)
+        if not owned:
+            logger.warning(
+                "run finished locally (status=%s) but executor no longer owns it — "
+                "not overwriting the run's terminal state",
+                run_status.value,
+                extra={"run_id": run_id, "executor_id": executor_id},
+            )
+    else:
+        # No lease participation requested (headless scripts, tests driving
+        # the engine directly) — unconditional finalize, same as before
+        # Phase 4.
+        await repos.runs.finalize(run_id, status=run_status.value, counters=counters)
 
     return RunSummary(run_id=run_id, status=run_status.value, counters=counters, outcomes=outcomes)

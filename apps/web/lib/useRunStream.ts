@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useReducer, useRef } from "react";
-import { ApiError, eventStreamUrl, getRun, listRunProspects } from "@/lib/api";
+import { useEffect, useReducer, useRef, useState } from "react";
+import { ApiError, NetworkError, eventStreamUrl, getRun, listRunProspects } from "@/lib/api";
 import type { ProspectSummary, RunEvent, RunResponse, RunStatus } from "@/lib/types";
 
 const TERMINAL_STATUSES = new Set<RunStatus>(["COMPLETED", "PARTIAL", "INTERRUPTED"]);
@@ -20,7 +20,13 @@ const KNOWN_EVENT_TYPES = [
   "step.retrying",
 ] as const;
 
-export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed" | "error";
+export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed" | "error" | "degraded";
+
+// Checkpoint I1 Phase 9: bounded reconnect attempts — past this many
+// consecutive failures the stream gives up and surfaces a "degraded" state
+// (the UI falls back to periodic REST polling, see app/runs/[id]/page.tsx)
+// rather than retrying forever against a genuinely down API.
+const MAX_RECONNECT_ATTEMPTS = 8;
 
 export interface RetryInfo {
   step: string;
@@ -35,11 +41,15 @@ interface StreamState {
   retrying: Record<string, RetryInfo>;
   connection: ConnectionState;
   loadError: string | null;
+  // Checkpoint I1 Phase 9: lets the page render "start the API" instead of
+  // "run not found" — a reachability failure and a real 404 need different
+  // copy and a different retry affordance.
+  loadErrorUnreachable: boolean;
 }
 
 type Action =
   | { type: "hydrated"; run: RunResponse; prospects: ProspectSummary[] }
-  | { type: "hydrate_failed"; message: string }
+  | { type: "hydrate_failed"; message: string; unreachable: boolean }
   | { type: "connection"; state: ConnectionState }
   | { type: "event"; event: RunEvent }
   | { type: "run_refreshed"; run: RunResponse }
@@ -52,6 +62,7 @@ const initialState: StreamState = {
   retrying: {},
   connection: "connecting",
   loadError: null,
+  loadErrorUnreachable: false,
 };
 
 const MAX_EVENTS = 300;
@@ -85,9 +96,9 @@ function upsertDiscovered(
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.type) {
     case "hydrated":
-      return { ...state, run: action.run, prospects: action.prospects, loadError: null };
+      return { ...state, run: action.run, prospects: action.prospects, loadError: null, loadErrorUnreachable: false };
     case "hydrate_failed":
-      return { ...state, loadError: action.message };
+      return { ...state, loadError: action.message, loadErrorUnreachable: action.unreachable };
     case "connection":
       return { ...state, connection: action.state };
     case "run_refreshed":
@@ -174,6 +185,7 @@ function reducer(state: StreamState, action: Action): StreamState {
  */
 export function useRunStream(runId: string) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [retryNonce, setRetryNonce] = useState(0);
   const lastSeqRef = useRef(0);
   const runStatusRef = useRef<RunStatus | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -217,7 +229,11 @@ export function useRunStream(runId: string) {
       if (unmountedRef.current) return;
       dispatch({ type: "connection", state: isReconnect ? "reconnecting" : "connecting" });
 
-      const es = new EventSource(eventStreamUrl(runId, lastSeqRef.current));
+      // `withCredentials` — the operator session cookie has to ride along
+      // on a Live run's SSE connection the same way it does on every REST
+      // call (Checkpoint I1 Phase 8/9); without it a cross-origin
+      // EventSource never sends cookies at all.
+      const es = new EventSource(eventStreamUrl(runId, lastSeqRef.current), { withCredentials: true });
       esRef.current = es;
 
       es.onopen = () => {
@@ -276,11 +292,44 @@ export function useRunStream(runId: string) {
           return;
         }
 
-        dispatch({ type: "connection", state: "reconnecting" });
         reconnectAttempt += 1;
-        const backoffMs = Math.min(1000 * 2 ** (reconnectAttempt - 1), 8000);
-        reconnectTimer = setTimeout(() => connect(true), backoffMs);
+        if (reconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
+          // Give up retrying the stream itself — fall back to periodic
+          // REST polling rather than hammering a genuinely unreachable API
+          // forever.
+          dispatch({ type: "connection", state: "degraded" });
+          startDegradedPolling();
+          return;
+        }
+
+        dispatch({ type: "connection", state: "reconnecting" });
+        // Exponential backoff with jitter (±20%) — the jitter avoids every
+        // open tab reconnecting in lockstep after a shared outage (a
+        // thundering-herd reconnect wave, not a concern at this project's
+        // scale but cheap to avoid regardless).
+        const base = Math.min(1000 * 2 ** (reconnectAttempt - 1), 8000);
+        const jitter = base * (0.8 + Math.random() * 0.4);
+        reconnectTimer = setTimeout(() => connect(true), jitter);
       };
+    }
+
+    // Checkpoint I1 Phase 9 — degraded-state fallback: once the SSE stream
+    // gives up reconnecting, the run isn't necessarily unreachable, just
+    // the long-lived connection is (a proxy/LB dropping idle connections,
+    // for instance) — poll the two REST reads on a fixed interval instead
+    // of leaving the board frozen.
+    let degradedPollTimer: ReturnType<typeof setInterval> | null = null;
+    function startDegradedPolling() {
+      if (degradedPollTimer) return;
+      degradedPollTimer = setInterval(() => {
+        if (runStatusRef.current && TERMINAL_STATUSES.has(runStatusRef.current)) {
+          if (degradedPollTimer) clearInterval(degradedPollTimer);
+          degradedPollTimer = null;
+          return;
+        }
+        void refreshRun();
+        void refreshProspects();
+      }, 5000);
     }
 
     async function bootstrap() {
@@ -291,7 +340,8 @@ export function useRunStream(runId: string) {
         dispatch({ type: "hydrated", run, prospects });
       } catch (err) {
         const message = err instanceof ApiError ? err.message : "Could not load run";
-        if (!unmountedRef.current) dispatch({ type: "hydrate_failed", message });
+        const unreachable = err instanceof NetworkError;
+        if (!unmountedRef.current) dispatch({ type: "hydrate_failed", message, unreachable });
         return;
       }
       connect(false);
@@ -305,8 +355,9 @@ export function useRunStream(runId: string) {
       esRef.current = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+      if (degradedPollTimer) clearInterval(degradedPollTimer);
     };
-  }, [runId]);
+  }, [runId, retryNonce]);
 
-  return state;
+  return { ...state, retry: () => setRetryNonce((n) => n + 1) };
 }

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- plays ---
@@ -29,6 +29,27 @@ class PlayCreateRequest(BaseModel):
     # the New Play form's debounce. Ignored (and free) in Demo Mode, where
     # objective parsing has always been deterministic.
     use_live_objective_parser: bool = False
+
+
+class PlayPreviewRequest(BaseModel):
+    """Checkpoint I1 Phase 7 — deliberately NOT `PlayCreateRequest`: no
+    `mode`, no `use_live_objective_parser`. Preview is unconditionally
+    deterministic (never an LLM call, in Demo or Live), so there is nothing
+    for those fields to mean here. `extra="forbid"` turns a client sending
+    `use_live_objective_parser` into a 422 rather than a silently ignored
+    field — this endpoint should never look like it might have honored it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str = Field(min_length=1, max_length=2000)
+    icp_overrides: dict[str, Any] = Field(default_factory=dict)
+    target_count: int = Field(default=7, ge=1, le=25)
+
+
+class PlayPreviewResponse(BaseModel):
+    icp_spec: dict[str, Any]
+    parse_source: Literal["deterministic"] = "deterministic"
 
 
 class RunSummary(BaseModel):
@@ -147,11 +168,20 @@ class LiveAvailability(BaseModel):
     """§21/Phase 8/H2 Phase 17: enough truth for the New Play screen to
     disable Live and explain why, or show real bounds — never a secret
     value. `available` requires BOTH `llm_available` AND `search_available`
-    (H2: no Live -> fixture-search fallback)."""
+    (H2: no Live -> fixture-search fallback).
+
+    Checkpoint I1 Phase 8/9: `operator_login_configured` and `is_operator`
+    let the frontend tell apart "Live isn't configured on this deployment at
+    all" from "Live is configured but this browser hasn't unlocked it yet"
+    from "already unlocked" — three different states, three different
+    messages, never conflated.
+    """
 
     available: bool
     llm_available: bool = False
     search_available: bool = False
+    operator_login_configured: bool = False
+    is_operator: bool = False
     model: str
     reasoning_effort: str | None
     prompt_versions: dict[str, str]
@@ -177,3 +207,7 @@ class ProviderSettingsResponse(BaseModel):
     llm: ProviderInfo
     search: ProviderInfo
     live: LiveAvailability
+    # Checkpoint I1 Phase 9: sourced from the API rather than a duplicated
+    # frontend constant — see apps/web/lib/constants.ts's old
+    # MAX_CONCURRENT_PROSPECTS.
+    max_concurrent_prospects: int

@@ -13,16 +13,17 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
-from groundwork.api.deps import ApprovalsRepoDep, ReposDep
+from groundwork.api.deps import ApprovalsRepoDep, IsOperatorDep, ReposDep
 from groundwork.api.errors import NotFoundError
+from groundwork.api.live_gate import enforce_live_gate
 from groundwork.api.schemas import ProspectSummary, RunResponse
 from groundwork.models.enums import RunStatus
+from groundwork.timeutil import elapsed_seconds
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -34,15 +35,15 @@ _HEARTBEAT_INTERVAL_S = 15.0
 def _run_duration_ms(run_row) -> float | None:
     if run_row.started_at is None:
         return None
-    end = run_row.finished_at or datetime.utcnow()
-    return (end - run_row.started_at).total_seconds() * 1000
+    return elapsed_seconds(run_row.started_at, run_row.finished_at) * 1000
 
 
 @router.get("/{run_id}", response_model=RunResponse)
-async def get_run(run_id: str, repos: ReposDep) -> RunResponse:
+async def get_run(run_id: str, request: Request, repos: ReposDep, is_operator: IsOperatorDep) -> RunResponse:
     row = await repos.runs.get(run_id)
     if row is None:
         raise NotFoundError(f"no run with id {run_id!r}")
+    enforce_live_gate(request, row.mode, is_operator)
     return RunResponse(
         id=row.id,
         play_id=row.play_id,
@@ -103,11 +104,12 @@ async def _event_stream(request: Request, run_id: str, after_seq: int, repos) ->
 
 @router.get("/{run_id}/events")
 async def stream_run_events(
-    request: Request, run_id: str, repos: ReposDep, after_seq: int = Query(default=0, ge=0)
+    request: Request, run_id: str, repos: ReposDep, is_operator: IsOperatorDep, after_seq: int = Query(default=0, ge=0)
 ) -> StreamingResponse:
     run_row = await repos.runs.get(run_id)
     if run_row is None:
         raise NotFoundError(f"no run with id {run_id!r}")
+    enforce_live_gate(request, run_row.mode, is_operator)
     return StreamingResponse(
         _event_stream(request, run_id, after_seq, repos),
         media_type="text/event-stream",
@@ -116,10 +118,13 @@ async def stream_run_events(
 
 
 @router.get("/{run_id}/prospects", response_model=list[ProspectSummary])
-async def list_run_prospects(run_id: str, repos: ReposDep, approvals: ApprovalsRepoDep) -> list[ProspectSummary]:
+async def list_run_prospects(
+    run_id: str, request: Request, repos: ReposDep, approvals: ApprovalsRepoDep, is_operator: IsOperatorDep
+) -> list[ProspectSummary]:
     run_row = await repos.runs.get(run_id)
     if run_row is None:
         raise NotFoundError(f"no run with id {run_id!r}")
+    enforce_live_gate(request, run_row.mode, is_operator)
 
     prospects = await repos.prospects.list_for_run(run_id)
     companies = await repos.companies.get_many([p.company_id for p in prospects])

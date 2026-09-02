@@ -9,16 +9,29 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime as _SADateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from groundwork.timeutil import utcnow
 
 
 class Base(DeclarativeBase):
     pass
 
 
+# Every absolute-time column in this schema uses this module-level instance
+# instead of the bare `sqlalchemy.DateTime` class — `timezone=True` is
+# required for Postgres's `timestamptz` to round-trip aware datetimes
+# correctly. SQLite silently drops the tzinfo on read regardless (see
+# `groundwork/timeutil.py`), so this is a no-op for SQLite's on-disk format,
+# not a wire-compatibility break there. A single shared instance (not a type)
+# is fine — SQLAlchemy column types are stateless/immutable once constructed.
+DateTime = _SADateTime(timezone=True)
+
+
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 class PlayRow(Base):
@@ -49,6 +62,33 @@ class RunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- Checkpoint I1 Phase 3: database-correct per-run SSE sequencing ---
+    # The per-run event counter. `EventRepository.append()` is the only
+    # writer, via `UPDATE runs SET last_event_seq = last_event_seq + 1
+    # WHERE id = :run_id RETURNING last_event_seq` in the same transaction
+    # as the `run_events` insert it guards — see `repositories/events.py`.
+    # This IS the correctness mechanism (row-level lock serializes
+    # concurrent same-run appends; different runs never contend); there is
+    # deliberately no `asyncio.Lock`/process-local lock anywhere near it.
+    last_event_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    # --- Checkpoint I1 Phase 4: ownership-safe execution lease ---
+    # Minted once per process at startup (`main.py`'s lifespan) — identifies
+    # which running API process currently owns advancing this run. Every
+    # lifecycle transition (heartbeat, finalize, reap) is a guarded
+    # `UPDATE ... WHERE id=:run_id AND executor_id=:executor_id` so a stale
+    # process that has lost ownership can never resurrect or finalize a run
+    # another process (or the reaper) has already taken over.
+    executor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        # Play-history listing (`GET /plays/{id}` -> runs for a play, newest
+        # first) and the reaper/dashboard access pattern (status + recency).
+        Index("ix_runs_play_id_started_at", "play_id", "started_at"),
+        Index("ix_runs_status_heartbeat_at", "status", "heartbeat_at"),
+    )
+
 
 class CompanyRow(Base):
     __tablename__ = "companies"
@@ -66,7 +106,7 @@ class ProspectRow(Base):
     __tablename__ = "prospects"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"))
     status: Mapped[str] = mapped_column(String, default="PENDING")
     current_stage: Mapped[str] = mapped_column(String, default="DISCOVERED")
@@ -83,7 +123,7 @@ class EvidenceRow(Base):
     __tablename__ = "evidence"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"))
+    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"), index=True)
     source_url: Mapped[str | None] = mapped_column(String, nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     source_provider: Mapped[str] = mapped_column(String)
@@ -100,7 +140,7 @@ class SignalRow(Base):
     __tablename__ = "signals"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"))
+    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.id"), index=True)
     type: Mapped[str] = mapped_column(String)
     summary: Mapped[str] = mapped_column(Text)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -200,6 +240,11 @@ class AgentTaskRow(Base):
     output_digest: Mapped[str | None] = mapped_column(String, nullable=True)
     evidence_count: Mapped[int] = mapped_column(Integer, default=0)
 
+    __table_args__ = (
+        Index("ix_agent_tasks_run_prospect", "run_id", "prospect_id"),
+        Index("ix_agent_tasks_prospect_step", "prospect_id", "step_name"),
+    )
+
 
 class LLMCallRow(Base):
     """One row per provider *attempt* (Checkpoint G Phase 3) — never
@@ -227,7 +272,7 @@ class LLMCallRow(Base):
     operation: Mapped[str] = mapped_column(String)
 
     play_id: Mapped[str | None] = mapped_column(ForeignKey("plays.id"), nullable=True)
-    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True, index=True)
     prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
     step_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -272,7 +317,7 @@ class SearchCallRow(Base):
     attempt_kind: Mapped[str] = mapped_column(String, default="initial")
     operation: Mapped[str] = mapped_column(String)
 
-    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True, index=True)
     prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
     play_id: Mapped[str | None] = mapped_column(ForeignKey("plays.id"), nullable=True)
 
@@ -311,12 +356,12 @@ class SourceDocumentRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     search_call_id: Mapped[str | None] = mapped_column(ForeignKey("search_calls.id"), nullable=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     # Nullable (H2): a Stage A discovery-time occurrence is run-scoped, not
     # prospect-scoped — no `ProspectContext`/prospect exists yet when
     # `engine/discovery.py` persists it, exactly like `search_calls.
     # prospect_id` already allows `None` for the run-level `discover()` call.
-    prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
+    prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True, index=True)
 
     ref: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
@@ -354,12 +399,20 @@ class SourceDocumentRow(Base):
 
 
 class RunEventRow(Base):
-    """Append-only event log, replayed over SSE (Checkpoint C). Never updated."""
+    """Append-only event log, replayed over SSE (Checkpoint C). Never updated.
+
+    Checkpoint I1 Phase 3: `seq` is no longer a global autoincrement — it's
+    monotonically increasing PER RUN, minted by `EventRepository.append()`
+    from `runs.last_event_seq` in the same transaction as this insert.
+    `PRIMARY KEY (run_id, seq)` makes a duplicate/out-of-order seq for one
+    run a constraint violation, not just a convention; different runs'
+    sequences never share a namespace and never contend with each other.
+    """
 
     __tablename__ = "run_events"
 
-    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     ts: Mapped[datetime] = mapped_column(DateTime, default=_now)
     type: Mapped[str] = mapped_column(String)
     prospect_id: Mapped[str | None] = mapped_column(String, nullable=True)

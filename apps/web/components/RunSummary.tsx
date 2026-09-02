@@ -3,7 +3,6 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Progress } from "@/components/ui/Progress";
 import { Stat } from "@/components/ui/Stat";
 import { formatElapsedSince, formatRunStatus } from "@/lib/format";
-import { MAX_CONCURRENT_PROSPECTS } from "@/lib/constants";
 import type { ProspectSummary, RunResponse } from "@/lib/types";
 import type { ConnectionState } from "@/lib/useRunStream";
 
@@ -20,6 +19,7 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   reconnecting: "reconnecting…",
   closed: "stream closed",
   error: "connection error",
+  degraded: "degraded — polling",
 };
 
 const CONNECTION_TONE: Record<ConnectionState, BadgeTone> = {
@@ -28,6 +28,7 @@ const CONNECTION_TONE: Record<ConnectionState, BadgeTone> = {
   reconnecting: "amber",
   closed: "neutral",
   error: "rose",
+  degraded: "amber",
 };
 
 const RUN_TERMINAL_STATUSES = new Set(["COMPLETED", "PARTIAL", "INTERRUPTED"]);
@@ -58,11 +59,15 @@ export function RunSummary({
   objective,
   prospects,
   connection,
+  maxConcurrentProspects,
 }: {
   run: RunResponse;
   objective: string | null;
   prospects: ProspectSummary[] | null;
   connection: ConnectionState;
+  // Checkpoint I1 Phase 9: sourced from GET /api/settings/providers instead
+  // of a duplicated frontend constant — see lib/constants.ts.
+  maxConcurrentProspects: number;
 }) {
   const [, setTick] = useState(0);
 
@@ -123,7 +128,7 @@ export function RunSummary({
         <Stat label="Discovered" value={discovered} />
         <Stat
           label={`Agents active`}
-          value={`${active} / ${MAX_CONCURRENT_PROSPECTS}`}
+          value={`${active} / ${maxConcurrentProspects}`}
           tone={active > 0 ? "sky" : undefined}
         />
         <Stat label="Completed" value={completed} />

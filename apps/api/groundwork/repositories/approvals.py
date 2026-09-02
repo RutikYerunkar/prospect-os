@@ -10,11 +10,11 @@ prospect's approval state.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 from sqlalchemy import select
 
 from groundwork.models.tables import ApprovalRow
+from groundwork.timeutil import utcnow
 
 
 class ApprovalRepository:
@@ -31,7 +31,7 @@ class ApprovalRepository:
                 decision=decision,
                 actor=actor,
                 reason=reason,
-                decided_at=datetime.utcnow(),
+                decided_at=utcnow(),
             )
             session.add(row)
             await session.commit()

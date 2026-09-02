@@ -1,7 +1,9 @@
-from sqlalchemy import event, inspect
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from groundwork.config import settings
+from groundwork.db_url import normalize_database_url
+from groundwork.migration_status import schema_upgrade_problems as _schema_upgrade_problems
 from groundwork.models.tables import Base
 
 
@@ -14,9 +16,30 @@ def _enable_wal(dbapi_connection, connection_record) -> None:
     cursor.close()
 
 
-def create_engine() -> AsyncEngine:
-    engine = create_async_engine(settings.database_url, echo=False)
-    if settings.database_url.startswith("sqlite"):
+def create_engine(database_url: str | None = None) -> AsyncEngine:
+    """`database_url` is normalized through `groundwork/db_url.py` — never
+    handed to `create_async_engine` raw. A malformed URL or an unsupported/
+    misunderstood query parameter (`sslmode`, `channel_binding`, or anything
+    else) raises `DatabaseConfigurationError` here, at engine-construction
+    time (import time for the module-level `engine` below, i.e. application
+    startup) — never discovered later as an opaque driver error on the first
+    real query."""
+    url, connect_args = normalize_database_url(database_url or settings.database_url)
+    is_sqlite = url.startswith("sqlite")
+    engine = create_async_engine(
+        url,
+        echo=False,
+        connect_args=connect_args,
+        pool_pre_ping=settings.db_pool_pre_ping,
+        # SQLite is one file — SQLAlchemy's default `NullPool` (or a
+        # single-connection singleton for `:memory:`) is already correct
+        # there; pool sizing only matters for the Postgres dialect, and only
+        # from ONE API instance with ONE uvicorn worker (§ "Runtime Postgres
+        # pool: small pool appropriate for one API instance" — no PgBouncer
+        # merely because it exists).
+        **({} if is_sqlite else {"pool_size": settings.db_pool_size, "max_overflow": settings.db_max_overflow}),
+    )
+    if is_sqlite:
         event.listen(engine.sync_engine, "connect", _enable_wal)
     return engine
 
@@ -26,9 +49,26 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def create_all() -> None:
-    """`create_all()` only — no Alembic yet (P2, per §17)."""
+    """SQLite-only local-dev convenience — see `create_all_if_sqlite()`
+    below for the guarded entry point every real caller (`main.py`'s
+    lifespan, scripts) should use instead of calling this directly.
+    Production/Postgres schema management is exclusively `alembic upgrade
+    head`, run explicitly (see docs/RUNBOOK.md) — never this function."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def create_all_if_sqlite() -> bool:
+    """The guarded entry point: only actually creates tables when running
+    against SQLite (Checkpoint I1 Phase 5 — "production never runs
+    create_all silently"). Returns whether it did anything, so callers can
+    log/print accordingly. Postgres schema state is instead verified via
+    `schema_upgrade_problems()`/`GET /api/ready`, never silently created or
+    altered by the running application."""
+    if engine.dialect.name != "sqlite":
+        return False
+    await create_all()
+    return True
 
 
 async def drop_all() -> None:
@@ -36,50 +76,9 @@ async def drop_all() -> None:
         await conn.run_sync(Base.metadata.drop_all)
 
 
-def _inspect_schema_problems(sync_conn) -> list[str]:
-    inspector = inspect(sync_conn)
-    table_names = set(inspector.get_table_names())
-    problems: list[str] = []
-
-    if "runs" in table_names:
-        run_columns = {c["name"] for c in inspector.get_columns("runs")}
-        if "provider_profile" not in run_columns:
-            problems.append("runs.provider_profile column is missing")
-    # If `runs` itself doesn't exist yet, this is a brand-new (empty) DB,
-    # not a stale one — `create_all()` handles that case fine, nothing to
-    # flag here.
-
-    if table_names and "llm_calls" not in table_names:
-        problems.append("llm_calls table is missing")
-
-    # H1 Phase 9: search_calls/source_documents, and signals.grounded.
-    if table_names and "search_calls" not in table_names:
-        problems.append("search_calls table is missing")
-    if table_names and "source_documents" not in table_names:
-        problems.append("source_documents table is missing")
-    if "signals" in table_names:
-        signal_columns = {c["name"] for c in inspector.get_columns("signals")}
-        if "grounded" not in signal_columns:
-            problems.append("signals.grounded column is missing")
-
-    return problems
-
-
 async def schema_upgrade_problems(target_engine: AsyncEngine | None = None) -> list[str]:
-    """Checkpoint G added `runs.provider_profile` and the `llm_calls` table.
-    `create_all()` only *creates missing tables* — it never alters an
-    existing table to add a new column — so a pre-Checkpoint-G local SQLite
-    file left `runs` without `provider_profile`, and the first write to it
-    surfaced as a raw `sqlite3.OperationalError` deep in a live smoke run,
-    with no explanation of what a developer needed to do about it.
-
-    Returns a list of human-readable problems (empty = current). Read-only —
-    never mutates the database, never deletes anything. Callers that find
-    problems should tell the user to run `make demo-reset` (or
-    `python -m groundwork.scripts.reset`) themselves; this function never
-    resets automatically, since that would delete local data without
-    asking.
-    """
-    target = target_engine or engine
-    async with target.connect() as conn:
-        return await conn.run_sync(_inspect_schema_problems)
+    """Delegates to `groundwork.migration_status` — see that module for the
+    Alembic-based mechanism this replaced the old hand-maintained
+    per-checkpoint column/table probe with. Kept as the same name/shape
+    here so existing callers (`scripts/live_smoke.py`) need no changes."""
+    return await _schema_upgrade_problems(target_engine or engine)

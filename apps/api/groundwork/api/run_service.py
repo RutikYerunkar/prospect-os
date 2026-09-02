@@ -17,6 +17,8 @@ Demo Mode's hardcoded step timeouts/retries.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 
 from groundwork.config import settings
 from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
@@ -28,6 +30,8 @@ from groundwork.models.enums import Mode
 from groundwork.models.schemas import PlaySpec
 from groundwork.observability.events import EventEmitter
 from groundwork.providers.registry import build_provider_bundle
+
+logger = logging.getLogger(__name__)
 
 _background_tasks: set[asyncio.Task] = set()
 
@@ -63,6 +67,32 @@ def live_search_bounds_from_settings() -> dict:
     }
 
 
+async def _heartbeat_loop(run_id: str, executor_id: str, repos: Repos) -> None:
+    """Independent coroutine, scheduled alongside `execute_run` — keeps
+    beating on its own interval regardless of what the pipeline is
+    currently awaiting (a long provider call included; this loop is a
+    separate task, not something interleaved inside the pipeline's own
+    await chain). Exits quietly the moment a heartbeat is refused — that
+    means the reaper already reclaimed the lease, and this process must
+    stop asserting ownership, not retry. Cancellation (normal shutdown, or
+    `execute_run` finishing) is handled explicitly by re-raising, so the
+    caller's `finally` block sees a clean `CancelledError` rather than this
+    loop swallowing it."""
+    interval_s = settings.executor_heartbeat_interval_s
+    try:
+        while True:
+            await asyncio.sleep(interval_s)
+            owned = await repos.runs.heartbeat(run_id, executor_id)
+            if not owned:
+                logger.warning(
+                    "run heartbeat refused — executor lost the lease (reaper likely reclaimed it)",
+                    extra={"run_id": run_id, "executor_id": executor_id},
+                )
+                return
+    except asyncio.CancelledError:
+        raise
+
+
 async def _run_and_finalize(
     run_id: str,
     play_spec: PlaySpec,
@@ -73,9 +103,15 @@ async def _run_and_finalize(
     live_runtime,
     run_budget,
     search_runtime=None,
+    executor_id: str | None = None,
 ) -> None:
     events = EventEmitter(run_id=run_id, events=repos.events)
     await events.emit("run.started", seed=seed, mode=mode.value)
+
+    heartbeat_task: asyncio.Task | None = None
+    if executor_id is not None:
+        heartbeat_task = asyncio.create_task(_heartbeat_loop(run_id, executor_id, repos))
+
     try:
         search_budget = (
             SearchCallBudget(
@@ -101,6 +137,7 @@ async def _run_and_finalize(
             run_wall_clock_timeout_s=budget.run_wall_clock_timeout_s,
             budget=budget,
             discovery_bounds=discovery_bounds,
+            executor_id=executor_id,
         )
         await events.emit("run.completed", status=summary.status, counters=summary.counters)
     except Exception as exc:  # noqa: BLE001 — a run that blows up before/around
@@ -108,8 +145,23 @@ async def _run_and_finalize(
         # in a terminal DB state, not hang as RUNNING forever. Per-prospect
         # failure isolation inside execute_run is untouched; this is the
         # run-level equivalent of that same honesty.
-        await repos.runs.finalize(run_id, status="PARTIAL", counters={}, error=str(exc))
-        await events.emit("run.failed", error=str(exc))
+        if executor_id is not None:
+            owned = await repos.runs.finalize_owned(run_id, executor_id, status="PARTIAL", counters={}, error=str(exc))
+        else:
+            await repos.runs.finalize(run_id, status="PARTIAL", counters={}, error=str(exc))
+            owned = True
+        if owned:
+            await events.emit("run.failed", error=str(exc))
+        else:
+            logger.warning(
+                "run failed locally but executor no longer owns it — not overwriting terminal state",
+                extra={"run_id": run_id, "executor_id": executor_id},
+            )
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
 
 
 def launch_run(
@@ -122,11 +174,13 @@ def launch_run(
     live_runtime=None,
     run_budget=None,
     search_runtime=None,
+    executor_id: str | None = None,
 ) -> None:
     task = asyncio.create_task(
         _run_and_finalize(
             run_id, play_spec, mode, seed, repos,
             live_runtime=live_runtime, run_budget=run_budget, search_runtime=search_runtime,
+            executor_id=executor_id,
         )
     )
     _background_tasks.add(task)

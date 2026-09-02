@@ -18,18 +18,20 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **F — Quality + hardening** | `41883be` (merged to `master` via PR #6) | Quality tab (`MetricGrid` + `GuardrailPanel`) backed by the existing evaluation endpoint; a real demo-consistency bug found and fixed (New Play's default ICP overrides silently diverged from the fixture pack, changing both prospect count and Northwind Labs' score); visual polish (friendlier terminal states, humanized activity labels, obvious synthetic-evidence badges, structural-dimension score clarity); two clean-reset rehearsals through the real UI; README + DEMO_SCRIPT finalized. **P0 COMPLETE.** |
 | **G — Live Mode LLM provider** | `1e7586c` (merged to `master` via PR #7, branch `claude/checkpoint-g-live-mode-bdtavb`) | **REAL OpenAI LLM + FIXTURE SEARCH** — `LIVE LLM · FIXTURE SEARCH`. Real `OpenAILLMProvider` (Responses API, strict Structured Outputs, `store=False`) behind the same `LLMProvider` Protocol Demo Mode already satisfies; process-scoped `LiveProviderRuntime`; a flat (never nested) retry loop bounded at `1 + T + S = 4` attempts with full per-attempt telemetry persisted to a new `llm_calls` table; the Objective Parser as the fourth Live LLM operation, with deterministic fallback and transactional Play+telemetry persistence; a soft per-run cost budget; hard cost/concurrency/prospect-count bounds; central secret redaction. Demo Mode preserved byte-identical at every gate. |
 | **H1 — demo-neutral, real-company-safe foundation** | `acdd769`/`f44c33b` (merged to `master` via PR #8, branch `claude/checkpoint-h1-caz9gn`) | Fixed two real bugs (evidence-retry duplication; substring-based cross-prospect-leak false positive on short names); offline PSL-aware domain normalization (`domain/psl.py`, pinned `tldextract`); pure `url_safety`/`source_identity` helpers; independently-grounded `IndustryProfileFact`/`EmployeeCountProfileFact` — scoring's `industry_fit`/`size_fit` now read *only* these, never `CompanySeed`; tri-state `DimensionSupport`/`ExclusionEvaluation` (ungrounded industry forces `NEEDS_REVIEW`, seven review checks unchanged); `source_documents`/`search_calls` persistence with deterministic retrieval-occurrence dedupe; `ctx.sources` (retrieval) split from `ctx.evidence` (accepted); refined `SearchProvider` contract, `DemoSearchProvider` ported, zero live vendor. Demo Mode preserved byte-identical at every gate. **No live search was performed; no vendor adapter was written.** |
-| **H2 — real live web search** | *this commit* (branch `claude/checkpoint-h2-implementation-w7upys`) | **REAL OpenAI LLM + REAL TAVILY SEARCH** — `LIVE LLM · LIVE SEARCH`. Pinned `tavily-python==0.8.0`, process-scoped `LiveSearchRuntime`, real `TavilySearchProvider` behind the same `SearchProvider` Protocol; real multi-stage discovery (`engine/discovery.py` — bounded search → `DISCOVERY_EXTRACTION` LLM → deterministic/`DOMAIN_SELECTION`-fallback domain resolution → identity gate), never a model-authored domain; real per-company retrieval reusing H1's winner-selection + one batched Tavily `extract()` call per prospect; a real bug fixed in `engine/steps/research.py` (Evidence origin/URL used to be hardcoded to `DEMO_FIXTURE`/`None` regardless of what actually produced it); NEW Live Mode requires BOTH OpenAI and Tavily runtimes, never a fixture-search fallback; historical Checkpoint G `provider_profile` rows render unchanged. Demo Mode preserved byte-identical at every gate. |
+| **H2 — real live web search** | *(merged after this row was written — see repo history for the exact commit)* (branch `claude/checkpoint-h2-implementation-w7upys`) | **REAL OpenAI LLM + REAL TAVILY SEARCH** — `LIVE LLM · LIVE SEARCH`. Pinned `tavily-python==0.8.0`, process-scoped `LiveSearchRuntime`, real `TavilySearchProvider` behind the same `SearchProvider` Protocol; real multi-stage discovery (`engine/discovery.py` — bounded search → `DISCOVERY_EXTRACTION` LLM → deterministic/`DOMAIN_SELECTION`-fallback domain resolution → identity gate), never a model-authored domain; real per-company retrieval reusing H1's winner-selection + one batched Tavily `extract()` call per prospect; a real bug fixed in `engine/steps/research.py` (Evidence origin/URL used to be hardcoded to `DEMO_FIXTURE`/`None` regardless of what actually produced it); NEW Live Mode requires BOTH OpenAI and Tavily runtimes, never a fixture-search fallback; historical Checkpoint G `provider_profile` rows render unchanged. Demo Mode preserved byte-identical at every gate. |
+| **I1 — Production Foundation** | *this commit* (branch `claude/checkpoint-i1-foundation-i1raj1`) | Makes the prototype deployable without changing what it computes. DB-correct atomic SSE sequencing (`UPDATE...RETURNING`, replacing app-level `MAX(seq)+1`); an ownership-safe execution lease (`executor_id`/heartbeat/reaper) so a second local process or a fast restart never double-finalizes a run, with no auto-resume by design; optional Postgres support behind the same `DATABASE_URL` seam (SQLite unchanged as local-dev default; Alembic manages Postgres, drift-tested against a real instance); a non-persisting play-preview endpoint; an operator-gated Live Mode (signed session cookie + CSRF) on top of the existing provider-configuration gate, with Live cost/abuse controls (active-run cap, daily allowance, in-process rate limits); security/observability hardening (request-id middleware, body-size cap, trusted-host check, catch-all error handler, dual-point secret redaction, structured JSON logging); a `/api/ready` endpoint distinct from `/api/health`; a single API `Dockerfile` + frontend prod config; PR CI (SQLite + Postgres service container + migration drift + frontend lint/typecheck/build + Docker build), zero paid provider calls. **Zero cloud resources provisioned — that's Checkpoint I2, explicitly not started.** Demo Mode preserved byte-identical at every phase gate. |
 
 ---
 
 ## Current checkpoint
 
-**H2 — real live web search.** Checkpoints A–H1 remain intact; H2 adds the real Tavily adapter and
-multi-stage discovery/retrieval pipeline described above, while Demo Mode and historical Checkpoint G
-runs stay byte-identical/truthful. See "What Checkpoint H2 added" below for the full implementation.
+**I1 — Production Foundation, complete.** Checkpoints A–H2 remain intact and byte-identical; I1 adds
+the deployability work described above. See "What Checkpoint I1 added" below for the full
+phase-by-phase implementation, verification, and deviations.
 
 A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-further work. **Do not begin a new checkpoint** without the user explicitly asking.
+further work. **Do not begin Checkpoint I2 (real cloud deployment) without the user explicitly
+asking** — see `docs/DEPLOYMENT.md` for what it would need.
 
 ---
 
@@ -2543,48 +2545,238 @@ introduced.
 
 ---
 
+## What Checkpoint I1 added
+
+**Goal:** make the prototype deployable — able to survive a restart, a real Postgres database, and
+being shown to strangers safely — without changing anything about what it computes. Demo Mode verified
+byte-identical (Northwind Labs 92, Riverbend Analytics 35, Cobalt Retail Systems 25/`REJECTED`, Ferrous
+Grid 58, Sable Compute 79; `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`) at every phase gate.
+**No cloud resource of any kind was provisioned — that is Checkpoint I2, explicitly out of scope and
+not started.**
+
+**Phase 1 — dependencies/config seam.** Added `alembic`, `asyncpg`, `itsdangerous` as real dependencies
+(pinned via `uv.lock`). `config.py` gained `environment`/`log_level`, DB pool sizing
+(`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`/`DB_POOL_PRE_PING`), and a `cors_origins`/`trusted_hosts`
+`Annotated[list[str], NoDecode]` seam (pydantic-settings would otherwise try to JSON-decode a plain
+comma-separated env string before any validator runs).
+
+**Phase 2 — datetime normalization** (`groundwork/timeutil.py`, new): `utcnow()`/`ensure_aware()`/
+`elapsed_seconds()`. Root cause: SQLite silently drops tzinfo on a `DateTime(timezone=True)` round-trip
+(verified empirically, not assumed) while Postgres preserves it — every comparison/elapsed-time
+calculation across the codebase now goes through `ensure_aware()` so both dialects behave identically.
+`models/tables.py` centralized on one module-level `DateTime = _SADateTime(timezone=True)`.
+
+**Phase 3 — DB-correct SSE sequencing.** `run_events.seq` assignment moved from an application-level
+`MAX(seq)+1` read (a real race under concurrent writers on any dialect) to a single atomic
+`UPDATE runs SET last_event_seq = last_event_seq + 1 ... RETURNING last_event_seq` per event —
+`RunRow` gained `last_event_seq`; `EventRepository.append()` rewritten around it. Verified correct
+under real concurrent writers against both SQLite and Postgres (`tests/test_event_sequencing.py`,
+parametrized via `tests/dialect_helpers.py`). `after_seq` cursor semantics on the read/SSE-replay side
+are unchanged.
+
+**Phase 4 — ownership-safe execution lease.** `RunRow` gained `executor_id`/`heartbeat_at`. Each
+process mints one `executor_id` (UUID) at startup (`main.py`'s `lifespan`); every run it drives
+heartbeats on `EXECUTOR_HEARTBEAT_INTERVAL_S` (default 10s) via a dedicated coroutine
+(`api/run_service.py::_heartbeat_loop`). A background reaper (`main.py::_reaper_loop`, interval
+`EXECUTOR_REAPER_INTERVAL_S`) and a startup-time one-shot reap both call
+`RunRepository.reap_stale(stale_before)`, which only transitions a `RUNNING` row to `INTERRUPTED` when
+its heartbeat is actually older than `EXECUTOR_STALE_THRESHOLD_S` (default 60s) — a fast restart racing
+its own still-healthy run never cuts it short. Every finalize path (`finalize_owned`,
+`interrupt_owned_by_executor`) is a guarded `UPDATE ... WHERE executor_id = :this_process` — a process
+that loses its lease mid-run logs a warning and does **not** overwrite whatever terminal state already
+landed. Shutdown drains in-flight runs for `SHUTDOWN_DRAIN_TIMEOUT_S` (default 20s) then
+force-interrupts whatever it still owns. **No run is ever auto-resumed** — deliberate, not a gap; a
+rerun is always a new run through the normal API. Verified under real concurrent "two processes racing
+for the same run" scenarios against both SQLite and Postgres (`tests/test_execution_lease.py`).
+
+**Phase 5 — Alembic migrations.** `alembic/env.py` rewritten to read `DATABASE_URL` through the same
+`db_url.py::normalize_database_url()` the app itself uses (plus an explicit `-x database_url=`
+override for tooling/CI). One autogenerated migration
+(`alembic/versions/38cbecdcd585_initial_schema.py`) matches `Base.metadata` exactly — verified via
+SQLAlchemy's `compare_metadata` against both a fresh SQLite file and a real local Postgres instance
+(`tests/test_migration_drift.py`), and verified idempotent (`upgrade head` twice is a no-op the second
+time). `db.py::schema_upgrade_problems()` now delegates to a real Alembic head-vs-current check
+(`migration_status.py`) instead of the old hand-maintained column-probing heuristic. SQLite's schema
+stays managed by `create_all_if_sqlite()` — Alembic never touches it; only Postgres is migration-managed.
+
+**Phase 6 — local Postgres bring-up + verification.** PostgreSQL 16 installed and run natively in this
+session's sandbox (`service postgresql start`) — **the Docker daemon was unavailable in this sandbox at
+the time** (no privileged access; a deliberate, documented deviation from "container" wording, still
+fully local and zero cloud resources). The full dual-dialect test suite (`GROUNDWORK_TEST_POSTGRES_DSN`
+set) was run repeatedly against this real instance throughout I1, not just once — including the final
+regression (see below). `db_url.py::normalize_database_url()` handles `sslmode`/`channel_binding` query
+params (maps safe values to asyncpg connect kwargs, drops what asyncpg doesn't need, raises on
+`channel_binding=require` since asyncpg doesn't support SCRAM channel binding).
+
+**Phase 7 — non-persisting play preview.** `POST /api/plays/preview` (`PlayPreviewRequest`/
+`PlayPreviewResponse`) runs the exact same objective-parsing path `POST /api/plays` uses, with **zero**
+DB writes — no `Play` row, no `llm_calls` row, even on the Live LLM path. Lets the New Play form show a
+live-parsed `PlaySpec` preview as the user types without creating garbage Play rows per keystroke, and
+without spending a real LLM call's telemetry write for something never actually run. Rate-limited
+separately (`PREVIEW_RATE_LIMIT_ATTEMPTS`/`_WINDOW_S`) from real writes.
+
+**Phase 8 — operator session + Live gate.** `api/operator_auth.py`: `itsdangerous.
+URLSafeTimedSerializer`-signed session cookie, `hmac.compare_digest` constant-time passphrase check,
+`SESSION_SIGNING_KEY_OLD` fallback for key rotation without invalidating live sessions.
+`POST/DELETE /api/operator/session` (login/logout). `api/live_gate.py::enforce_live_gate()` — wired
+into every Live-Mode-reachable route (play create/list/get, run start/get/stream, prospect
+get/approve/reject) — requires an operator session **in addition to** the existing provider-key
+configuration check; Demo Mode routes are completely unaffected (no `if demo mode` branch — the gate
+itself is mode-aware, not the routes). CSRF protection via Origin-header validation on unsafe methods
+(`api/live_gate.py::require_allowed_origin`) — a distinct control from CORS, which only governs
+browser-enforced response readability, not request origin.
+
+**Phase 8B — Live cost/abuse controls.** `LIVE_MAX_ACTIVE_RUNS` (default 1) and
+`LIVE_DAILY_RUN_ALLOWANCE` (default 10) enforced via `RunRepository.count_active_by_mode`/
+`count_started_since` — correct across multiple processes since they read the shared `runs` table.
+`api/rate_limit.py::SlidingWindowRateLimiter` — in-process, explicitly documented as correct for one
+instance only — applied to operator login, public writes, and preview separately.
+
+**Phase 9 — security/API/frontend hardening.** `api/middleware.py`: `MaxBodySizeMiddleware`
+(`MAX_REQUEST_BODY_BYTES`, raw ASGI, not `BaseHTTPMiddleware` — which breaks SSE `StreamingResponse`),
+`RequestIdMiddleware` (stamps every response/log line). `TrustedHostMiddleware` wired with
+`TRUSTED_HOSTS`. `api/errors.py` gained `UnauthorizedError`/`ForbiddenError`/`TooManyRequestsError` and
+a catch-all `Exception` handler — every unhandled bug still returns the same RFC-7807-ish JSON shape
+(never Starlette's bare-text default), logs a redacted traceback server-side unconditionally, and
+returns environment-conditional detail (opaque in `production`, the real redacted message otherwise).
+Redaction now happens at two independent points, not one: at DB persistence (`runs.error`/
+`agent_tasks.error_message`/`llm_calls` — already existed, extended to `finalize_owned`/
+`interrupt_owned_by_executor`'s error paths) and, new in this phase, at the logging boundary itself
+(Phase 9C). Frontend: `app/error.tsx`/`app/not-found.tsx` added; `lib/useRunStream.ts` gained a
+degraded-state distinction, jittered/bounded reconnect, and `credentials: "include"`; `lib/api.ts`
+gained a `NetworkError` class (distinct from a real API error response) and operator login/logout
+wrappers; `app/plays/new/page.tsx` reworked with explicit three-state Live gating (`providersConfigured`
+/`operatorLoginConfigured`/`isOperator`) and an operator unlock/lock UI.
+
+**Phase 9B — readiness endpoint.** `GET /api/health` (process liveness only, never touches the DB) vs.
+`GET /api/ready` (a real `SELECT 1` + Alembic schema-currency check + provider *configuration* check,
+never a live provider call) — deliberately separate so a slow Postgres blip never looks like a process
+that needs restarting. SQLite is special-cased to report `"not_tracked (sqlite, managed by
+create_all)"` rather than failing readiness on the (correct, but locally irrelevant) "predates Alembic"
+check every local SQLite file would otherwise trip.
+
+**Phase 9C — structured logging.** `logging_config.py` (new): a stdlib `logging.config.dictConfig`-based
+`JsonFormatter` — no vendor SDK (Sentry/Datadog/etc.). Every log record's message and any exception
+traceback is passed through the same `redact()` used at the DB boundary, as a safety net, not a
+replacement for redacting before logging. Contextual fields (`request_id`/`run_id`/`prospect_id`/
+`executor_id`/`latency_ms`) are included only when present via `extra={...}` at the call site — threaded
+through `engine/llm.py::call_structured()`, `engine/search.py::call_search()`, `main.py`'s
+startup/shutdown/reaper logs, `api/errors.py`'s catch-all handler, `api/run_service.py`'s
+heartbeat/finalize warnings, and `engine/runner.py`'s ownership-lost warning. `tests/
+test_logging_config.py` (new) verifies valid JSON output, secret redaction in both the message and an
+exception traceback, and that contextual fields appear only when actually supplied.
+
+**Phase 10 — packaging/Docker/frontend prod config.** `apps/api/Dockerfile` (pinned `python:3.11-slim`,
+`uv==0.5.11` installed from PyPI rather than copied from the `ghcr.io/astral-sh/uv` image — this
+sandbox's egress policy blocks GHCR blob hosts, so PyPI is the only registry dependency this build has;
+a real CI runner with normal registry access is unaffected either way), deterministic `uv sync --frozen`
+install (dependencies layer cached separately from application code), non-root user, no `--reload`,
+`0.0.0.0`/`${PORT:-8000}`, `--workers 1` (explicit — this prototype is single-instance by design, see
+`docs/DEPLOYMENT.md`), zero secrets baked in (`.dockerignore` excludes `.env*`/`*.db*`/`tests`).
+`apps/api/.python-version` (`3.11`). `apps/web/.env.example` + `.gitignore` fix (the blanket `.env*`
+ignore previously had no `!.env.example` exception, unlike the root `.gitignore` — would have silently
+made the file un-committable). `apps/web/package.json` gained `engines.node >= 20.9.0` and a
+`typecheck` script (`tsc --noEmit`); `apps/web/.nvmrc` (`20.9.0`). `make docker-build` added.
+
+**Phase 10B — CI.** `.github/workflows/ci.yml` (new, this repo had no CI before I1): four jobs —
+`backend-sqlite` (the default `pytest` run, no Postgres), `backend-postgres` (identical suite, plus a
+Postgres service container with `GROUNDWORK_TEST_POSTGRES_DSN` set — this is what actually exercises
+every dual-dialect test including migration drift), `frontend` (lint → typecheck → build), and
+`api-docker-build` (builds the image, never pushes it anywhere). Zero paid provider network calls, zero
+production database, zero secrets, zero cloud deployment step anywhere in the workflow.
+
+**Phase 11 — docs/runbook.** `docs/DEPLOYMENT.md` (new) and `docs/RUNBOOK.md` (new); `README.md`,
+`docs/ARCHITECTURE.md`, this file, and `docs/IMPLEMENTATION_PLAN.md` (a short addendum only — that
+document stays a historical record of the original P0 plan, per the precedent already set by
+Checkpoints G/H1/H2 never being retrofitted into it) all updated to reflect I1.
+
+---
+
+## Verification
+
+- **Backend tests**: final regression — **429 passed, 1 skipped** on SQLite alone (`uv run pytest`,
+  the skip is the Postgres-only migration-drift test with no DSN configured) and **448 passed, 0
+  skipped** on the identical run with `GROUNDWORK_TEST_POSTGRES_DSN` set against a real local Postgres
+  instance (the 19 extra passes are every dual-dialect test's Postgres parametrization, including
+  migration drift, run for real rather than skipped). Baseline before I1 was 425 passed/SQLite-only;
+  I1 added the tests enumerated by phase above.
+- **Canonical Demo Mode**: `rm -f groundwork.db* && python -m groundwork.scripts.run_demo` re-verified
+  after essentially every phase — Northwind Labs 92/PASS, Riverbend Analytics 35/NEEDS_REVIEW, Northwind
+  Labs Inc./DUPLICATE, Cobalt Retail Systems 25/REJECTED, Ferrous Grid 58/NEEDS_REVIEW, Quarry
+  Systems/FAILED, Sable Compute 79/PASS — `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1` every
+  single time, byte-identical.
+- **Frontend**: `pnpm lint` and `pnpm build` (Next.js production build, Turbopack) both clean;
+  end-to-end browser verification via Playwright (a globally-installed npm package driven directly, no
+  project skill existed for this repo's frontend yet) — a full Demo run through the actual UI with zero
+  console errors, plus the reworked New Play Live-gating states screenshotted.
+- **Docker**: the image builds successfully up through dependency resolution and installation
+  (`uv sync --frozen` against the committed lockfile, verified directly outside the container image
+  too, in an isolated venv, importing `groundwork.main:app` cleanly with only non-dev dependencies
+  installed) but this specific sandbox's egress policy blocks both `docker.io` and `ghcr.io` blob-hosting
+  CDNs (confirmed via the proxy's own status endpoint: `403` policy denial on both
+  `pkg-containers.githubusercontent.com` and `production.cloudfront.docker.com`), so a full `FROM
+  python:3.11-slim` pull could not complete inside this session. This is a sandbox network-policy
+  limitation, not a Dockerfile defect — CI's `api-docker-build` job runs on a normal GitHub Actions
+  runner with standard registry access and is expected to complete there.
+
+---
+
+## Known issues / deviations (I1)
+
+- **Local Postgres was run natively, not in a Docker container**, because the Docker daemon was
+  unavailable in this sandbox for most of the session (no privileged access) — this is the same
+  category of environment constraint as the registry-pull block above, not a scope decision. Still
+  fully local; zero cloud resources.
+- **A full end-to-end `docker build` could not be completed inside this sandbox** (registry pulls
+  blocked by org egress policy, both `docker.io` and `ghcr.io`) — see Verification above for exactly
+  how far it was validated and why the CI job is expected to succeed on a normal runner regardless.
+- **`scripts/prod_smoke.py` is author-only and has never been run against a real deployment**, because
+  no real deployment exists yet (Checkpoint I2). It exists so a future session has something ready to
+  run the moment I2 provisions a real target.
+- **Horizontal scaling is explicitly not supported** — the in-process rate limiters would need to move
+  to shared state first. Documented in `docs/DEPLOYMENT.md`/`docs/RUNBOOK.md`, not silently glossed
+  over.
+- **No automated `run_events`/`llm_calls`/`search_calls` retention/pruning** — append-only growth is
+  fine at prototype scale; a long-lived real deployment would need a retention policy, not built here.
+
+---
+
 ## Next task
 
-**Checkpoint H2 is complete and CONFIRMED WORKING END-TO-END against real providers. Do not begin
-another checkpoint without the user explicitly asking.** All Checkpoints A–H1 behavior remains unchanged
-and verified byte-identical; H2 adds the real Tavily search adapter and real multi-stage discovery/
-domain-resolution/per-company-retrieval, and fixed three real bugs found across three real smokes — the
-Evidence-provenance hardcoding bug (found before the first real smoke), the DISCOVERY_EXTRACTION
-deadline/diagnostics gap (found from the first real smoke's output), and OpenAI quota/credit exhaustion
-being misclassified as a retryable rate limit (found from the second real smoke's output) — see "First
-real H2 smoke", "Second real H2 smoke", and "Third real H2 smoke" above for the full root causes, fixes,
-and the successful confirming run (a real prospect, Lambda/`lambda.ai`, discovered, researched, scored,
-and correctly routed to `NEEDS_REVIEW` on insufficient real evidence). Zero real (paid) provider calls
-were made in this checkpoint's implementation or any hardening pass — only the three real smokes the
-user ran directly. **No further H2 smoke is required; H2 is ready to merge.**
+**Checkpoint I1 — Production Foundation is complete. Do not begin Checkpoint I2 (real cloud deployment)
+without the user explicitly asking.** All Checkpoints A–H2 behavior remains unchanged and verified
+byte-identical; I1 adds the deployability work in "What Checkpoint I1 added" above. Zero cloud resources
+were provisioned; zero real (paid) OpenAI/Tavily calls were made anywhere in I1's implementation, tests,
+or CI.
 
-**What a future session should look at next**, in `docs/IMPLEMENTATION_PLAN.md` §5's remaining order —
-**deployment → MCP shim → polish**:
+**What a future session should look at next, in order:**
 
-1. **Run `make search-smoke` for real** (with explicit user approval) — confirm/correct the
-   `include_usage`/`credits` shape assumption, confirm real discovered companies look sane, take the
-   Live-mode screenshots (New Play Live, a completed real-search Run Detail, Quality Search section,
-   real-shaped Prospect Detail) the task's final acceptance checklist asks for — these were not possible
-   this session without real credentials.
-2. **`CompanyRow.profile`/company header refresh post-research** — real discovered companies currently
-   keep their discovery-time `"unknown"` industry/size placeholders in `CompanyRow.profile` even after
-   research independently grounds the real `IndustryProfileFact`/`EmployeeCountProfileFact` — a known,
-   minor UX gap (see "Deviations" above), not urgent, not a scoring/correctness issue.
-3. **Deployment** — currently local-only by design (§27); optional.
-4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools.
-5. **Polish backlog** (not required, noted for completeness):
+1. **Checkpoint I2 — real cloud deployment**, only if the user explicitly asks for it. Everything it
+   needs is enumerated in `docs/DEPLOYMENT.md`'s "What a real deployment still needs" section: provision
+   Postgres, provision an API host (the committed Dockerfile), provision a frontend host, set
+   `CORS_ORIGINS`/`TRUSTED_HOSTS` for the real domain, decide on horizontal scaling (requires moving the
+   in-process rate limiters to shared state first — see `docs/RUNBOOK.md`), decide on secrets management
+   for the chosen platform, then run `alembic upgrade head` once and `scripts/prod_smoke.py` before
+   trusting it with traffic.
+2. **Run `make search-smoke` for real** (H2's own still-open item, with explicit user approval) —
+   confirm/correct the `include_usage`/`credits` shape assumption, take the Live-mode screenshots (New
+   Play Live, a completed real-search Run Detail, Quality Search section, real-shaped Prospect Detail).
+3. **`CompanyRow.profile`/company header refresh post-research** (H2's own still-open item) — real
+   discovered companies keep their discovery-time `"unknown"` industry/size placeholders even after
+   research independently grounds the real facts. Minor UX gap, not a correctness issue.
+4. **MCP shim** — exposing Groundwork's play/run/prospect operations as MCP tools. Not started.
+5. **Polish backlog** (not required, noted for completeness — unchanged by I1 except where marked):
    - A graphical trace waterfall instead of `TraceTable` (explicitly cut from P0, §5/§34).
    - A standalone cross-run evaluation page (the Quality tab is the P0 scope; §16 names a standalone
      page as P1).
-   - `POST /runs/{id}/cancel` (explicitly cut from P0, §5).
+   - `POST /runs/{id}/cancel` (explicitly cut from P0, §5, and explicitly re-confirmed out of scope for
+     I1).
    - Draft edit/regenerate on outreach.
    - Frontend automated tests — `apps/web/package.json` has no test runner configured; every checkpoint
-     from D onward has verified via build/lint gates and browser rehearsal instead. Worth adding
-     Playwright/component tests as first P1-adjacent hardening if this project continues past the
-     interview.
-   - Expose `max_concurrent_prospects` via `GET /settings/providers` so
-     `lib/constants.ts::MAX_CONCURRENT_PROSPECTS` stops needing to be hand-kept in sync with
-     `config.py`.
+     has verified via build/lint gates and browser rehearsal instead. Worth adding Playwright/component
+     tests as first P1-adjacent hardening if this project continues.
+   - ~~Expose `max_concurrent_prospects` via `GET /settings/providers`~~ — **done in I1** (Phase 9); the
+     old `lib/constants.ts` hand-kept constant is deleted.
    - A real per-run `plan.created` event / rendered plan panel, if a future checkpoint wants the DAG
      itself surfaced in the UI (currently `RunRow.plan` stays `[]` since the pipeline is the same fixed
      7-step list every run).
@@ -2625,9 +2817,11 @@ user ran directly. **No further H2 smoke is required; H2 is ready to merge.**
   useRunStream.ts`'s manual-reconnect-over-native-EventSource-retry design and its synchronous
   terminal-status handling for `run.completed`/`run.failed` (removing either reintroduces the
   duplicate-replay-on-reconnect bug and the false-positive-reconnect-on-clean-close race respectively,
-  both hit and fixed during this checkpoint's own testing); `lib/constants.ts::MAX_CONCURRENT_PROSPECTS`
-  should track `config.py` by hand until/unless a future checkpoint exposes it via `GET
-  /settings/providers`, not be silently guessed at a different value.
+  both hit and fixed during this checkpoint's own testing). **Superseded by Checkpoint I1:**
+  `lib/constants.ts::MAX_CONCURRENT_PROSPECTS` (the hand-kept-in-sync constant this note used to warn
+  about) is gone — `GET /settings/providers` now returns `max_concurrent_prospects` directly from
+  `config.py`, and the frontend reads it from there; do not reintroduce a hardcoded frontend constant
+  for it.
 - **Checkpoint E's own do-not-touch:** `EvidenceCard.tsx`'s origin gate
   (`origin === "LIVE_FETCH" && source_url`) is the frontend half of the §12 provenance invariant —
   don't relax it to show a link for any other origin, even if a future fixture accidentally carries a
@@ -2742,3 +2936,24 @@ user ran directly. **No further H2 smoke is required; H2 is ready to merge.**
   retry set. `search_smoke.py::_describe_error()`/`_QUOTA_EXHAUSTED_MESSAGE` must never be replaced with
   code that echoes a raw provider error string for this case — real OpenAI quota-exhaustion messages
   embed a billing URL.
+- **Checkpoint I1's own do-not-touch:** `repositories/events.py::EventRepository.append()`'s atomic
+  `UPDATE ... RETURNING` sequencing must not regress to an application-level `MAX(seq)+1` read — that
+  reintroduces the exact race this phase closed. `repositories/runs.py`'s lease-guarded methods
+  (`finalize_owned`, `interrupt_owned_by_executor`, `reap_stale`) must stay `UPDATE ... WHERE
+  executor_id = :x AND status = 'RUNNING'`-shaped — never a read-then-write, and never finalize/interrupt
+  a run without checking `executor_id` ownership first. **No run is ever auto-resumed** — don't add that;
+  a rerun is always a new run through the normal API, by design. `main.py`'s `app.state.executor_id` is
+  minted exactly once per process at startup — don't move it into a request-scoped dependency or
+  regenerate it per request. `db_url.py::normalize_database_url()` must keep raising on
+  `channel_binding=require` rather than silently dropping it (asyncpg doesn't support SCRAM channel
+  binding — silently ignoring the param would be a false sense of security, not a compatibility shim).
+  `api/live_gate.py::enforce_live_gate()` must stay mode-aware inside the gate itself, never as an `if
+  demo_mode` branch inside a router/step/domain function — Demo Mode must never gain an operator-session
+  dependency. `logging_config.py`'s redaction-at-the-logging-boundary is a safety net on top of
+  redaction-at-persistence, not a replacement for it — don't remove either. SQLite's schema stays
+  `create_all()`-managed, never Alembic-managed — don't add an Alembic migration path for SQLite; that
+  would break `make demo-reset`'s "resettable in under a second" property for no benefit, since SQLite
+  local dev never needs migration history. The Dockerfile's `--workers 1` and the explicit
+  "horizontal scaling is not supported" documentation in `docs/DEPLOYMENT.md`/`docs/RUNBOOK.md` must not
+  be silently contradicted by a future change (e.g. bumping `--workers`) without first moving the
+  in-process rate limiters (`api/rate_limit.py`) to shared state — see those docs for why.

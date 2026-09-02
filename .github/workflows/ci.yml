@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Checkpoint I1 Phase 10B — PR CI only. Every job runs entirely against
+# local/ephemeral resources (SQLite, a throwaway Postgres service
+# container, `Mode.DEMO` fixtures): zero paid OpenAI/Tavily calls, zero
+# production database, zero secrets, zero cloud deployment. Nothing here
+# pushes an image or provisions anything (that's Checkpoint I2).
+
+env:
+  UV_VERSION: "0.5.11"
+
+jobs:
+  backend-sqlite:
+    name: Backend tests (SQLite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: apps/api/.python-version
+      - name: Install uv
+        run: pip install "uv==${{ env.UV_VERSION }}"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run backend test suite (SQLite only)
+        run: uv run pytest -q
+
+  backend-postgres:
+    name: Backend tests (Postgres + migration drift)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: groundwork_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Dual-dialect tests (event sequencing, execution lease, migration
+      # drift) opt themselves into Postgres the moment this is set — see
+      # tests/dialect_helpers.py. Every other test still runs against its
+      # own throwaway SQLite file, exactly like the SQLite-only job above.
+      GROUNDWORK_TEST_POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@localhost:5432/groundwork_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: apps/api/.python-version
+      - name: Install uv
+        run: pip install "uv==${{ env.UV_VERSION }}"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run backend test suite (SQLite + Postgres, incl. migration drift)
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend lint / typecheck / build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: apps/web/.nvmrc
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10.33.0"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+
+  api-docker-build:
+    name: API Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (never pushed)
+        run: docker build -t groundwork-api:ci apps/api
