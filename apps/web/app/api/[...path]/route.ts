@@ -69,7 +69,14 @@ async function proxy(request: NextRequest): Promise<Response> {
   const upstreamUrl = `${origin}${request.nextUrl.pathname}${request.nextUrl.search}`;
   const headers = buildProxyRequestHeaders(request.headers);
   const hasBody = !BODYLESS_METHODS.has(request.method);
-  const body = hasBody ? await request.arrayBuffer() : undefined;
+  const rawBody = hasBody ? await request.arrayBuffer() : undefined;
+  // A genuinely bodyless request (this app's own DELETE calls, e.g.
+  // operator logout) must pass `undefined`, never a zero-length
+  // ArrayBuffer: some undici versions (confirmed on Node 20.9.0's bundled
+  // build, this repo's own pinned minimum) mis-derive Content-Length for a
+  // present-but-empty body and throw UND_ERR_REQ_CONTENT_LENGTH_MISMATCH,
+  // which this route would otherwise surface as an incorrect 502.
+  const body = rawBody && rawBody.byteLength > 0 ? rawBody : undefined;
 
   let upstreamResponse: Response;
   try {
