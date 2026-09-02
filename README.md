@@ -223,8 +223,12 @@ Real per-company retrieval reuses H1's exact winner-selection algorithm and extr
 (one batched call per prospect). A real bug was found and fixed along the way: `engine/steps/
 research.py` used to hardcode every Evidence row's origin to `DEMO_FIXTURE`/no-URL regardless of what
 actually produced it — harmless while only fixture search existed, but it would have silently mislabeled
-every real search result forever. Full detail, verified SDK facts, and known deviations in
-`docs/PROGRESS.md`'s H2 section.
+every real search result forever. **Confirmed working end-to-end against real OpenAI + real Tavily**: a
+real `make search-smoke` run discovered a real company (Lambda, `lambda.ai`, canonical domain derived
+only from a provider-returned URL) and carried it through research, scoring, and review — landing on
+`NEEDS_REVIEW` because real web evidence didn't establish enough scoring dimensions, which is correct
+behavior, not a bug. Full detail, verified SDK facts, and known deviations in `docs/PROGRESS.md`'s H2
+section.
 
 ---
 

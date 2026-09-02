@@ -1455,6 +1455,86 @@ balance to actually be topped up first, which is outside this session's control 
 
 ---
 
+## Third real H2 smoke — successful end-to-end run, H2 confirmed working
+
+The user ran `make search-smoke` for real a third time, after both post-smoke fixes above (the
+DISCOVERY_EXTRACTION deadline/diagnostics fix and the OpenAI quota-classification fix). **This run
+succeeded end-to-end** — the first time any real Live-search run has gone all the way from discovery
+through domain resolution, per-company retrieval, extraction, scoring, and review. This is a
+documentation-only update; no application code changed in this pass, and no further real smoke was run
+by this session.
+
+**Real providers:** OpenAI `gpt-5.6-terra`, reasoning effort `low`; search provider Tavily.
+
+**Discovery:** all 4 real Tavily discovery search calls succeeded. 33 search-result hits were fed to
+`DISCOVERY_EXTRACTION`, which proposed 20 company candidates; the server-side support check
+(`domain/discovery.py::company_name_textually_supported`) passed 18 of them and rejected 2 as
+`name_not_supported` — the validation gate doing exactly its job against real, messy web text, not an
+offline fixture.
+
+**Domain resolution:** 0 candidates resolved via the deterministic fast path in this particular run (no
+served candidate happened to be the sole, label-matching, structurally-safe one for any of them); 1
+resolved via the bounded `DOMAIN_SELECTION` LLM fallback — which, as designed, could only choose among
+candidates the engine had already independently verified safe from a provider-served URL. The one real
+prospect this run produced: **Lambda**, canonical domain **`lambda.ai`** — confirmed to have originated
+from a provider-returned URL, never model-authored text, consistent with the identity-gate invariant this
+checkpoint exists to enforce.
+
+**Real search/retrieval:** 8 total real `search_calls` across discovery + domain resolution + per-company
+retrieval + extraction; 48 source occurrences, 48 unique sources for this run (no duplicate URLs arose
+across these particular real queries — see the second post-smoke-hardening pass's dedupe re-verification
+for why this is expected, not a sign dedupe is bypassed). Tavily search, domain resolution, domain-scoped
+search, and Extract all succeeded; real provider request IDs and Tavily's native usage/credits were
+captured; no USD Tavily cost was invented (no trustworthy per-credit rate is configured — `cost_usd`
+correctly stayed null throughout, exactly as designed).
+
+**Real prospect result — Lambda (lambda.ai):**
+
+| Field | Value |
+|---|---|
+| Score | 22 |
+| Confidence | 0.43 |
+| Status | **NEEDS_REVIEW** |
+| `industry_fit` | SUPPORTED |
+| `size_fit` | UNKNOWN |
+
+**Review** — PASS: `claim_grounding`, `no_fabricated_contact`, `cross_prospect_leak`, `no_placeholders`,
+`duplicate_account`. FAIL (soft): `score_support` (5 unsupported dimensions against a threshold of 2),
+`confidence_floor` (0.43 confidence below the 0.60 floor).
+
+**`NEEDS_REVIEW` here is correct behavior, not a defect.** Real web evidence for this real company was
+insufficient to independently establish enough of the eight scoring dimensions — `size_fit` stayed
+`UNKNOWN` because no explicit employee-count number was ever found in cited text (never inferred, never
+guessed), and several other dimensions lacked supporting evidence entirely. Groundwork's deterministic
+review correctly downgraded the outcome rather than manufacturing confidence it didn't have — this is
+precisely the "structurally cannot fabricate certainty" behavior the whole architecture exists to
+guarantee, now demonstrated against a real company on the real open web, not just fixture data.
+
+**Fix validation summary, across all three real smokes this checkpoint has now seen:**
+
+1. The first real smoke found `DISCOVERY_EXTRACTION` exhausting its transport-retry budget against a
+   shared 30s deadline sized for smaller per-prospect operations. Fixed with an operation-specific 60s
+   deadline (`LLM_DISCOVERY_CALL_DEADLINE_S`) and much richer discovery-funnel diagnostics.
+2. The second real smoke found a real OpenAI quota/credit exhaustion (`type=insufficient_quota,
+   code=credit_balance_exhausted`) misclassified as an ordinary retryable rate limit, burning the entire
+   retry budget on an unrecoverable failure. Fixed with a new permanent `QUOTA_EXHAUSTED`/
+   `ProviderQuotaExceeded` classification, reusing the existing permanent-error machinery.
+3. This third real smoke is the validation that both fixes actually work together end-to-end: real
+   discovery survived `DISCOVERY_EXTRACTION` without a deadline exhaustion, no quota error occurred (or if
+   one had, it would now fail fast with a clean diagnostic instead of burning retries), and the run
+   reached every subsequent stage — domain resolution, per-company retrieval, extraction, scoring, and
+   review — for the first time.
+
+**Final verification state:**
+
+- 310/310 automated tests were green before this smoke (offline/scripted only — this smoke itself made
+  the only real provider calls, run directly by the user, not by this session).
+- Canonical Demo remains byte-identical.
+- **No further H2 smoke is required.** H2 is confirmed working end-to-end against real providers and is
+  ready to merge.
+
+---
+
 ## Tests written and verified
 
 All commands run from `apps/api/`. **63/63 passing** (`uv run pytest`, ~25s — up from Checkpoint B's
@@ -2465,25 +2545,18 @@ introduced.
 
 ## Next task
 
-**Checkpoint H2 is complete, including two post-real-smoke hardening passes. Do not begin another
-checkpoint without the user explicitly asking.** All Checkpoints A–H1 behavior remains unchanged and
-verified byte-identical; H2 adds the real Tavily search adapter, real multi-stage discovery/domain-
-resolution, real per-company retrieval/extraction, and fixed three real bugs found across two real
-smokes — the Evidence-provenance hardcoding bug (found before the first real smoke), the
-DISCOVERY_EXTRACTION deadline/diagnostics gap (found from the first real smoke's output), and OpenAI
-quota/credit exhaustion being misclassified as a retryable rate limit (found from the second real
-smoke's output) — see "First real H2 smoke" and "Second real H2 smoke" above for the full root causes
-and fixes. Zero real (paid) provider calls were made in this checkpoint's implementation or either
-hardening pass — only the two real smokes the user ran directly. `scripts/search_smoke.py` exists and
-was hardened twice but **not run again** by this session either time.
-
-**Recommended next step, not yet done:** once the OpenAI account/project's credit balance is topped up,
-run `make search-smoke` again — this is the only way to confirm the deadline fix AND the quota-
-classification fix together actually get a real run past `DISCOVERY_EXTRACTION` to real domain
-resolution, real per-company retrieval, and real `LIVE_FETCH` evidence, which this checkpoint has only
-ever been verified against offline fixtures for. `include_usage`'s response shape
-(`{"usage": {"credits": <float>}}`) is already confirmed correct by both real smokes (`credits=4.0`
-observed twice) — that specific ambiguity is resolved.
+**Checkpoint H2 is complete and CONFIRMED WORKING END-TO-END against real providers. Do not begin
+another checkpoint without the user explicitly asking.** All Checkpoints A–H1 behavior remains unchanged
+and verified byte-identical; H2 adds the real Tavily search adapter and real multi-stage discovery/
+domain-resolution/per-company-retrieval, and fixed three real bugs found across three real smokes — the
+Evidence-provenance hardcoding bug (found before the first real smoke), the DISCOVERY_EXTRACTION
+deadline/diagnostics gap (found from the first real smoke's output), and OpenAI quota/credit exhaustion
+being misclassified as a retryable rate limit (found from the second real smoke's output) — see "First
+real H2 smoke", "Second real H2 smoke", and "Third real H2 smoke" above for the full root causes, fixes,
+and the successful confirming run (a real prospect, Lambda/`lambda.ai`, discovered, researched, scored,
+and correctly routed to `NEEDS_REVIEW` on insufficient real evidence). Zero real (paid) provider calls
+were made in this checkpoint's implementation or any hardening pass — only the three real smokes the
+user ran directly. **No further H2 smoke is required; H2 is ready to merge.**
 
 **What a future session should look at next**, in `docs/IMPLEMENTATION_PLAN.md` §5's remaining order —
 **deployment → MCP shim → polish**:
