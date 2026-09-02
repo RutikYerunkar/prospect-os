@@ -2741,6 +2741,38 @@ Checkpoints G/H1/H2 never being retrofitted into it) all updated to reflect I1.
 
 ---
 
+## Post-push CI fix: `pnpm typecheck` failed on a clean checkout
+
+**A real bug in this checkpoint's own Phase 10B work, caught by GitHub Actions on PR #10, not by local
+verification** — the "Frontend lint / typecheck / build" job failed with
+`app/layout.tsx(16,50): error TS2304: Cannot find name 'LayoutProps'`. Root cause: `LayoutProps<"/">`
+is an ambient global type Next.js 16 generates into `.next/types/` — it only exists after `next build`
+or `next dev` has run at least once; it is not a type anyone imports. `apps/web/tsconfig.json` already
+includes `.next/types/**/*.ts` in its `include` list, so `tsc --noEmit` finds it fine **once `.next`
+exists** — but a fresh CI checkout has no `.next` directory, and this checkpoint's own
+`pnpm typecheck` script (`tsc --noEmit`, no typegen step) never generated one before invoking `tsc`.
+
+**Why local verification didn't catch it**: this session's own `apps/web` working directory already
+had a stale `.next/types/` left over from earlier `pnpm build` runs in the same session, so
+`pnpm typecheck` kept passing locally by accident — it was never actually run against a clean checkout
+before being pushed. Reproduced directly: `rm -rf .next && pnpm typecheck` fails with the exact CI
+error; confirmed the fix by re-running the identical sequence.
+
+**Fix**: `apps/web/package.json`'s `typecheck` script is now `next typegen && tsc --noEmit` —
+`next typegen` ("Generate TypeScript definitions for routes, pages, and layouts without running a full
+build," confirmed via `npx next --help`) is the correct, minimal way to make the script self-sufficient
+regardless of whether `.next` already exists, rather than relying on step ordering in the CI workflow
+(which would leave `pnpm typecheck` still broken for anyone running it standalone on a clean clone).
+Re-verified end to end on a clean `.next`, in CI's exact step order: `rm -rf .next && pnpm lint &&
+pnpm typecheck && pnpm build` — all three clean. `git status` after this fix showed only
+`apps/web/package.json` changed — no stray files from running `next typegen`/`next build` locally.
+
+**Do not revert `typecheck` back to a bare `tsc --noEmit`** — that reintroduces this exact failure on
+every clean checkout (CI, and any contributor's fresh clone), even though it can appear to work in an
+already-built local working directory.
+
+---
+
 ## Next task
 
 **Checkpoint I1 — Production Foundation is complete. Do not begin Checkpoint I2 (real cloud deployment)
