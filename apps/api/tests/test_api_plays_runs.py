@@ -3,7 +3,7 @@ GET /plays, GET /plays/{id}, GET /runs/{id}."""
 
 from __future__ import annotations
 
-from tests.api_helpers import create_play, start_run, wait_for_terminal
+from tests.api_helpers import create_play, login_as_operator, start_run, wait_for_terminal
 
 
 async def test_create_play_builds_play_spec_from_objective_and_overrides(client) -> None:
@@ -15,21 +15,37 @@ async def test_create_play_builds_play_spec_from_objective_and_overrides(client)
     assert play["runs"] == []
 
 
-async def test_create_play_accepts_live_mode_without_live_objective_parser(client) -> None:
+async def test_create_play_live_mode_requires_operator_session(client) -> None:
+    """Checkpoint I1 Phase 8: `mode="live"` alone grants nothing."""
+    r = await client.post("/api/plays", json={"objective": "test", "mode": "live"})
+    assert r.status_code == 401
+
+
+async def test_create_play_accepts_live_mode_without_live_objective_parser(client, monkeypatch) -> None:
     # Checkpoint G: Play creation itself never requires live credentials
     # unless the caller explicitly asks for the live objective parser.
     # Objective parsing stays deterministic here (parse_source reflects it).
+    # Checkpoint I1 Phase 8: an operator session is required for ANY
+    # mode="live" request, regardless of use_live_objective_parser.
+    await login_as_operator(client, monkeypatch)
     r = await client.post("/api/plays", json={"objective": "test", "mode": "live"})
     assert r.status_code == 201
     assert r.json()["parse_source"] == "deterministic"
 
 
-async def test_start_run_rejects_live_mode_without_configured_runtime(client) -> None:
+async def test_start_run_rejects_live_mode_without_configured_runtime(client, monkeypatch) -> None:
     # No OPENAI_API_KEY is configured in tests, so `app.state.live_runtime`
     # is None — Live Mode must 422 cleanly here, never fall back to Demo.
+    await login_as_operator(client, monkeypatch)
     play = await create_play(client)
     r = await client.post(f"/api/plays/{play['id']}/runs", json={"mode": "live"})
     assert r.status_code == 422
+
+
+async def test_start_run_live_mode_requires_operator_session(client) -> None:
+    play = await create_play(client)  # demo play; run-create body overrides to live
+    r = await client.post(f"/api/plays/{play['id']}/runs", json={"mode": "live"})
+    assert r.status_code == 401
 
 
 async def test_get_play_and_list_plays(client) -> None:

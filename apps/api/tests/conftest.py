@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 
 import httpx
 import pytest_asyncio
@@ -63,7 +64,21 @@ async def client(session_factory):
     `execute_run` tasks launched by a request run against this same DB.
     """
     app.dependency_overrides[get_session_factory] = lambda: session_factory
+    # No real lifespan runs under `ASGITransport` (deliberately — it would
+    # touch the real `groundwork.db`/live provider runtimes), so the one
+    # piece of `app.state` a request-time dependency reads unconditionally
+    # (`get_executor_id`, Checkpoint I1 Phase 4) needs a stand-in value.
+    # `live_runtime`/`live_search_runtime` don't need this: their
+    # dependencies default to `None` via `getattr(..., None)`.
+    app.state.executor_id = f"test-executor-{uuid.uuid4()}"
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    # A default `Origin` header matching `settings.cors_origins`' default
+    # (`http://localhost:3000`) — stands in for what a real browser always
+    # sends on an unsafe request from the actual frontend origin. Without
+    # this, every operator-session/Live-mode POST in the suite would need
+    # to set it individually to pass Phase 8's Origin/CSRF guard.
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"Origin": "http://localhost:3000"}
+    ) as c:
         yield c
     app.dependency_overrides.clear()

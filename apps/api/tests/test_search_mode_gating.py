@@ -13,6 +13,7 @@ from groundwork.main import app
 from groundwork.models.enums import Mode
 from groundwork.providers.base import ProviderNotConfigured
 from groundwork.providers.registry import build_provider_bundle
+from tests.api_helpers import login_as_operator
 
 
 def test_live_unavailable_without_search_runtime_even_with_llm_runtime() -> None:
@@ -30,10 +31,11 @@ def test_live_unavailable_with_neither_runtime() -> None:
         build_provider_bundle(Mode.LIVE, seed=1, live_runtime=None, search_runtime=None)
 
 
-async def test_start_run_422s_without_search_runtime(client, session_factory) -> None:
+async def test_start_run_422s_without_search_runtime(client, session_factory, monkeypatch) -> None:
     """`_require_search_runtime` in `api/routers/plays.py` — a real
     `LiveProviderRuntime` (OpenAI) but no `LiveSearchRuntime` (Tavily) must
     422, never silently fall back to `DemoSearchProvider`."""
+    await login_as_operator(client, monkeypatch)
 
     class _FakeLiveRuntime:
         pass
@@ -55,7 +57,9 @@ async def test_start_run_422s_without_search_runtime(client, session_factory) ->
         app.dependency_overrides.pop(get_live_search_runtime, None)
 
 
-async def test_start_run_422s_without_llm_runtime(client, session_factory) -> None:
+async def test_start_run_422s_without_llm_runtime(client, session_factory, monkeypatch) -> None:
+    await login_as_operator(client, monkeypatch)
+
     class _FakeSearchRuntime:
         pass
 
@@ -87,13 +91,31 @@ async def test_settings_endpoint_demo_mode_needs_zero_credentials(client, sessio
     assert body["live"]["llm_available"] is False
     assert body["live"]["search_available"] is False
     assert body["live"]["available"] is False
+    # Checkpoint I1 Phase 8/9
+    assert body["live"]["operator_login_configured"] is False  # unset in tests by default
+    assert body["live"]["is_operator"] is False
+    assert body["max_concurrent_prospects"] == 3
 
 
-async def test_historical_g_provider_profile_renders_fixture_search_unchanged(client, session_factory) -> None:
+async def test_settings_endpoint_reports_operator_login_configured_and_is_operator(client, monkeypatch) -> None:
+    await login_as_operator(client, monkeypatch)
+    resp = await client.get("/api/settings/providers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live"]["operator_login_configured"] is True
+    assert body["live"]["is_operator"] is True
+
+
+async def test_historical_g_provider_profile_renders_fixture_search_unchanged(client, session_factory, monkeypatch) -> None:
     """A Checkpoint-G-era run persisted `LIVE LLM · FIXTURE SEARCH` in its
     `provider_profile` JSON before H2 ever existed — this function is never
     called again for an existing run, so the row must render back exactly
-    as it was persisted, never silently rewritten to the H2 shape."""
+    as it was persisted, never silently rewritten to the H2 shape.
+
+    Checkpoint I1 Phase 8: reading a live run's detail requires an operator
+    session, historical or not.
+    """
+    await login_as_operator(client, monkeypatch)
     from groundwork.repositories.plays import PlayRepository
     from groundwork.repositories.runs import RunRepository
 

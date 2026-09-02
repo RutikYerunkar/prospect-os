@@ -316,6 +316,15 @@ being the right choice well before "agentic AI at scale" is the interesting prob
 The event log (`run_events`, append-only, replayed over SSE with a resumable `after_seq` cursor) was
 built the way a distributed system would need it to work anyway — not because 7 prospects require it.
 
+**Checkpoint I1** made the codebase deployable without changing what it computes: DB-correct SSE
+sequencing (an atomic `UPDATE ... RETURNING` counter, not app-level `MAX(seq)+1`), an ownership-safe
+execution lease so a second local process or a fast restart can never double-finalize a run, optional
+Postgres support behind the same `DATABASE_URL` seam (SQLite stays the local-dev default, Alembic
+manages Postgres, drift-tested in CI), an operator-gated Live Mode (Demo Mode stays fully public),
+structured JSON logging, and a Dockerfile + CI covering both dialects — all still local-only, zero
+cloud resources provisioned. See `docs/DEPLOYMENT.md` for what a real deployment still needs on top of
+this and `docs/RUNBOOK.md` for operating the one process it runs as today.
+
 ---
 
 ## Repository layout
@@ -336,8 +345,10 @@ apps/web/
   components/    ScoreBreakdown, EvidenceCard, ReviewPanel, MetricGrid, GuardrailPanel, etc.
   lib/           typed API client, SSE hook (useRunStream), formatting helpers.
 docs/
-  IMPLEMENTATION_PLAN.md   full plan — source of truth for scope and rationale.
+  IMPLEMENTATION_PLAN.md   full plan — source of truth for scope and rationale (Checkpoints A–F).
   ARCHITECTURE.md          condensed map for a five-minute refresh.
   PROGRESS.md              living build state, checkpoint by checkpoint.
   DEMO_SCRIPT.md           the founder walkthrough, timed, with discussion-point answers.
+  DEPLOYMENT.md            what a real deployment (Checkpoint I2, not started) still needs.
+  RUNBOOK.md               operating the one process this prototype runs as today.
 ```

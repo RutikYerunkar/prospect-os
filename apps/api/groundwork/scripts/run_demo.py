@@ -21,6 +21,7 @@ from groundwork.models.enums import Mode
 from groundwork.providers.demo.fixtures import load_fixture_pack
 from groundwork.providers.registry import build_provider_bundle
 from groundwork.repositories.plays import PlayRepository
+from groundwork.timeutil import utcnow
 
 
 async def print_trace(repos: Repos, run_id: str) -> None:
@@ -58,9 +59,14 @@ async def main(seed: int) -> None:
     repos = Repos.build(SessionLocal)
     plays = PlayRepository(SessionLocal)
 
-    interrupted = await repos.runs.sweep_interrupted()
+    # Replaces the old unconditional sweep_interrupted() — reap_stale()
+    # with `stale_before=now` marks every currently-RUNNING row stale
+    # (there's no other process that could legitimately still be advancing
+    # one in this headless, single-shot script) INTERRUPTED, same net
+    # effect for this use case (see repositories/runs.py::reap_stale).
+    interrupted = await repos.runs.reap_stale(utcnow())
     if interrupted:
-        print(f"marked {interrupted} previously-RUNNING run(s) INTERRUPTED (honest crash recovery)")
+        print(f"marked {len(interrupted)} previously-RUNNING run(s) INTERRUPTED (honest crash recovery)")
 
     play_id = await plays.create(
         name="AI infrastructure GTM play",

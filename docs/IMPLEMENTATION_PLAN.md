@@ -1549,3 +1549,18 @@ than overclaiming and getting caught.
 
 **The demo you can run flawlessly at 9:30 while slightly nervous beats the demo with one more
 feature.** Checkpoint F is not optional, and neither is sleep.
+
+---
+
+## Addendum — everything after P0
+
+This plan covers Checkpoints A–F (the interview-night P0 build) only, and is intentionally left as a
+historical record rather than rewritten as later work landed — it's what was approved and built for
+9:30 AM. Every checkpoint since (**G** — real OpenAI LLM; **H1** — demo-neutral real-company-safe
+foundation; **H2** — real Tavily web search; **I1** — production foundation: DB-correctness, an
+ownership-safe execution lease, Alembic/Postgres support, an operator-gated Live Mode, cost/abuse
+controls, security/observability hardening, and local-only packaging/CI) is tracked entirely in
+`docs/PROGRESS.md`, with the condensed architecture picture kept current in `docs/ARCHITECTURE.md`.
+Neither of those documents retrofits itself into this plan's checkpoint numbering or hard-stop clocks
+(§30) — those were specific to the original one-night P0 budget. **Checkpoint I2 (real cloud
+deployment) has not been started** — see `docs/DEPLOYMENT.md` for what it would need on top of I1.

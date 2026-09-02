@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select
 
 from groundwork.models.tables import AgentTaskRow
+from groundwork.observability.redact import redact
 
 
 class TaskRepository:
@@ -47,7 +48,14 @@ class TaskRepository:
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     error_type=error_type,
-                    error_message=error_message,
+                    # Checkpoint I1 Phase 9: `error_message` here is a raw
+                    # `str(exception)` from `engine/step.py` — including,
+                    # potentially, a provider's own error text. Redacted at
+                    # this persistence boundary exactly like `llm_calls`/
+                    # `search_calls` already are (`repositories/llm_calls.py`,
+                    # `repositories/search.py`), so nothing upstream needs to
+                    # remember to redact before calling this.
+                    error_message=redact(error_message),
                     input_digest=input_digest,
                     output_digest=output_digest,
                     evidence_count=evidence_count,

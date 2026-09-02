@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 from sqlalchemy import select  # noqa: F401 (re-exported for callers building filters)
 
 from groundwork.models.schemas import CompanySeed
 from groundwork.models.tables import CompanyRow, ProspectRow
+from groundwork.observability.redact import redact
+from groundwork.timeutil import utcnow
 
 
 class CompanyRepository:
@@ -83,8 +84,11 @@ class ProspectRepository:
         async with self._session_factory() as session:
             row = await session.get(ProspectRow, prospect_id)
             row.status = status
-            row.error = error
-            row.completed_at = datetime.utcnow()
+            # Checkpoint I1 Phase 9: same redaction choke point as
+            # `runs.error`/`agent_tasks.error_message` — `error` here is
+            # typically `str(exception)` from `engine/runner.py`.
+            row.error = redact(error)
+            row.completed_at = utcnow()
             await session.commit()
 
     async def get(self, prospect_id: str) -> ProspectRow | None:

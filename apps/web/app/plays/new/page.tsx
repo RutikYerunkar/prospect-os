@@ -1,9 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, createPlay, getProviderSettings, startRun } from "@/lib/api";
-import type { Mode, PlayResponse, ProviderSettingsResponse } from "@/lib/types";
+import {
+  ApiError,
+  NetworkError,
+  createPlay,
+  getProviderSettings,
+  loginOperator,
+  logoutOperator,
+  previewPlay,
+  startRun,
+} from "@/lib/api";
+import type { Mode, PlaySpec, PlayResponse, ProviderSettingsResponse } from "@/lib/types";
 import { Panel } from "@/components/ui/Panel";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -15,6 +24,15 @@ const DEFAULT_OBJECTIVE =
   "the evidence, and draft personalized outreach.";
 
 type Phase = "idle" | "parsing" | "starting";
+
+// Checkpoint I1 Phase 9: prefer the API's own (already-safe, already
+// specific) `.detail` over a generic "request failed" message — and tell a
+// truly unreachable API apart from a request that reached it and failed.
+function friendlyErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.detail || fallback;
+  if (err instanceof NetworkError) return err.message;
+  return fallback;
+}
 
 function ChipInput({
   label,
@@ -96,7 +114,17 @@ export default function NewPlayPage() {
   // will equal this number exactly, never a surprise +1.
   const [targetCount, setTargetCount] = useState(7);
 
-  const [parsedPlay, setParsedPlay] = useState<PlayResponse | null>(null);
+  // What the plan panel shows — updated by BOTH the non-persisting preview
+  // (every debounced edit, Checkpoint I1 Phase 7) and an explicit commit
+  // (`handleParseWithModel`/`handleRunAgents`). Only a commit ever creates a
+  // real Play row; `committedPlay`/`committedSignatureRef` below track that
+  // separately so Run Agents knows whether it can reuse one or must create
+  // a fresh one.
+  const [displaySpec, setDisplaySpec] = useState<{
+    icp_spec: PlaySpec;
+    parse_source: "llm" | "deterministic";
+  } | null>(null);
+  const [committedPlay, setCommittedPlay] = useState<PlayResponse | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -105,27 +133,91 @@ export default function NewPlayPage() {
   // never a silent fallback to Demo.
   const [mode, setMode] = useState<Mode>("demo");
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsResponse | null>(null);
+  const [settingsUnreachable, setSettingsUnreachable] = useState(false);
   const [confirmedSpend, setConfirmedSpend] = useState(false);
 
-  useEffect(() => {
+  // Checkpoint I1 Phase 8/9 — operator unlock.
+  const [passphrase, setPassphrase] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+
+  function loadProviderSettings() {
     getProviderSettings()
-      .then(setProviderSettings)
-      .catch(() => setProviderSettings(null));
+      .then((s) => {
+        setProviderSettings(s);
+        setSettingsUnreachable(false);
+      })
+      .catch(() => {
+        setProviderSettings(null);
+        setSettingsUnreachable(true);
+      });
+  }
+
+  useEffect(() => {
+    loadProviderSettings();
   }, []);
+
+  async function handleUnlock(e: FormEvent) {
+    e.preventDefault();
+    setUnlockError(null);
+    setUnlocking(true);
+    try {
+      await loginOperator({ passphrase });
+      setPassphrase("");
+      loadProviderSettings(); // refreshes live.is_operator from the API, not assumed locally
+    } catch (err) {
+      setUnlockError(friendlyErrorMessage(err, "Could not reach the API — is it running?"));
+    } finally {
+      setUnlocking(false);
+    }
+  }
+
+  async function handleLockAgain() {
+    try {
+      await logoutOperator();
+    } catch {
+      // best-effort — the cookie may already be gone/expired
+    }
+    loadProviderSettings();
+  }
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const parseSeqRef = useRef(0);
-  const lastParsedSignatureRef = useRef<string | null>(null);
+  const committedSignatureRef = useRef<string | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
 
+  // Preview is unconditionally deterministic and doesn't accept `mode` at
+  // all (Checkpoint I1 Phase 7) — a mode-only change shouldn't trigger a
+  // fresh preview request. `signature` (mode included) is still what
+  // decides whether Run Agents can reuse an already-committed Play.
+  const previewSignature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount });
   const signature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount, mode });
   const live = providerSettings?.live;
-  const liveAvailable = live?.available ?? false;
-  // The Live toggle button is itself disabled while unavailable, so `mode`
-  // can never be *set* to "live" in that state — this guards only the
-  // (currently unreachable, but cheap to guard) case of availability
+  // Checkpoint I1 Phase 8/9 — three distinct "why can't I use Live" states,
+  // never conflated into one generic "unavailable":
+  //   1. providersConfigured=false — OPENAI_API_KEY/TAVILY_API_KEY missing
+  //      on the API process. Nothing an operator passphrase can fix.
+  //   2. operatorLoginConfigured=false — providers ARE configured, but
+  //      OPERATOR_PASSPHRASE/SESSION_SIGNING_KEY aren't — Live is
+  //      hard-disabled on this deployment, per Checkpoint I1 Phase 8.
+  //   3. isOperator=false — everything above is configured; this browser
+  //      just hasn't unlocked it yet. The one state an operator passphrase
+  //      actually resolves.
+  const providersConfigured = live?.available ?? false;
+  const operatorLoginConfigured = live?.operator_login_configured ?? false;
+  const isOperator = live?.is_operator ?? false;
+  const liveSelectable = providersConfigured && operatorLoginConfigured;
+  const liveUnlocked = liveSelectable && isOperator;
+  // The Live toggle button is itself disabled while not selectable, so
+  // `mode` can never be *set* to "live" in that state — this guards only
+  // the (currently unreachable, but cheap to guard) case of availability
   // changing after the fact, without an effect that would just be
-  // re-deriving state React already has.
-  const effectiveMode: Mode = mode === "live" && !liveAvailable ? "demo" : mode;
+  // re-deriving state React already has. Deliberately NOT keyed on
+  // `isOperator`: selecting Live before unlocking is a real, reachable
+  // state (the whole point of the unlock panel below) — it must show the
+  // explicit locked state and block submission, never silently fall back
+  // to Demo underneath the user.
+  const effectiveMode: Mode = mode === "live" && !liveSelectable ? "demo" : mode;
 
   // The form only exposes four ICP controls (§18) — the rest of the
   // canonical demo ICP (exclusions, funding stage, tech, persona,
@@ -150,12 +242,12 @@ export default function NewPlayPage() {
     };
   }
 
-  // Live-parse the objective + controls into a structured PlaySpec via the
-  // real POST /api/plays endpoint (no separate parse-only endpoint exists —
-  // this *is* how the API parses an objective) so the criteria are visible
-  // beside the form before the user commits to running agents. All setState
-  // calls happen inside the debounce timeout callback, never synchronously
-  // in the effect body, so this doesn't cascade renders on every keystroke.
+  // Preview the objective + controls into a structured PlaySpec via the
+  // non-persisting `POST /api/plays/preview` (Checkpoint I1 Phase 7) —
+  // deterministic, zero DB writes, zero LLM calls, safe to fire on every
+  // debounced keystroke in Demo OR Live Mode alike. All setState calls
+  // happen inside the debounce timeout callback, never synchronously in the
+  // effect body, so this doesn't cascade renders on every keystroke.
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const seq = ++parseSeqRef.current;
@@ -163,26 +255,28 @@ export default function NewPlayPage() {
     debounceRef.current = setTimeout(() => {
       if (seq !== parseSeqRef.current) return;
       if (!objective.trim()) {
-        setParsedPlay(null);
+        setDisplaySpec(null);
         return;
       }
+      // A superseded request (the user kept typing) is aborted outright,
+      // not just ignored on return — no reason to let a stale preview
+      // finish server-side once a newer edit has already replaced it.
+      previewAbortRef.current?.abort();
+      const controller = new AbortController();
+      previewAbortRef.current = controller;
+
       setPhase("parsing");
       setError(null);
-      // NEVER sets use_live_objective_parser — Live Mode's real parser only
-      // fires on an explicit "Parse with model" click or Run Agents, never
-      // on this 600ms debounce. In Live Mode this still renders a
-      // deterministic preview immediately (icp_overrides applied, no LLM
-      // call, no spend) — real live parsing is a separate, deliberate step.
-      createPlay({ objective, icp_overrides: overrides(), target_count: targetCount, mode: effectiveMode })
-        .then((play) => {
+      previewPlay({ objective, icp_overrides: overrides(), target_count: targetCount }, controller.signal)
+        .then((preview) => {
           if (seq !== parseSeqRef.current) return; // superseded by a newer edit
-          setParsedPlay(play);
-          lastParsedSignatureRef.current = signature;
+          setDisplaySpec({ icp_spec: preview.icp_spec, parse_source: preview.parse_source });
           setPhase("idle");
         })
         .catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === "AbortError") return; // superseded, not a real error
           if (seq !== parseSeqRef.current) return;
-          setError(err instanceof ApiError ? err.message : "Could not parse objective");
+          setError(friendlyErrorMessage(err, "Could not parse objective"));
           setPhase("idle");
         });
     }, 600);
@@ -191,7 +285,15 @@ export default function NewPlayPage() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objective, industries, sizeMin, sizeMax, minScore, targetCount, effectiveMode, signature]);
+  }, [previewSignature]);
+
+  // Abort any still-in-flight preview request when the form itself goes
+  // away (e.g. Run Agents navigates to /runs/[id]) — nothing left to update.
+  useEffect(() => {
+    return () => {
+      previewAbortRef.current?.abort();
+    };
+  }, []);
 
   async function handleParseWithModel() {
     setError(null);
@@ -201,11 +303,12 @@ export default function NewPlayPage() {
         objective, icp_overrides: overrides(), target_count: targetCount, mode: "live",
         use_live_objective_parser: true,
       });
-      setParsedPlay(play);
-      lastParsedSignatureRef.current = signature;
+      setCommittedPlay(play);
+      committedSignatureRef.current = signature;
+      setDisplaySpec({ icp_spec: play.icp_spec, parse_source: play.parse_source });
       setPhase("idle");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Live objective parse failed");
+      setError(friendlyErrorMessage(err, "Live objective parse failed"));
       setPhase("idle");
     }
   }
@@ -213,25 +316,27 @@ export default function NewPlayPage() {
   async function handleRunAgents() {
     setError(null);
     try {
-      let play = parsedPlay;
-      if (!play || lastParsedSignatureRef.current !== signature) {
+      let play = committedPlay;
+      if (!play || committedSignatureRef.current !== signature) {
         setPhase("parsing");
         play = await createPlay({ objective, icp_overrides: overrides(), target_count: targetCount, mode: effectiveMode });
-        setParsedPlay(play);
-        lastParsedSignatureRef.current = signature;
+        setCommittedPlay(play);
+        committedSignatureRef.current = signature;
+        setDisplaySpec({ icp_spec: play.icp_spec, parse_source: play.parse_source });
       }
       setPhase("starting");
       const run = await startRun(play.id, { mode: effectiveMode });
       router.push(`/runs/${run.run_id}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not start the run");
+      setError(friendlyErrorMessage(err, "Could not start the run"));
       setPhase("idle");
     }
   }
 
   const busy = phase === "starting";
-  const needsSpendConfirmation = mode === "live" && !confirmedSpend;
-  const canSubmit = objective.trim().length > 0 && !busy && !needsSpendConfirmation;
+  const needsUnlock = mode === "live" && !liveUnlocked;
+  const needsSpendConfirmation = mode === "live" && liveUnlocked && !confirmedSpend;
+  const canSubmit = objective.trim().length > 0 && !busy && !needsUnlock && !needsSpendConfirmation;
   const cappedProspectCount = live ? Math.min(targetCount, live.live_max_prospects_per_run) : targetCount;
   const maxAttemptsPerCall = live ? 1 + live.llm_max_transport_retries + live.llm_max_schema_retries : null;
   // Worst-case bound across the three per-prospect LLM operations
@@ -264,19 +369,29 @@ export default function NewPlayPage() {
                 </button>
                 <button
                   type="button"
-                  disabled={!liveAvailable}
+                  disabled={!liveSelectable}
                   onClick={() => setMode("live")}
                   title={
-                    liveAvailable
+                    liveSelectable
                       ? undefined
-                      : "Live Mode requires BOTH OPENAI_API_KEY and TAVILY_API_KEY configured on the API process"
+                      : !providersConfigured
+                        ? "Live Mode requires BOTH OPENAI_API_KEY and TAVILY_API_KEY configured on the API process"
+                        : "Live Mode is hard-disabled on this deployment — OPERATOR_PASSPHRASE/SESSION_SIGNING_KEY aren't configured"
                   }
                   className={`rounded-md border px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-40 ${mode === "live" ? "border-indigo-400 bg-indigo-400/10 text-indigo-200" : "border-zinc-700 text-zinc-400"}`}
                 >
-                  Live
+                  Live {liveSelectable && !isOperator ? "🔒" : ""}
                 </button>
               </div>
-              {!liveAvailable && (
+              {settingsUnreachable && (
+                <p className="text-xs text-rose-400">
+                  Can&apos;t reach the API to check Live availability — Demo Mode still works fully offline.{" "}
+                  <button type="button" className="underline hover:text-rose-300" onClick={loadProviderSettings}>
+                    Retry
+                  </button>
+                </p>
+              )}
+              {!settingsUnreachable && !providersConfigured && (
                 <p className="text-xs text-zinc-500">
                   Live is unavailable —{" "}
                   {!live?.llm_available && !live?.search_available
@@ -288,6 +403,53 @@ export default function NewPlayPage() {
                   fixture-search fallback. Demo Mode needs no credentials and reproduces the canonical
                   fixture-driven results.
                 </p>
+              )}
+              {!settingsUnreachable && providersConfigured && !operatorLoginConfigured && (
+                <p className="text-xs text-zinc-500">
+                  Live is hard-disabled on this deployment — no operator passphrase is configured
+                  (<span className="font-mono text-zinc-400">OPERATOR_PASSPHRASE</span>/
+                  <span className="font-mono text-zinc-400">SESSION_SIGNING_KEY</span>). There is no other way to
+                  unlock it.
+                </p>
+              )}
+              {mode === "live" && liveSelectable && !isOperator && (
+                <form
+                  onSubmit={handleUnlock}
+                  className="mt-1 flex flex-col gap-2 rounded-md border border-zinc-700 bg-zinc-900 p-3"
+                >
+                  <p className="text-xs font-medium text-zinc-300">Live is locked</p>
+                  <p className="text-xs text-zinc-500">
+                    This deployment requires an operator passphrase before any Live read or write is allowed — a
+                    caller sending <span className="font-mono text-zinc-400">mode=&quot;live&quot;</span> alone gets
+                    no Live capability.
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder="Operator passphrase"
+                      autoComplete="current-password"
+                      className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-indigo-400"
+                    />
+                    <Button type="submit" variant="secondary" disabled={unlocking || !passphrase}>
+                      {unlocking ? "Unlocking…" : "Unlock"}
+                    </Button>
+                  </div>
+                  {unlockError && (
+                    <p role="alert" className="text-xs text-rose-400">
+                      {unlockError}
+                    </p>
+                  )}
+                </form>
+              )}
+              {mode === "live" && liveUnlocked && (
+                <div className="mt-1 flex items-center justify-between rounded-md border border-emerald-700/40 bg-emerald-400/5 px-3 py-2 text-xs text-emerald-300">
+                  <span>Live unlocked for this browser session.</span>
+                  <button type="button" className="underline hover:text-emerald-200" onClick={handleLockAgain}>
+                    Lock
+                  </button>
+                </div>
               )}
               {mode === "live" && live && (
                 <div className="mt-1 flex flex-col gap-1 rounded-md border border-amber-700/40 bg-amber-400/5 p-3 text-xs text-zinc-400">
@@ -431,7 +593,7 @@ export default function NewPlayPage() {
               </p>
             )}
 
-            {mode === "live" && (
+            {mode === "live" && liveUnlocked && (
               <Button
                 onClick={handleParseWithModel}
                 disabled={phase === "parsing" || !objective.trim()}
@@ -443,9 +605,9 @@ export default function NewPlayPage() {
             )}
 
             <Button onClick={handleRunAgents} disabled={!canSubmit} className="w-full">
-              {phase === "starting" ? "Starting run…" : "Run Agents"}
+              {phase === "starting" ? "Starting run…" : needsUnlock ? "Unlock Live to run agents" : "Run Agents"}
             </Button>
-            {mode === "live" && needsSpendConfirmation && (
+            {needsSpendConfirmation && (
               <p className="text-xs text-amber-400">Confirm the spend checkbox above to run agents in Live Mode.</p>
             )}
             <p className="text-xs text-zinc-500">
@@ -458,14 +620,14 @@ export default function NewPlayPage() {
         </Panel>
 
         <div className="flex flex-col gap-4">
-          {parsedPlay ? (
+          {displaySpec ? (
             <>
-              {parsedPlay.mode === "live" && (
+              {mode === "live" && (
                 <p className="text-xs text-zinc-500">
-                  parse_source: <span className="font-mono text-zinc-300">{parsedPlay.parse_source}</span>
+                  parse_source: <span className="font-mono text-zinc-300">{displaySpec.parse_source}</span>
                 </p>
               )}
-              <PlanPanel spec={parsedPlay.icp_spec} />
+              <PlanPanel spec={displaySpec.icp_spec} />
             </>
           ) : (
             <Panel title="Parsed play spec" bodyClassName="p-6">

@@ -1,75 +1,41 @@
-"""Post-smoke-test hardening: `db.py::schema_upgrade_problems()` detects a
-pre-Checkpoint-G local SQLite file (missing `runs.provider_profile` and/or
-`llm_calls`) so `live_smoke.py` can refuse with an actionable message
-BEFORE making any paid API call, instead of surfacing a raw
-`sqlite3.OperationalError` mid-run. Read-only — never mutates, never
-resets automatically.
+"""Checkpoint I1 Phase 5: `schema_upgrade_problems()`/`migration_status.py`
+replaced the old hand-maintained per-checkpoint column/table probe with a
+generic Alembic-revision check — is the database's `alembic_version` the
+same as the migrations directory's head? Read-only, never mutates, never
+resets automatically. Used by `scripts/live_smoke.py` (refuse before any
+paid call) and `GET /api/ready` (Phase 9B).
+
+Plain (non-`async def`) test functions throughout: `alembic.command.upgrade`
+runs its own internal `asyncio.run()` (see `alembic/env.py`), which raises
+if called from inside a loop pytest-asyncio already started for an `async
+def` test — so each test below opens its own loop via `asyncio.run()` for
+the async parts, exactly like `test_migration_drift.py`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+from contextlib import contextmanager
 
-import pytest_asyncio
-from sqlalchemy import text
+from alembic import command
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from groundwork.db import schema_upgrade_problems
+from groundwork.migration_status import current_revision, head_revision
 from groundwork.models.tables import Base
+from tests.test_migration_drift import _config_targeting
 
 
-@pytest_asyncio.fixture
-async def pre_checkpoint_g_engine():
-    """A minimal hand-built schema mimicking a pre-Checkpoint-G local DB:
-    `runs` exists but without `provider_profile`, and `llm_calls` doesn't
-    exist at all."""
+@contextmanager
+def _fresh_db_path():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    test_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    async with test_engine.begin() as conn:
-        await conn.execute(
-            text(
-                "CREATE TABLE runs (id VARCHAR PRIMARY KEY, play_id VARCHAR, status VARCHAR, "
-                "mode VARCHAR, seed INTEGER, plan JSON, counters JSON, started_at DATETIME, "
-                "finished_at DATETIME, error TEXT)"
-            )
-        )
-    yield test_engine
-    await test_engine.dispose()
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            os.unlink(path + suffix)
-        except FileNotFoundError:
-            pass
-
-
-async def test_detects_missing_provider_profile_column_and_llm_calls_table(pre_checkpoint_g_engine):
-    problems = await schema_upgrade_problems(pre_checkpoint_g_engine)
-    assert any("provider_profile" in p for p in problems)
-    assert any("llm_calls" in p for p in problems)
-
-
-async def test_current_schema_reports_no_problems(session_factory):
-    # `session_factory`'s underlying engine (conftest.py) was created via
-    # `Base.metadata.create_all` — the full current schema.
-    engine = session_factory.kw["bind"]
-    problems = await schema_upgrade_problems(engine)
-    assert problems == []
-
-
-async def test_brand_new_empty_database_reports_no_problems():
-    """An empty DB (no tables at all yet) is not "stale" — `create_all()`
-    handles that case; this function only flags an *existing*, outdated
-    schema, never a not-yet-initialized one."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    test_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    os.unlink(path)
     try:
-        problems = await schema_upgrade_problems(test_engine)
-        assert problems == []
+        yield path
     finally:
-        await test_engine.dispose()
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.unlink(path + suffix)
@@ -77,51 +43,121 @@ async def test_brand_new_empty_database_reports_no_problems():
                 pass
 
 
-@pytest_asyncio.fixture
-async def pre_h1_engine():
-    """A schema mimicking a pre-H1 local DB: the full Checkpoint G schema,
-    but `signals` predates the H1 `grounded` column and `search_calls`/
-    `source_documents` don't exist yet."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    test_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    async with test_engine.begin() as conn:
-        await conn.execute(
-            text(
-                "CREATE TABLE runs (id VARCHAR PRIMARY KEY, play_id VARCHAR, status VARCHAR, "
-                "mode VARCHAR, seed INTEGER, plan JSON, counters JSON, provider_profile JSON, "
-                "started_at DATETIME, finished_at DATETIME, error TEXT)"
-            )
-        )
-        await conn.execute(text("CREATE TABLE llm_calls (id VARCHAR PRIMARY KEY)"))
-        await conn.execute(
-            text(
-                "CREATE TABLE signals (id VARCHAR PRIMARY KEY, prospect_id VARCHAR, type VARCHAR, "
-                "summary TEXT, occurred_at DATETIME, confidence FLOAT, evidence_ids JSON)"
-            )
-        )
-    yield test_engine
-    await test_engine.dispose()
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            os.unlink(path + suffix)
-        except FileNotFoundError:
-            pass
+def test_freshly_migrated_database_reports_no_problems():
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+        command.upgrade(_config_targeting(async_url), "head")
+
+        async def _check():
+            test_engine = create_async_engine(async_url)
+            try:
+                return await schema_upgrade_problems(test_engine)
+            finally:
+                await test_engine.dispose()
+
+        assert asyncio.run(_check()) == []
 
 
-async def test_detects_missing_h1_search_tables_and_signals_grounded_column(pre_h1_engine):
-    problems = await schema_upgrade_problems(pre_h1_engine)
-    assert any("search_calls" in p for p in problems)
-    assert any("source_documents" in p for p in problems)
-    assert any("signals.grounded" in p for p in problems)
-    # This fixture's `runs`/`llm_calls` ARE current — must not false-positive.
-    assert not any("provider_profile" in p for p in problems)
-    assert not any(p == "llm_calls table is missing" for p in problems)
+def test_brand_new_empty_database_reports_no_problems():
+    """An empty DB (no tables, no alembic_version row) is not "stale" —
+    `create_all()`/`alembic upgrade head` both handle that case; this only
+    flags an *existing*, outdated schema, never a not-yet-initialized one."""
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+
+        async def _check():
+            test_engine = create_async_engine(async_url)
+            try:
+                return await schema_upgrade_problems(test_engine)
+            finally:
+                await test_engine.dispose()
+
+        assert asyncio.run(_check()) == []
 
 
-async def test_never_mutates_the_database(pre_checkpoint_g_engine):
-    await schema_upgrade_problems(pre_checkpoint_g_engine)
-    async with pre_checkpoint_g_engine.connect() as conn:
-        result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-        tables = {row[0] for row in result}
-    assert tables == {"runs"}  # unchanged — no llm_calls table was created, no column added
+def test_database_with_tables_but_no_alembic_version_is_flagged():
+    """A pre-Alembic local file: real tables (created via the old
+    `create_all()` path), but no `alembic_version` row at all — must be
+    flagged, not silently treated as current."""
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+
+        async def _check():
+            test_engine = create_async_engine(async_url)
+            try:
+                async with test_engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                return await schema_upgrade_problems(test_engine)
+            finally:
+                await test_engine.dispose()
+
+        problems = asyncio.run(_check())
+        assert problems != []
+        assert any("alembic_version" in p for p in problems)
+
+
+def test_database_behind_head_is_flagged(monkeypatch):
+    """Simulates a database stamped at a revision that isn't the migrations
+    directory's current head (e.g. a deploy that ran an old migration set)."""
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+        command.upgrade(_config_targeting(async_url), "head")
+
+        real_head = head_revision()
+        monkeypatch.setattr("groundwork.migration_status.head_revision", lambda: "not-" + str(real_head))
+
+        async def _check():
+            test_engine = create_async_engine(async_url)
+            try:
+                return await schema_upgrade_problems(test_engine)
+            finally:
+                await test_engine.dispose()
+
+        problems = asyncio.run(_check())
+        assert problems != []
+        assert any("revision" in p for p in problems)
+
+
+def test_current_revision_matches_head_after_upgrade():
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+        command.upgrade(_config_targeting(async_url), "head")
+
+        async def _check():
+            test_engine = create_async_engine(async_url)
+            try:
+                return await current_revision(test_engine)
+            finally:
+                await test_engine.dispose()
+
+        current = asyncio.run(_check())
+        assert current == head_revision()
+        assert current is not None
+
+
+def test_never_mutates_the_database():
+    with _fresh_db_path() as path:
+        async_url = f"sqlite+aiosqlite:///{path}"
+        command.upgrade(_config_targeting(async_url), "head")
+
+        async def _tables_before_and_after():
+            from sqlalchemy import inspect
+
+            test_engine = create_async_engine(async_url)
+            try:
+                def _read(sync_conn):
+                    return set(inspect(sync_conn).get_table_names())
+
+                async with test_engine.connect() as conn:
+                    before = await conn.run_sync(_read)
+
+                await schema_upgrade_problems(test_engine)
+
+                async with test_engine.connect() as conn:
+                    after = await conn.run_sync(_read)
+                return before, after
+            finally:
+                await test_engine.dispose()
+
+        before, after = asyncio.run(_tables_before_and_after())
+        assert before == after

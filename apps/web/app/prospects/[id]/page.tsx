@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { ApiError, approveProspect, getProspect, rejectProspect } from "@/lib/api";
+import { ApiError, NetworkError, approveProspect, getProspect, rejectProspect } from "@/lib/api";
 import { formatConfidence, formatScore, formatStatus } from "@/lib/format";
 import type { ApprovalState, EvidenceItem, ProspectAggregate, ProspectStatus } from "@/lib/types";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -125,7 +125,7 @@ function ApprovalBar({
     try {
       onDecide(await approveProspect(prospect.id));
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail ?? err.message : "approve failed");
+      setError(err instanceof ApiError ? (err.detail ?? err.message) : err instanceof NetworkError ? err.message : "approve failed");
     } finally {
       setPending(null);
     }
@@ -137,7 +137,7 @@ function ApprovalBar({
     try {
       onDecide(await rejectProspect(prospect.id, reason.trim()));
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail ?? err.message : "reject failed");
+      setError(err instanceof ApiError ? (err.detail ?? err.message) : err instanceof NetworkError ? err.message : "reject failed");
     } finally {
       setPending(null);
     }
@@ -206,6 +206,8 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
   const { id } = use(params);
   const [prospect, setProspect] = useState<ProspectAggregate | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadErrorUnreachable, setLoadErrorUnreachable] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -214,27 +216,40 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
         if (cancelled) return;
         setProspect(data);
         setLoadError(null);
+        setLoadErrorUnreachable(false);
       })
       .catch((err) => {
         if (cancelled) return;
-        setLoadError(err instanceof ApiError ? err.detail ?? err.message : "failed to load prospect");
+        setLoadErrorUnreachable(err instanceof NetworkError);
+        setLoadError(err instanceof ApiError ? (err.detail ?? err.message) : "failed to load prospect");
       });
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, reloadNonce]);
 
   if (loadError) {
     return (
       <main className="flex flex-1 items-center justify-center p-8">
         <div className="max-w-md text-center">
           <p className="text-sm text-rose-400">
-            Prospect <span className="font-mono">{id}</span> could not be loaded.
+            {loadErrorUnreachable ? (
+              "Can't reach the API."
+            ) : (
+              <>Prospect <span className="font-mono">{id}</span> could not be loaded.</>
+            )}
           </p>
-          <p className="mt-2 font-mono text-xs text-zinc-500">{loadError}</p>
-          <Link href="/plays/new" className="mt-4 inline-block text-sm text-indigo-400 hover:text-indigo-300">
-            ← Start a new play
-          </Link>
+          <p className="mt-2 text-xs text-zinc-500">
+            {loadErrorUnreachable ? "Make sure the API process is running and reachable, then try again." : loadError}
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-3">
+            <Button variant="secondary" onClick={() => setReloadNonce((n) => n + 1)}>
+              Retry
+            </Button>
+            <Link href="/plays/new" className="text-sm text-indigo-400 hover:text-indigo-300">
+              ← Start a new play
+            </Link>
+          </div>
         </div>
       </main>
     );

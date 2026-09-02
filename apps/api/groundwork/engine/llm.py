@@ -15,10 +15,17 @@ useful" requirement.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from groundwork.engine.context import ProspectContext
 from groundwork.providers.base import LLMOperation, LLMResult, PromptEnvelope, ProviderError, T
+
+logger = logging.getLogger(__name__)
+
+
+def _total_latency_ms(attempts: list) -> float:
+    return sum(a.latency_ms for a in attempts if a.latency_ms is not None)
 
 
 async def call_structured(
@@ -43,6 +50,18 @@ async def call_structured(
             step_name=step_name,
             attempts=exc.attempts,
         )
+        # Checkpoint I1 Phase 9C — one structured summary log line per
+        # logical call, never the prompt/response bodies (those never
+        # leave `llm_calls`, and even there only redacted error text is
+        # kept). `extra` fields are picked up by the JSON formatter.
+        logger.warning(
+            "llm call failed operation=%s step=%s attempts=%d",
+            operation.value, step_name, len(exc.attempts),
+            extra={
+                "run_id": ctx.run_id, "prospect_id": ctx.prospect_id,
+                "latency_ms": _total_latency_ms(exc.attempts),
+            },
+        )
         raise
 
     await ctx.llm_calls.record(
@@ -53,4 +72,12 @@ async def call_structured(
         attempts=result.attempts,
     )
     ctx.note_llm_call(step_name, result)
+    logger.info(
+        "llm call ok operation=%s step=%s attempts=%d",
+        operation.value, step_name, len(result.attempts),
+        extra={
+            "run_id": ctx.run_id, "prospect_id": ctx.prospect_id,
+            "latency_ms": _total_latency_ms(result.attempts),
+        },
+    )
     return result

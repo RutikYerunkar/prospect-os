@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-from groundwork.api.deps import ApprovalsRepoDep, ReposDep
+from groundwork.api.deps import ApprovalsRepoDep, IsOperatorDep, ReposDep
 from groundwork.api.errors import ConflictError, NotFoundError
+from groundwork.api.live_gate import enforce_live_gate
 from groundwork.api.schemas import ApprovalInfo, ApproveRequest, ProspectAggregate, RejectRequest
 from groundwork.models.enums import ProspectStatus
 
@@ -119,6 +120,20 @@ def _task_dict(row) -> dict[str, Any]:
     }
 
 
+async def _get_prospect_and_enforce_gate(prospect_id: str, request: Request, repos: ReposDep, is_operator: bool):
+    """Checkpoint I1 Phase 8: a prospect has no `mode` field of its own —
+    it inherits its run's. 404s before the gate check (existence isn't a
+    secret; the run's live-ness is what's protected) so a nonexistent
+    prospect always reads as "not found," never as "unauthorized," for
+    both operators and anonymous callers alike."""
+    prospect = await repos.prospects.get(prospect_id)
+    if prospect is None:
+        raise NotFoundError(f"no prospect with id {prospect_id!r}")
+    run_row = await repos.runs.get(prospect.run_id)
+    enforce_live_gate(request, run_row.mode if run_row is not None else "demo", is_operator)
+    return prospect
+
+
 async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: ApprovalsRepoDep) -> ProspectAggregate:
     prospect = await repos.prospects.get(prospect_id)
     if prospect is None:
@@ -169,17 +184,23 @@ async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: Approval
 
 
 @router.get("/{prospect_id}", response_model=ProspectAggregate)
-async def get_prospect(prospect_id: str, repos: ReposDep, approvals: ApprovalsRepoDep) -> ProspectAggregate:
+async def get_prospect(
+    prospect_id: str, request: Request, repos: ReposDep, approvals: ApprovalsRepoDep, is_operator: IsOperatorDep
+) -> ProspectAggregate:
+    await _get_prospect_and_enforce_gate(prospect_id, request, repos, is_operator)
     return await _load_aggregate(prospect_id, repos, approvals)
 
 
 @router.post("/{prospect_id}/approve", response_model=ProspectAggregate)
 async def approve_prospect(
-    prospect_id: str, body: ApproveRequest, repos: ReposDep, approvals: ApprovalsRepoDep
+    prospect_id: str,
+    body: ApproveRequest,
+    request: Request,
+    repos: ReposDep,
+    approvals: ApprovalsRepoDep,
+    is_operator: IsOperatorDep,
 ) -> ProspectAggregate:
-    prospect = await repos.prospects.get(prospect_id)
-    if prospect is None:
-        raise NotFoundError(f"no prospect with id {prospect_id!r}")
+    prospect = await _get_prospect_and_enforce_gate(prospect_id, request, repos, is_operator)
     if prospect.status not in _DECIDABLE_STATUSES:
         raise ConflictError(
             f"prospect {prospect_id!r} is {prospect.status}; "
@@ -191,11 +212,14 @@ async def approve_prospect(
 
 @router.post("/{prospect_id}/reject", response_model=ProspectAggregate)
 async def reject_prospect(
-    prospect_id: str, body: RejectRequest, repos: ReposDep, approvals: ApprovalsRepoDep
+    prospect_id: str,
+    body: RejectRequest,
+    request: Request,
+    repos: ReposDep,
+    approvals: ApprovalsRepoDep,
+    is_operator: IsOperatorDep,
 ) -> ProspectAggregate:
-    prospect = await repos.prospects.get(prospect_id)
-    if prospect is None:
-        raise NotFoundError(f"no prospect with id {prospect_id!r}")
+    prospect = await _get_prospect_and_enforce_gate(prospect_id, request, repos, is_operator)
     if prospect.status not in _DECIDABLE_STATUSES:
         raise ConflictError(
             f"prospect {prospect_id!r} is {prospect.status}; "

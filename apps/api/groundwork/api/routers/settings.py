@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from groundwork.api.deps import LiveRuntimeDep, LiveSearchRuntimeDep
+from groundwork.api.deps import IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep
+from groundwork.api.operator_auth import operator_login_configured
 from groundwork.api.schemas import LiveAvailability, ProviderInfo, ProviderSettingsResponse
 from groundwork.config import settings
 from groundwork.domain.query_plan import QUERY_PLAN_VERSION
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 @router.get("/providers", response_model=ProviderSettingsResponse)
 async def get_provider_settings(
-    live_runtime: LiveRuntimeDep, search_runtime: LiveSearchRuntimeDep
+    live_runtime: LiveRuntimeDep, search_runtime: LiveSearchRuntimeDep, is_operator: IsOperatorDep
 ) -> ProviderSettingsResponse:
     # Never returns key values (§21) — only whether a live-mode key is present.
     if settings.mode == "demo":
@@ -52,5 +53,10 @@ async def get_provider_settings(
         pricing_configured=pricing_configured,
         soft_budget_usd=settings.live_run_soft_budget_usd if pricing_configured else None,
         soft_budget_enforceable=pricing_configured and settings.live_run_soft_budget_usd is not None,
+        operator_login_configured=operator_login_configured(),
+        is_operator=is_operator,
     )
-    return ProviderSettingsResponse(mode=settings.mode, llm=llm, search=search, live=live)
+    return ProviderSettingsResponse(
+        mode=settings.mode, llm=llm, search=search, live=live,
+        max_concurrent_prospects=settings.max_concurrent_prospects,
+    )

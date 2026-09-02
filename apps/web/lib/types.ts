@@ -65,6 +65,20 @@ export interface PlayCreateRequest {
   use_live_objective_parser?: boolean;
 }
 
+// Checkpoint I1 Phase 7 — deliberately narrower than PlayCreateRequest: no
+// `mode`, no `use_live_objective_parser`. The API rejects (422) either
+// field on this endpoint — preview is unconditionally deterministic.
+export interface PlayPreviewRequest {
+  objective: string;
+  icp_overrides?: Record<string, unknown>;
+  target_count?: number;
+}
+
+export interface PlayPreviewResponse {
+  icp_spec: PlaySpec;
+  parse_source: "deterministic";
+}
+
 export interface RunSummary {
   id: string;
   status: RunStatus;
@@ -464,6 +478,9 @@ export interface LiveAvailability {
   pricing_configured: boolean;
   soft_budget_usd: number | null;
   soft_budget_enforceable: boolean;
+  // Checkpoint I1 Phase 8/9
+  operator_login_configured: boolean;
+  is_operator: boolean;
 }
 
 export interface ProviderSettingsResponse {
@@ -471,4 +488,11 @@ export interface ProviderSettingsResponse {
   llm: ProviderInfo;
   search: ProviderInfo;
   live: LiveAvailability;
+  max_concurrent_prospects: number;
+}
+
+// --- operator session (Checkpoint I1 Phase 8) ---
+
+export interface OperatorLoginRequest {
+  passphrase: string;
 }

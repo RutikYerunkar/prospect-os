@@ -8,7 +8,6 @@ yet) is `None`, never a fabricated placeholder.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_evidence
@@ -16,6 +15,7 @@ from groundwork.domain.scoring import exclusion_status_from_persisted
 from groundwork.engine.runner import Repos
 from groundwork.models.enums import EvidenceOrigin, ExclusionEvaluation, ProspectStatus, SignalType
 from groundwork.models.schemas import Evidence
+from groundwork.timeutil import elapsed_seconds
 
 
 def _percentile(values: list[float], pct: float) -> float | None:
@@ -157,8 +157,7 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
 
     wall_clock_ms: float | None = None
     if run_row is not None and run_row.started_at is not None:
-        end = run_row.finished_at or datetime.utcnow()
-        wall_clock_ms = (end - run_row.started_at).total_seconds() * 1000
+        wall_clock_ms = elapsed_seconds(run_row.started_at, run_row.finished_at) * 1000
 
     # Per-step success rate — a step "succeeds" if any attempt for it reached
     # OK (a step that retried then succeeded still counts as a success for
