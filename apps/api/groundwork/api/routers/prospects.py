@@ -93,6 +93,21 @@ def _draft_dict(row) -> dict[str, Any]:
     }
 
 
+def _contact_channel_dict(row) -> dict[str, Any]:
+    return {
+        "channel": row.channel,
+        "identifier": row.identifier,
+        "discovery_state": row.discovery_state,
+        "verification_state": row.verification_state,
+        "identity_match_state": row.identity_match_state,
+        "derivation_version": row.derivation_version,
+        "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+        "last_attempt_at": row.last_attempt_at.isoformat() if row.last_attempt_at else None,
+        "last_attempt_status": row.last_attempt_status,
+        "last_attempt_error_type": row.last_attempt_error_type,
+    }
+
+
 def _review_dict(row) -> dict[str, Any]:
     return {
         "verdict": row.verdict,
@@ -148,6 +163,7 @@ async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: Approval
     review = await repos.prospect_data.get_review(prospect_id)
     trace = await repos.tasks.for_prospect(prospect_id)
     approval = await approvals.latest_for_prospect(prospect_id)
+    contact_channels = await repos.contact_enrichment.get_contact_channels(prospect_id)
 
     company_dict: dict[str, Any] = {}
     if company is not None:
@@ -174,6 +190,7 @@ async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: Approval
         drafts=[_draft_dict(d) for d in drafts],
         review=_review_dict(review) if review else None,
         trace=[_task_dict(t) for t in trace],
+        contact_channels=[_contact_channel_dict(c) for c in contact_channels],
         approval=ApprovalInfo(
             state=approval.decision if approval else "PENDING",
             actor=approval.actor if approval else None,

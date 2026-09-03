@@ -87,3 +87,37 @@ async def test_full_demo_run_produces_expected_distribution(session_factory) -> 
     events = await repos.events.after(run_id, 0)
     assert events, "expected run_events to have been emitted"
     assert events == sorted(events, key=lambda e: e.seq), "run_events must be strictly ordered by seq"
+
+    # v2 §Part 7 — contact_channels matches the frozen Demo matrix exactly,
+    # and every V1 outcome/score above stayed byte-identical alongside it.
+    async def _channels_by_name(slug: str) -> dict[str, object]:
+        outcome = next(o for o in summary.outcomes if o.company.slug == slug)
+        rows = await repos.contact_enrichment.get_contact_channels(outcome.prospect_id)
+        return {row.channel: row for row in rows}
+
+    northwind_channels = await _channels_by_name("northwind-labs")
+    assert northwind_channels["email"].identifier == "priya.natarajan@northwindlabs.com"
+    assert northwind_channels["email"].discovery_state == "FOUND"
+    assert northwind_channels["email"].verification_state == "VERIFIED"
+    assert northwind_channels["linkedin"].identifier == "demo://linkedin/priya-natarajan"
+    assert northwind_channels["linkedin"].discovery_state == "RESOLVED"
+    assert northwind_channels["linkedin"].identity_match_state == "STRONG_MATCH"
+
+    sable_channels = await _channels_by_name("sable-compute")
+    assert sable_channels["email"].discovery_state == "FOUND"
+    assert sable_channels["email"].verification_state == "RISKY"
+    assert sable_channels["linkedin"].discovery_state == "RESOLVED"
+    assert sable_channels["linkedin"].identity_match_state == "STRONG_MATCH"
+
+    # Never attempted: Riverbend (PERSONA_ONLY, no named person), Ferrous
+    # (UNAVAILABLE, nothing to enrich), Cobalt (hard-disqualified — excluded
+    # industry, never actionable). No row at all — NOT_ATTEMPTED by omission.
+    for slug in ("riverbend-analytics", "ferrous-grid", "cobalt-retail-systems"):
+        outcome = next(o for o in summary.outcomes if o.company.slug == slug)
+        rows = await repos.contact_enrichment.get_contact_channels(outcome.prospect_id)
+        assert rows == [], f"{slug} must never reach contact_enrichment"
+
+    # Quarry never reaches contact_enrichment at all — research exhausts its
+    # retries first.
+    rows = await repos.contact_enrichment.get_contact_channels(quarry.prospect_id)
+    assert rows == []

@@ -17,6 +17,9 @@ from groundwork.models.enums import Mode
 from groundwork.models.tables import EvidenceRow, SignalRow
 from groundwork.providers.demo.fixtures import (
     FixtureCompany,
+    FixtureEnrichment,
+    FixtureEnrichmentEmail,
+    FixtureEnrichmentLinkedIn,
     FixtureFundingEvent,
     FixtureLeadership,
     FixturePack,
@@ -27,6 +30,11 @@ from groundwork.repositories.plays import PlayRepository
 
 CANARY_ALPHA = "CANARY-ALPHA-7Q2X9"
 CANARY_BETA = "CANARY-BETA-4M8K1"
+
+ALPHA_EMAIL = "alice.alpha@alphacanary.example"
+BETA_EMAIL = "bob.beta@betacanary.example"
+ALPHA_LINKEDIN = "demo://linkedin/alice-alpha-canary"
+BETA_LINKEDIN = "demo://linkedin/bob-beta-canary"
 
 
 def _isolation_fixture_pack() -> FixturePack:
@@ -43,7 +51,9 @@ def _isolation_fixture_pack() -> FixturePack:
         target_count=2,
     )
 
-    def company(slug: str, name: str, domain: str, canary: str, leader: str) -> FixtureCompany:
+    def company(
+        slug: str, name: str, domain: str, canary: str, leader: str, email: str, linkedin: str
+    ) -> FixtureCompany:
         return FixtureCompany(
             slug=slug,
             name=name,
@@ -65,13 +75,29 @@ def _isolation_fixture_pack() -> FixturePack:
             leadership=[
                 FixtureLeadership(full_name=leader, title="VP of Sales", is_persona_match=True, source_ref="funding-note")
             ],
+            # Distinct, unique-per-company enrichment observations — the
+            # canary values a cross-prospect-isolation regression would leak.
+            enrichment=FixtureEnrichment(
+                matched=True,
+                email=FixtureEnrichmentEmail(address=email, provider_status="verified", provider_confidence=0.9),
+                linkedin=FixtureEnrichmentLinkedIn(
+                    profile_url=linkedin, asserted_full_name=leader, asserted_company_name=name,
+                    asserted_company_domain=domain, asserted_title="VP of Sales",
+                ),
+            ),
         )
 
     return FixturePack(
         play_spec=play_spec_kwargs,  # type: ignore[arg-type]
         companies=[
-            company("alpha-canary", "Alpha Canary Systems", "alphacanary.example", CANARY_ALPHA, "Alice Alpha"),
-            company("beta-canary", "Beta Canary Systems", "betacanary.example", CANARY_BETA, "Bob Beta"),
+            company(
+                "alpha-canary", "Alpha Canary Systems", "alphacanary.example", CANARY_ALPHA, "Alice Alpha",
+                ALPHA_EMAIL, ALPHA_LINKEDIN,
+            ),
+            company(
+                "beta-canary", "Beta Canary Systems", "betacanary.example", CANARY_BETA, "Bob Beta",
+                BETA_EMAIL, BETA_LINKEDIN,
+            ),
         ],
     )
 
@@ -131,3 +157,29 @@ async def test_cross_prospect_canary_isolation(session_factory) -> None:
     assert CANARY_ALPHA not in beta_blob
     assert "Beta Canary Systems" not in alpha_blob
     assert "Alpha Canary Systems" not in beta_blob
+
+    # v2 §Part 4/§N.4 — contact-enrichment isolation: each prospect's own
+    # email/LinkedIn identifier appears on its own contact_channels rows,
+    # and NEVER on the other prospect's, under real concurrent fan-out
+    # (`asyncio.gather`, bounded by the run's semaphore — same mechanism the
+    # rest of this test already exercises).
+    alpha_channels = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(alpha.prospect_id)}
+    beta_channels = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(beta.prospect_id)}
+
+    assert alpha_channels["email"].identifier == ALPHA_EMAIL
+    assert alpha_channels["linkedin"].identifier == ALPHA_LINKEDIN
+    assert beta_channels["email"].identifier == BETA_EMAIL
+    assert beta_channels["linkedin"].identifier == BETA_LINKEDIN
+
+    assert alpha_channels["email"].identifier != beta_channels["email"].identifier
+    assert alpha_channels["linkedin"].identifier != beta_channels["linkedin"].identifier
+    assert BETA_EMAIL not in (alpha_channels["email"].identifier, alpha_channels["linkedin"].identifier)
+    assert ALPHA_EMAIL not in (beta_channels["email"].identifier, beta_channels["linkedin"].identifier)
+    assert BETA_LINKEDIN not in (alpha_channels["email"].identifier, alpha_channels["linkedin"].identifier)
+    assert ALPHA_LINKEDIN not in (beta_channels["email"].identifier, beta_channels["linkedin"].identifier)
+
+    # Derived states cannot cross prospects either — both resolve
+    # independently to the same STRONG_MATCH shape (identical inputs on
+    # each side), never influenced by the other prospect's data.
+    assert alpha_channels["linkedin"].identity_match_state == "STRONG_MATCH"
+    assert beta_channels["linkedin"].identity_match_state == "STRONG_MATCH"

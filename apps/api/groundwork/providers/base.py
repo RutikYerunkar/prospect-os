@@ -13,11 +13,18 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
 
 from groundwork.models.schemas import CompanySeed, PlaySpec, SourceDocument
+
+if TYPE_CHECKING:
+    # `from __future__ import annotations` (below) makes every annotation in
+    # this module lazy, so this one-directional import (contact_base.py
+    # never imports this module) never becomes circular at runtime — see
+    # `ProviderBundle.enrichment`'s docstring.
+    from groundwork.providers.contact_base import EnrichmentProvider
 
 __all__ = [
     "make_ctx_key",
@@ -523,3 +530,10 @@ class SearchProvider(Protocol):
 class ProviderBundle:
     llm: LLMProvider
     search: SearchProvider
+    # v2 §Part 4 — `None` (the default) means no enrichment provider is
+    # wired for this run (Live Mode until V2-D lands Apollo, or
+    # `ENRICHMENT_ENABLED=false`): `engine/enrichment.py::call_enrichment()`
+    # treats that as NOT_ATTEMPTED, zero provider calls — never a silent
+    # fallback to `DemoEnrichmentProvider` (the same "no Live -> fixture
+    # fallback" invariant `llm`/`search` already honor).
+    enrichment: "EnrichmentProvider | None" = None

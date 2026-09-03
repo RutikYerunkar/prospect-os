@@ -26,6 +26,7 @@ from groundwork.models.schemas import (
     Signal,
     SourceDocument,
 )
+from groundwork.observability.enrichment_calls import EnrichmentCallRecorder
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.search_calls import SearchCallRecorder
@@ -46,6 +47,12 @@ class ProspectContext:
     events: EventEmitter
     llm_calls: LLMCallRecorder
     search_calls: SearchCallRecorder
+    # v2 §Part 4/§G — the only new field this checkpoint's frozen plan
+    # requires on `ProspectContext`. Bound to a `ContactEnrichmentRepository`
+    # scoped to THIS prospect only (see `repositories/contact_enrichment.py`)
+    # — the same per-prospect isolation `llm_calls`/`search_calls` already
+    # give every other provider boundary.
+    enrichment_calls: EnrichmentCallRecorder
 
     # Read-only awareness of the *other* prospects in this run — company
     # names/domains and dedupe keys only, never their evidence, facts, score

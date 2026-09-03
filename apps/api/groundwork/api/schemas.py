@@ -145,6 +145,11 @@ class ProspectAggregate(BaseModel):
     review: dict[str, Any] | None
     trace: list[dict[str, Any]]
     approval: ApprovalInfo
+    # v2 §Part 4/§L — additive only. One entry per (prospect, channel) with a
+    # provider-backed state; a channel that was never attempted simply has no
+    # entry (NOT_ATTEMPTED by omission — see
+    # `engine/steps/contact_enrichment.py`). No V2-E UI reads this yet.
+    contact_channels: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ApproveRequest(BaseModel):
