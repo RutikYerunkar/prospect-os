@@ -7,14 +7,17 @@ domain-purity invariant in CLAUDE.md.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from groundwork.models.enums import (
+    ActionExecutionOrigin,
     ContactVerification,
     DimensionSupport,
+    EnrichmentOrigin,
     EvidenceOrigin,
     ExclusionEvaluation,
     ProspectStage,
@@ -334,3 +337,173 @@ class ProspectOutcome(BaseModel):
     review: ReviewResult | None = None
     evidence_count: int = 0
     error: str | None = None
+
+
+# =====================================================================
+# v2 — Contact Enrichment & Governed Outbound Action
+# (docs/V2_IMPLEMENTATION_PLAN.md, frozen Rev 4, Part 4 / Part 5)
+# =====================================================================
+
+# The ONLY grammar a DEMO_FIXTURE LinkedIn identifier may carry — kept here
+# (not in `domain/contact_identity.py`) as the single source of truth so the
+# model validators below and `domain/contact_identity.py`'s pure derivation
+# can never drift apart; `domain/` imports this pattern rather than
+# redeclaring it.
+DEMO_LINKEDIN_URL_PATTERN = r"^demo://linkedin/[a-z0-9][a-z0-9\-]{0,119}$"
+_DEMO_LINKEDIN_URL_RE = re.compile(DEMO_LINKEDIN_URL_PATTERN)
+
+# `action_proposals`/`action_executions` DEMO_SIMULATED sender convention
+# (D9, Part 5 validator 4). `.invalid` is IANA-reserved and can never
+# resolve, so a demo sender is structurally incapable of being a real
+# person's address.
+DEMO_SENDER_DOMAIN = "groundwork.invalid"
+
+
+class ProviderEmailObservation(BaseModel):
+    """What the provider ASSERTED. Never a Groundwork verdict (D2) — see
+    `domain/contact_identity.py::derive_email_channel` for the pure
+    derivation that turns this into `EmailDiscoveryState`/
+    `EmailVerificationState`."""
+
+    address: str | None = None
+    provider_status: str | None = None  # the provider's own raw word, verbatim
+    provider_confidence: float | None = None
+    is_catch_all: bool | None = None
+    observed_at: datetime
+
+
+class ProviderLinkedInObservation(BaseModel):
+    """What the provider ASSERTED. Never a Groundwork verdict (D2) — see
+    `domain/contact_identity.py::derive_linkedin_channel`."""
+
+    profile_url: str | None = None
+    asserted_full_name: str | None = None
+    asserted_company_name: str | None = None
+    asserted_company_domain: str | None = None  # only if the provider supplies it
+    asserted_title: str | None = None
+    observed_at: datetime
+
+
+class ContactEnrichment(BaseModel):
+    """One successful enrichment observation group (§3.6) — mirrors the
+    `contact_enrichments` row grain (Part 5): one row per successful call,
+    matched or explicit not-found, both are observations.
+
+    Model validators 1-2 (Part 5, §H) — the `Evidence._no_fake_sources`
+    precedent extended to a second identifier class: origin decides which
+    LinkedIn identifier shape is structurally legal, enforced here AND
+    (independently) by `domain/contact_identity.py::validate_linkedin_identifier`
+    — the "secrets are scrubbed twice, not once" discipline.
+    """
+
+    prospect_id: str
+    provider: str
+    call_group_id: str
+    matched: bool
+    origin: EnrichmentOrigin
+    observed_at: datetime
+    raw_digest: str
+
+    provider_person_id: str | None = None
+    email_address: str | None = None
+    email_provider_status: str | None = None
+    email_provider_confidence: float | None = None
+    email_is_catch_all: bool | None = None
+
+    linkedin_url: str | None = None
+    linkedin_asserted_full_name: str | None = None
+    linkedin_asserted_company_name: str | None = None
+    linkedin_asserted_company_domain: str | None = None
+    linkedin_asserted_title: str | None = None
+
+    @model_validator(mode="after")
+    def _origin_bound_linkedin_grammar(self) -> "ContactEnrichment":
+        if self.linkedin_url is None:
+            return self
+        if self.origin is EnrichmentOrigin.DEMO_FIXTURE:
+            if not _DEMO_LINKEDIN_URL_RE.match(self.linkedin_url):
+                raise ValueError(
+                    "a DEMO_FIXTURE contact_enrichments row may only carry a "
+                    "demo://linkedin/<slug> LinkedIn identifier"
+                )
+        elif self.origin is EnrichmentOrigin.LIVE_PROVIDER:
+            if self.linkedin_url.startswith("demo://"):
+                raise ValueError("a LIVE_PROVIDER contact_enrichments row may not carry a demo:// identifier")
+        return self
+
+
+class ActionProposal(BaseModel):
+    """Immutable — mirrors the `action_proposals` row grain (Part 5).
+    `sender_identifier`/`recipient_identity_key` are canonical from birth
+    (§3.10); `recipient_identifier` stays the display form."""
+
+    prospect_id: str
+    run_id: str
+    draft_id: str
+    action_type: str  # ActionType
+    channel: str  # Channel
+    sender_identifier: str | None = None
+    recipient_identifier: str | None = None
+    recipient_identity_key: str | None = None
+    content_hash: str
+    hash_version: str
+    policy_version: str
+    policy_verdict: str
+    blocked_reasons: list[str] = Field(default_factory=list)
+    policy_snapshot: dict = Field(default_factory=dict)
+    origin: ActionExecutionOrigin
+    created_at: datetime
+    superseded_by: str | None = None
+
+    @model_validator(mode="after")
+    def _demo_sender_convention(self) -> "ActionProposal":
+        if self.origin is ActionExecutionOrigin.DEMO_SIMULATED and self.sender_identifier is not None:
+            if not self.sender_identifier.endswith(f"@{DEMO_SENDER_DOMAIN}"):
+                raise ValueError(
+                    f"a DEMO_SIMULATED action_proposals row's sender_identifier must end in "
+                    f"@{DEMO_SENDER_DOMAIN}"
+                )
+        return self
+
+
+class ActionExecution(BaseModel):
+    """Mirrors the `action_executions` row grain (Part 5)."""
+
+    action_proposal_id: str
+    prospect_id: str
+    run_id: str
+    action_type: str  # ActionType
+    status: str  # ActionExecutionStatus
+    idempotency_key: str
+    origin: ActionExecutionOrigin
+    approval_id: str | None = None
+    provider: str | None = None
+    recipient_identity_key: str | None = None
+    sender_identifier: str | None = None
+    message_id_header: str | None = None
+    provider_message_id: str | None = None
+    provider_thread_id: str | None = None
+    executor_id: str | None = None
+    dispatched: bool = False
+    outcome_class: str | None = None
+    attempt_count: int = 0
+    reconcile_attempts: int = 0
+    messages_scanned: int = 0
+    claimed_at: datetime | None = None
+    dispatched_at: datetime | None = None
+    settled_at: datetime | None = None
+    reconciled_at: datetime | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _demo_provider_message_id_convention(self) -> "ActionExecution":
+        if (
+            self.origin is ActionExecutionOrigin.DEMO_SIMULATED
+            and self.provider_message_id is not None
+            and not self.provider_message_id.startswith("demo://")
+        ):
+            raise ValueError(
+                "a DEMO_SIMULATED action_executions row's provider_message_id must start with demo://"
+            )
+        return self
