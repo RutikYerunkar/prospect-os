@@ -93,23 +93,46 @@ pipeline wiring, no user-visible feature flow. Full detail in "What V2-B added" 
 (`claude/v2-c-enrichment`). Scope, acceptance criteria, and the required test files are specified in
 `docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
 
-**Documents-vs-reality conflict, surfaced per `CLAUDE.md`'s instruction rather than silently resolved:**
-the V2-B task brief assumes a local `apps/api/.env` already exists with `DATABASE_URL` pointed at the
-Neon `v2-development` branch, and instructs applying the new Alembic revision there. **This session's
-remote container has no `apps/api/.env` and no Neon credentials of any kind** — this is a fresh,
-ephemeral clone (see `CLAUDE.md`'s "Environment configuration"), not the user's own machine where a
-prior session's `.env` might live. There was therefore no way to connect to Neon `v2-development` (or
-any Neon branch) from this session, and consequently no risk of an accidental production migration
-either — the credentials simply aren't present here. **The migration was never applied to any Neon
-branch.** Instead, correctness against a real Postgres server was verified against a **local, disposable
-Postgres 16 instance provisioned inside this sandbox for testing only** (`apt`-installed, a scratch
-`groundwork_test` role/database, connected via `GROUNDWORK_TEST_POSTGRES_DSN` — the exact mechanism
-`tests/test_migration_drift.py`'s own Postgres check and CI's Postgres service container already use).
-That instance is destroyed with the container; it is not reachable from anywhere else and is unrelated
-to Neon. **A future session (or the user) running this branch's migration against the real Neon
-`v2-development` branch still needs to perform Part J's safety checklist for real** — git branch, DB host
-inspection, `channel_binding` check — against that real environment; this session could not do that step
-and is not claiming to have.
+**Documents-vs-reality note, originally surfaced per `CLAUDE.md`'s instruction, now resolved:** the
+V2-B task brief assumes a local `apps/api/.env` already exists with `DATABASE_URL` pointed at the Neon
+`v2-development` branch, and instructs applying the new Alembic revision there. **This session's remote
+container has no `apps/api/.env` and no Neon credentials of any kind** — this is a fresh, ephemeral
+clone (see `CLAUDE.md`'s "Environment configuration"), not the user's own machine where a prior
+session's `.env` might live. There was therefore no way to connect to Neon `v2-development` (or any Neon
+branch) from *this* session, and consequently no risk of an accidental production migration either — the
+credentials simply aren't present here. Within this session, correctness against a real Postgres server
+was verified against a **local, disposable Postgres 16 instance provisioned inside this sandbox for
+testing only** (`apt`-installed, a scratch `groundwork_test` role/database, connected via
+`GROUNDWORK_TEST_POSTGRES_DSN` — the exact mechanism `tests/test_migration_drift.py`'s own Postgres
+check and CI's Postgres service container already use). That instance is destroyed with the container;
+it is not reachable from anywhere else and is unrelated to Neon.
+
+**Neon `v2-development` has since been migrated and verified**, by the user, on their own machine with
+real credentials this session never had. Recorded verbatim from that verification: git checkpoint branch
+`claude/v2-b-domain-persistence`; target the previously-verified Neon `v2-development` host,
+`sslmode=require`, `channel_binding=require` absent (per `CLAUDE.md`'s Part J safety checklist);
+database revision before migration `38cbecdcd585`; migration executed
+`38cbecdcd585 -> 1ec5eceed8d4`; database revision after migration `1ec5eceed8d4` (head, matching the
+Alembic repository head); `uv run alembic check` against Neon `v2-development` reported "No new upgrade
+operations detected." **Neon `v2-development` is migrated to `1ec5eceed8d4` and matches the repository's
+Alembic head.**
+
+**One clarification on scope, also recorded verbatim from that verification:** the destructive Postgres
+drift test, `tests/test_migration_drift.py::test_alembic_upgrade_head_matches_orm_metadata_on_postgres`,
+calls `Base.metadata.drop_all()` and drops `alembic_version` before running — it is written for a
+disposable target, never a real database, and was correctly **not** run against Neon `v2-development`.
+(An initial attempt to point `GROUNDWORK_TEST_POSTGRES_DSN` at it failed to connect before any
+destructive call — the DSN was being interpreted through `psycopg2` rather than `asyncpg` — and the
+variable was removed immediately afterward; no destructive operation reached Neon.) The
+destructive upgrade/drift test remains validated only against disposable local/CI Postgres targets,
+exactly as this session already verified in its own local Postgres 16 instance (above) and as CI's
+Postgres service container verifies on every PR run. Neon `v2-development`'s own correctness rests on
+the additive `alembic upgrade head` run and the `alembic check` result recorded above, not on the
+destructive drift test — which is the appropriate tool for a disposable target, not a shared
+development database meant to persist between sessions.
+
+**Neon `production` was not touched by any of this** — it was never configured, never connected to, and
+remains exactly as it was before V2-B, per the checkpoint's own safety requirements.
 
 ---
 
@@ -3129,20 +3152,30 @@ SQLite and plain `ALTER` statements on every other dialect, so one migration bod
 This matters because `test_migration_drift.py` runs `alembic upgrade head` unconditionally against
 SQLite (not only Postgres) as its schema-drift oracle.
 
-**J. Database safety verification actually performed** (see the "documents-vs-reality conflict" note
-above for what could NOT be performed and why): confirmed no `apps/api/.env` exists in this session's
-container (`ls`/`find` — none found) and therefore no Neon connection string of any kind was ever
-configured or reachable from here. `alembic upgrade head` was run and verified against (1) a fresh
-scratch SQLite file, and (2) a real local Postgres 16 server provisioned inside this sandbox
-specifically for testing (`apt`-installed `postgresql-16`, a scratch `groundwork_test` role/database,
-`localhost:5432`, connected only via `GROUNDWORK_TEST_POSTGRES_DSN` — never `DATABASE_URL`, never
-anything resembling a Neon connection string, and it is destroyed with this container). Directly
-verified against that Postgres instance with `psql`: a v1-shaped `approvals` insert (no `scope` given)
-lands as `scope='PROSPECT'` with the three new columns `NULL`; an explicit `scope='ACTION'` insert with
-the three fields left `NULL` is rejected by `ck_approvals_action_scope_complete`; `\d approvals` shows
-the CHECK constraint and FK; `pg_indexes` shows `uq_action_executions_live_recipient`'s `WHERE` clause
-verbatim. **Neon `v2-development` was never touched, was never reachable, and no credential for it exists
-anywhere in this session.**
+**J. Database safety verification.** Within this session (no `apps/api/.env`/Neon credentials present —
+confirmed via `ls`/`find`): `alembic upgrade head` was run and verified against (1) a fresh scratch
+SQLite file, and (2) a real local Postgres 16 server provisioned inside this sandbox specifically for
+testing (`apt`-installed `postgresql-16`, a scratch `groundwork_test` role/database, `localhost:5432`,
+connected only via `GROUNDWORK_TEST_POSTGRES_DSN` — never `DATABASE_URL`, never anything resembling a
+Neon connection string, and it is destroyed with this container). Directly verified against that
+Postgres instance with `psql`: a v1-shaped `approvals` insert (no `scope` given) lands as
+`scope='PROSPECT'` with the three new columns `NULL`; an explicit `scope='ACTION'` insert with the three
+fields left `NULL` is rejected by `ck_approvals_action_scope_complete`; `\d approvals` shows the CHECK
+constraint and FK; `pg_indexes` shows `uq_action_executions_live_recipient`'s `WHERE` clause verbatim.
+
+**Neon `v2-development` was subsequently migrated and verified by the user**, on their own machine with
+real credentials this session never had, following the same Part J safety checklist this session
+couldn't perform for real: git branch confirmed `claude/v2-b-domain-persistence`; target confirmed as
+the previously-verified Neon `v2-development` host; `sslmode=require`; `channel_binding=require` absent.
+`alembic current` before: `38cbecdcd585`. Migration executed: `38cbecdcd585 -> 1ec5eceed8d4`. `alembic
+current` after: `1ec5eceed8d4` (head). `alembic check`: "No new upgrade operations detected." The
+destructive `test_alembic_upgrade_head_matches_orm_metadata_on_postgres` test (it calls
+`Base.metadata.drop_all()` and drops `alembic_version`) was correctly **not** run against Neon — an
+initial attempt to point `GROUNDWORK_TEST_POSTGRES_DSN` at it failed to connect (DSN interpreted through
+`psycopg2` rather than `asyncpg`) before any destructive call, and the variable was removed immediately;
+that destructive test stays scoped to disposable local/CI Postgres targets, which is what it's for.
+**Neon `v2-development` is migrated to `1ec5eceed8d4`, matches the Alembic repository head, and Neon
+`production` was never touched, never configured, and never connected to.**
 
 **K. Tests — 190 new, all green; zero paid provider calls.**
 - `tests/test_contact_identity.py` (45) — the full person/company/combination matrix; `PROVIDER_ERROR !=
@@ -3185,9 +3218,6 @@ new test files plus an extended `tests/test_migration_drift.py`; this file. **Ze
 or environment secrets.
 
 **Known risks/findings:**
-- The Neon `v2-development` migration itself is unverified from this session (see the conflict note
-  above) — a future session with real credentials should run it and confirm `alembic upgrade head` is
-  clean there too before V2-C starts writing rows.
 - `idna` was previously only a transitive dependency (pulled in by `httpx`/similar); it is now pinned
   directly in `pyproject.toml` since `domain/contact_identity.py` imports it explicitly — this is a new
   direct dependency edge, worth knowing about if a future minimal-install context ever trims transitive
@@ -3202,9 +3232,9 @@ or environment secrets.
 ## Next task
 
 **Immediate next task: V2-C — Enrichment boundary + Demo fixtures + pipeline step.** Scope, acceptance
-criteria, and the required test files are specified in `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Before
-starting, a future session should attempt the real Neon `v2-development` migration (see "documents-vs-
-reality conflict" above) if it has credentials this session did not.
+criteria, and the required test files are specified in `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Neon
+`v2-development` is migrated to `1ec5eceed8d4` (see "What V2-B added" → "J. Database safety
+verification" above) — V2-C can proceed against it without a prior migration step.
 
 **V1/I2's own leftover backlog** (see below) remains folded into V2-J per the "v2" section above — not
 scheduled before V2-C.
