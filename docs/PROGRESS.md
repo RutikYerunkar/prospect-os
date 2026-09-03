@@ -45,6 +45,53 @@ further work.
 
 ---
 
+## v2 — Contact Enrichment & Governed Outbound Action
+
+**Groundwork v1 remains production-stable.** Everything above (Checkpoints A–I2) describes v1, which
+stays exactly as documented — nothing in v1's behavior, schema, or deployment changes because v2 work
+has started. **`v1.0.0-production` is the preserved baseline**: the tag a v2 phase gate diffs the
+canonical demo board against (`docs/V2_IMPLEMENTATION_PLAN.md`'s Verification procedure), and the
+commit v2 must be able to point back to if anything needs to be compared against "before v2 touched
+anything."
+
+**V2-0 — isolation is complete.** Before any v2 design or code work began, the v2 track was isolated
+from the v1 production path:
+- **Integration branch `feature/v2-contact-enrichment`** exists and is the target for every v2
+  checkpoint PR. It is never deployed and is never pushed to directly — see
+  `docs/V2_IMPLEMENTATION_PLAN.md` Part 12 for the full branch/PR workflow.
+- **Neon `v2-development` child branch** is the only database v2 work touches. The Neon `production`
+  branch — what Render's `master` deployment actually reads — is never migrated during v2 development.
+- **Render remains `master`-only.** Render's deploy target does not change; it continues serving `master`
+  exactly as it does today, unaffected by any commit on `feature/v2-contact-enrichment` or any
+  `claude/v2-*` branch until the single V2-J integration PR.
+
+**V2-A — architecture review completed.** This checkpoint (`claude/v2-a-docs`) persisted the frozen v2
+architecture into repository documentation: `docs/V2_IMPLEMENTATION_PLAN.md` (new), the "v2
+architectural extension" section of `docs/ARCHITECTURE.md`, this section, and the v2 invariants block in
+`CLAUDE.md`. **The frozen architecture is Rev 4** — recipient-level duplicate-send protection scoped to
+`LIVE_EXTERNAL` sends only (never Demo), `approvals.hash_version` added to the additive schema with a
+structural CHECK constraint, and `sender_identifier` canonicalization pinned at every persistence layer.
+Full revision history in `docs/V2_IMPLEMENTATION_PLAN.md`'s header. V2-A changed no application code, no
+migration, and made no provider call — verified below.
+
+**The I2 backlog (see "Next task" above) is intentionally folded into V2-J**, not dropped and not
+blocking v2 work that precedes it. Re-verifying `docs/DEPLOYMENT.md` against the real Render/Neon setup,
+manual production validation of the I2 proxy, the per-IP-rate-limiting-behind-the-proxy design, and
+`make search-smoke` all move to V2-J's scope alongside v2's own quality/metrics/release work
+(`docs/V2_IMPLEMENTATION_PLAN.md` Part 13).
+
+**Next checkpoint: V2-B — Domain model + additive persistence** (`claude/v2-b-domain-persistence`).
+Scope, acceptance criteria, and the required test files are specified in
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
+
+**V2-A verification.** `git diff` against the pre-V2-A tree touches exactly four files, all
+documentation: `docs/V2_IMPLEMENTATION_PLAN.md` (new), `docs/ARCHITECTURE.md`, `docs/PROGRESS.md` (this
+file), `CLAUDE.md`. Zero files under `apps/api` or `apps/web` changed. Zero migrations added. Zero
+OpenAI/Tavily/Apollo/Gmail/Hunter calls made. `make test` was not run because no application code
+changed.
+
+---
+
 ## What was built
 
 **Models** (`apps/api/groundwork/models/`)
@@ -2964,11 +3011,16 @@ touched, so no frontend build/lint/typecheck/test was run. Zero OpenAI/Tavily ca
 
 ## Next task
 
+**Immediate next task: V2-B — Domain model + additive persistence** (see the "v2" section above and
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13). The list below is v1/I2's own leftover backlog, preserved
+here as the historical record of what I2 left open — per the "v2" section above, it is **intentionally
+folded into V2-J**, not scheduled before V2-B.
+
 **This I2 slice (same-origin proxy) is complete.** Checkpoints A–I1 remain unchanged and verified
 byte-identical; nothing in `apps/api` was touched. Zero real (paid) OpenAI/Tavily calls were made
 anywhere in this session's implementation or tests.
 
-**What a future session should look at next, in order:**
+**What a future session should look at next, in order (folded into V2-J):**
 
 1. **Re-verify `docs/DEPLOYMENT.md` against the actual Render/Neon setup** — it was written for a
    deployment that didn't exist yet and is now stale in places (see "Current checkpoint" above). Confirm

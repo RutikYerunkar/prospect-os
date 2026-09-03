@@ -376,3 +376,90 @@ See `docs/IMPLEMENTATION_PLAN.md` §22 for the full folder structure. The load-b
 `domain/` (scoring, dedupe, grounding, review) is pure — no I/O, no imports from `providers/` or
 `repositories/`. That's what keeps the four modules that must be *right* unit-testable in
 milliseconds, and it's the answer to "can I use your scorer in a batch pipeline?": `import`.
+
+---
+
+## v2 architectural extension — Contact Enrichment & Governed Outbound Action
+
+**Status: approved architecture (rev 4 — frozen), persisted at Checkpoint V2-A. No application code
+changes with it.** Full rationale, every design decision (D1–D14), the domain model, the checkpoint
+plan (V2-A–V2-J), and the preserved-invariants checklist live in
+`docs/V2_IMPLEMENTATION_PLAN.md`. This section is the five-minute map of what v2 adds on top of
+everything above — it does not restate or revise the v1 architecture described in the rest of this
+file.
+
+v2 extends the v1 pipeline (`research → qualify → identify contact → draft → review → human approval →
+stop`) one stage further, without changing anything about how the v1 stages work:
+
+```
+research → qualify → identify contact → contact enrichment → channel-specific outreach
+    → deterministic policy → hash-bound human approval → governed action
+```
+
+`contact enrichment` is a new, `optional=True` pipeline step (`engine/steps/contact_enrichment.py` —
+deliberately never named `enrich`, which already means the v1 field-precedence merge in
+`engine/steps/enrich.py`). It calls an `EnrichmentProvider` (Apollo live, a fixture-driven provider in
+Demo) and derives five independent, provider-observed state axes — person identity (v1's unchanged
+`ContactVerification`), email discovery, email verification, LinkedIn resolution, and LinkedIn identity
+match — never one collapsed flag. `channel-specific outreach` replaces v1's single email draft with one
+draft per eligible channel (email, LinkedIn). `deterministic policy` is a new pure module,
+`domain/action_policy.py`, that evaluates whether a drafted action is even eligible to be proposed for
+approval — same "deterministic code decides, LLM never does" discipline as ICP scoring and the review
+verdict. `hash-bound human approval` extends v1's existing `approvals` audit table (additively — every
+v1 row stays valid) so an approval authorizes one exact outbound action (channel + sender + recipient +
+subject + body, bound by a versioned content hash), not a prospect. `governed action` is the new
+execution layer: a claim → dispatch → classify → (optionally) reconcile state machine, writing to new,
+additive tables (`action_proposals`, `action_executions`, `action_events`, …) that sit beside — never
+inside — the v1 schema.
+
+### The extension in one paragraph
+
+Every identifier that can reach a human — an email address, a LinkedIn URL — now goes through the exact
+discipline v1 already applies to evidence: **providers return observations, never verdicts; `domain/`
+derives states from those observations, pure and offline; and an LLM can never author an identifier**,
+mirroring `Evidence._no_fake_sources`'s origin-typed structural validation for a second and third
+identifier class. Nothing in `engine/`, `domain/`, or `api/` gets an "if this is a real send" branch —
+Demo and Live share the exact same action state machine, `action_policy` evaluation, and approval/hash
+mechanics; only the bound `EnrichmentProvider` / `EmailSendProvider` implementation differs, the same
+Protocol-swap discipline that already separates Demo Mode from Live Mode everywhere else in this
+codebase.
+
+### What must never be confused with a verdict, a credential, or proof of delivery
+
+- **Provider observations are not verdicts.** Apollo's `provider_status`/`provider_confidence`, and a
+  LinkedIn provider's asserted name/company/domain, are raw claims persisted as `contact_enrichments`
+  rows. `domain/contact_identity.py` — pure, no provider imports — is what turns an observation into a
+  `EmailVerificationState` or a `LinkedInIdentityState`. `domain/` never contains the string `"apollo"`.
+- **LLMs cannot create email or LinkedIn identifiers**, and never perform identity matching. Identifiers
+  reach the system only from a provider row; identity matching is deterministic, versioned, string-based
+  matching in `domain/contact_identity.py` (no fuzzy matching, no edit distance) — the same standing an
+  LLM has in the review verdict: none.
+- **LinkedIn has no SEND executor.** `ActionType` has exactly two members — `EMAIL_SEND` and
+  `LINKEDIN_COPY_AND_OPEN` — and there is no `LINKEDIN_SEND`. Nothing can invoke what does not exist;
+  this is enforced by the type, not a policy check.
+- **Demo simulated execution is zero-egress.** `DemoEmailSendProvider` opens no socket, performs no DNS
+  lookup, and writes an `action_executions` row carrying a validator-enforced `demo://` message id and
+  the IANA-reserved, unresolvable `@groundwork.invalid` sender. This is what lets Demo Mode stay fully
+  public — the same "Demo Mode must never gain an operator-session dependency" invariant Checkpoint I1
+  established for the rest of the product — while the action architecture is still genuinely walkable
+  end to end.
+- **Live external action remains operator-only.** `ActionExecutionOrigin.LIVE_EXTERNAL` names execution
+  on the live external-action path — a run capable of a real external side effect. **It is not itself
+  proof that a message was delivered or even left the system**; that is represented separately by the
+  execution's status/outcome (`SUCCEEDED` / `FAILED` / `UNCERTAIN` / `ABANDONED`, driven by the send
+  failure taxonomy and bounded Gmail reconciliation in `docs/V2_IMPLEMENTATION_PLAN.md` §3.3–§3.4). A
+  Live execution requires an operator session, a matching approval, a freshly re-verified sender
+  identity, a matching content hash, and a fresh policy pass — five gates, all server-side, none of them
+  the UI.
+- **Request idempotency and recipient-level send safety are separate mechanisms**, enforced separately
+  and tested separately. Request idempotency (a `sha256(approval_id | content_hash)` key with a
+  non-partial `UNIQUE` constraint) stops the *same approved execution* from running twice, and binds in
+  both Demo and Live. Recipient-level send safety (a partial unique index on the normalized recipient
+  address) stops *two different approvals* from sending two initial emails to the same human, and binds
+  **only** `LIVE_EXTERNAL` — a `DEMO_SIMULATED` row is not a message to a human, so it can neither
+  consume nor be blocked by this rule. Conflating these two questions was a real mistake caught and
+  corrected during this architecture's own review process (see `docs/V2_IMPLEMENTATION_PLAN.md` §3.5).
+
+Everything else about how v2 is built — the checkpoint-by-checkpoint plan, the exact schema, the content
+hash algorithm, the Gmail OAuth/reconciliation design, and the full preserved-invariants checklist —
+lives in `docs/V2_IMPLEMENTATION_PLAN.md`, not here.
