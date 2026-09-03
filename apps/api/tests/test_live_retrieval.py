@@ -13,6 +13,7 @@ from groundwork.engine.context import ProspectContext
 from groundwork.engine.search import call_search
 from groundwork.models.enums import EvidenceOrigin
 from groundwork.models.schemas import CompanySeed
+from groundwork.observability.enrichment_calls import EnrichmentCallRecorder
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.search_calls import SearchCallRecorder
@@ -132,6 +133,9 @@ async def test_research_step_produces_live_fetch_evidence_with_real_urls(session
         trace=None, events=EventEmitter(run_id=run_id, events=repos.events),
         llm_calls=LLMCallRecorder(run_id=run_id, prospect_id=prospect_id, provider="fake_llm", repo=repos.llm_calls),
         search_calls=SearchCallRecorder(run_id=run_id, prospect_id=prospect_id, repo=repos.search),
+        enrichment_calls=EnrichmentCallRecorder(
+            run_id=run_id, prospect_id=prospect_id, provider="none", repo=repos.contact_enrichment
+        ),
     )
     result = await research(ctx)
     assert result.ok

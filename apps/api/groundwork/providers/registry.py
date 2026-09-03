@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+from groundwork.config import settings
+from groundwork.engine.enrichment_budget import EnrichmentCallBudget
 from groundwork.models.enums import Mode
 from groundwork.providers.base import ProviderBundle, ProviderNotConfigured
+from groundwork.providers.demo.contact_enrichment import DemoEnrichmentProvider
 from groundwork.providers.demo.demo_llm import DemoLLMProvider
 from groundwork.providers.demo.demo_search import DemoSearchProvider
 from groundwork.providers.demo.fixtures import FixturePack, load_fixture_pack
@@ -12,7 +15,12 @@ from groundwork.providers.demo.fixtures import FixturePack, load_fixture_pack
 
 def build_demo_provider_bundle(seed: int, fixture_pack: FixturePack | None = None) -> ProviderBundle:
     pack = fixture_pack or load_fixture_pack()
-    return ProviderBundle(llm=DemoLLMProvider(pack, seed), search=DemoSearchProvider(pack, seed))
+    enrichment_budget = EnrichmentCallBudget(max_calls=settings.max_enrichment_calls_per_run)
+    return ProviderBundle(
+        llm=DemoLLMProvider(pack, seed),
+        search=DemoSearchProvider(pack, seed),
+        enrichment=DemoEnrichmentProvider(pack, seed, budget=enrichment_budget),
+    )
 
 
 def build_provider_bundle(

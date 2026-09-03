@@ -10,6 +10,7 @@ from groundwork.engine.budget import DEMO_BUDGET, PipelineBudget
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.step import Step, StepResult
 from groundwork.engine.steps.contact import contact
+from groundwork.engine.steps.contact_enrichment import contact_enrichment
 from groundwork.engine.steps.enrich import enrich
 from groundwork.engine.steps.personalize import personalize
 from groundwork.engine.steps.research import research
@@ -18,6 +19,7 @@ from groundwork.engine.steps.score import score
 from groundwork.engine.steps.signals import signals
 from groundwork.models.enums import ProspectStage
 from groundwork.providers.base import STEP_RETRYABLE
+from groundwork.providers.contact_base import ENRICHMENT_STEP_RETRYABLE
 
 STAGE_BY_STEP: dict[str, ProspectStage] = {
     "research": ProspectStage.RESEARCH,
@@ -25,6 +27,10 @@ STAGE_BY_STEP: dict[str, ProspectStage] = {
     "enrich": ProspectStage.ENRICH,
     "score": ProspectStage.SCORE,
     "contact": ProspectStage.CONTACT,
+    # v2: `contact_enrichment` deliberately has no `STAGE_BY_STEP` entry — it
+    # is an additive sub-step of contact resolution (same CONTACT phase, no
+    # new `ProspectStage` member minted for it), so it emits `step.started`/
+    # `step.completed` like every step but no extra `prospect.stage_changed`.
     "personalize": ProspectStage.PERSONALIZE,
     "review": ProspectStage.REVIEW,
 }
@@ -99,8 +105,18 @@ def build_prospect_pipeline(budget: PipelineBudget = DEMO_BUDGET) -> Pipeline:
             Step(name="enrich", run_fn=enrich, depends_on=("signals",), timeout_s=d),
             Step(name="score", run_fn=score, depends_on=("enrich",), timeout_s=d),
             Step(name="contact", run_fn=contact, depends_on=("score",), timeout_s=d, optional=True),
+            # v2 — never named "enrich" (C4: that name is already taken by
+            # the v1 field-precedence merge step above). Optional: a
+            # contact-enrichment provider failure degrades this one
+            # prospect's enrichment rather than crashing it (§Part 4/§F).
             Step(
-                name="personalize", run_fn=personalize, depends_on=("contact",), timeout_s=budget.personalize_timeout_s,
+                name="contact_enrichment", run_fn=contact_enrichment, depends_on=("contact",), timeout_s=d,
+                max_retries=budget.contact_enrichment_max_retries, retry_on=ENRICHMENT_STEP_RETRYABLE,
+                optional=True, backoffs_s=budget.backoffs_s,
+            ),
+            Step(
+                name="personalize", run_fn=personalize, depends_on=("contact_enrichment",),
+                timeout_s=budget.personalize_timeout_s,
                 max_retries=budget.personalize_max_retries, retry_on=STEP_RETRYABLE, optional=True,
                 backoffs_s=budget.backoffs_s,
             ),

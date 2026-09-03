@@ -60,6 +60,7 @@ def _ctx(*, play_spec: PlaySpec, evidence: list[Evidence], profile: CompanyProfi
         run_id="r-1", prospect_id="p-1", company=_company(), dedupe_key="k",
         play_spec=play_spec, providers=None, reference_date=date(2026, 1, 1),  # type: ignore[arg-type]
         trace=_Noop(), events=_Noop(), llm_calls=_Noop(), search_calls=_Noop(),  # type: ignore[arg-type]
+        enrichment_calls=_Noop(),  # type: ignore[arg-type]
     )
     ctx.evidence = evidence
     ctx.facts = ResearchFacts(company=_company(), profile=profile)

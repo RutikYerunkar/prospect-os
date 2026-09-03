@@ -21,27 +21,24 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **H2 — real live web search** | *(merged after this row was written — see repo history for the exact commit)* (branch `claude/checkpoint-h2-implementation-w7upys`) | **REAL OpenAI LLM + REAL TAVILY SEARCH** — `LIVE LLM · LIVE SEARCH`. Pinned `tavily-python==0.8.0`, process-scoped `LiveSearchRuntime`, real `TavilySearchProvider` behind the same `SearchProvider` Protocol; real multi-stage discovery (`engine/discovery.py` — bounded search → `DISCOVERY_EXTRACTION` LLM → deterministic/`DOMAIN_SELECTION`-fallback domain resolution → identity gate), never a model-authored domain; real per-company retrieval reusing H1's winner-selection + one batched Tavily `extract()` call per prospect; a real bug fixed in `engine/steps/research.py` (Evidence origin/URL used to be hardcoded to `DEMO_FIXTURE`/`None` regardless of what actually produced it); NEW Live Mode requires BOTH OpenAI and Tavily runtimes, never a fixture-search fallback; historical Checkpoint G `provider_profile` rows render unchanged. Demo Mode preserved byte-identical at every gate. |
 | **I1 — Production Foundation** | `2fb704c` (merged to `master` via PR #10) | Makes the prototype deployable without changing what it computes. DB-correct atomic SSE sequencing (`UPDATE...RETURNING`, replacing app-level `MAX(seq)+1`); an ownership-safe execution lease (`executor_id`/heartbeat/reaper) so a second local process or a fast restart never double-finalizes a run, with no auto-resume by design; optional Postgres support behind the same `DATABASE_URL` seam (SQLite unchanged as local-dev default; Alembic manages Postgres, drift-tested against a real instance); a non-persisting play-preview endpoint; an operator-gated Live Mode (signed session cookie + CSRF) on top of the existing provider-configuration gate, with Live cost/abuse controls (active-run cap, daily allowance, in-process rate limits); security/observability hardening (request-id middleware, body-size cap, trusted-host check, catch-all error handler, dual-point secret redaction, structured JSON logging); a `/api/ready` endpoint distinct from `/api/health`; a single API `Dockerfile` + frontend prod config; PR CI (SQLite + Postgres service container + migration drift + frontend lint/typecheck/build + Docker build), zero paid provider calls. Demo Mode preserved byte-identical at every phase gate. |
 | **I2 — Deployment hardening (same-origin API proxy)** | *this commit* | **Real cloud deployment already exists** (Render frontend + API, Neon Postgres — provisioned outside any committed session; see "Current checkpoint" below for why this doc is only catching up now, not describing new provisioning work). This slice fixes the one blocker in that deployment: the frontend and API are two separate `*.onrender.com` origins with no custom domain, so the operator session's host-only cookie couldn't represent a real same-site session. Added a same-origin Next.js Route Handler proxy (`apps/web/app/api/[...path]/route.ts`) so the browser only ever talks to the frontend's own origin at relative `/api/...` paths; the proxy forwards server-to-server to a new server-only `GROUNDWORK_API_ORIGIN` env var. No backend change, no auth/CSRF/cookie model change — see "What Checkpoint I2 added" below. |
+| **V2-A — v2 architecture & docs** | (branch `claude/v2-a-docs`) | Persisted the frozen Rev 4 v2 architecture into `docs/V2_IMPLEMENTATION_PLAN.md`, the v2 section of `docs/ARCHITECTURE.md`, and the v2 invariants in `CLAUDE.md`. Zero application code, zero migration, zero provider call. |
+| **V2-B — Domain model + additive persistence** | (branch `claude/v2-b-domain-persistence`) | v2 enums, pure `domain/contact_identity.py` (email identity normalization, origin-aware LinkedIn identifier grammar, deterministic person/company identity matching, last-known-good pure helpers), `domain/content_hash.py`, `domain/action_policy.py`; nine additive tables + `approvals.hash_version`/CHECK + the `LIVE_EXTERNAL`-only partial unique recipient index; one additive Alembic revision, drift-clean on a real Postgres 16; Neon `v2-development` migrated to `1ec5eceed8d4` by the user. See "What V2-B added" below. |
+| **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step** | *this commit* (branch `claude/v2-c-enrichment`) | `providers/contact_base.py` (`EnrichmentProvider` Protocol, observations only — D2); `DemoEnrichmentProvider` (`origin=DEMO_FIXTURE`, fixture-backed, scripted failures, an `EnrichmentCallBudget`); `engine/enrichment.py::call_enrichment` (the only enrichment telemetry-persistence seam); the `contact_enrichment` pipeline step (never named `enrich` — C4), optional, wired `contact -> contact_enrichment -> personalize`; `ContactEnrichmentRepository` (§3.6 last-known-good, guarded upserts); the canonical Demo matrix (Northwind VERIFIED+STRONG_MATCH, Sable RISKY-email+STRONG_MATCH-LinkedIn, everyone else NOT_ATTEMPTED by omission); an additive `contact_channels` field on the prospect aggregate API. Canonical v1 board byte-identical. No migration (schema already landed at V2-B). Zero paid/live provider calls. See "What V2-C added" below. |
 
 ---
 
 ## Current checkpoint
 
-**I2 — Deployment hardening, in progress.** A real deployment (Render frontend + API, Neon Postgres)
-already exists in production and Demo Mode already works end-to-end there — **this happened outside
-any committed session**, so `docs/DEPLOYMENT.md`'s "What a real deployment still needs" checklist and
-this file's prior "Checkpoint I2 explicitly not started" note were both stale the moment that
-provisioning happened; nothing here tracked it until now. This is flagged explicitly per `CLAUDE.md`'s
-instruction to surface a documents-vs-reality conflict rather than silently resolve it — a future
-session (or the user) should treat `docs/DEPLOYMENT.md`'s environment-variable/provisioning specifics
-as needing a re-verify-against-Render pass, not as ground truth.
+**V2-C — Enrichment provider boundary + Demo fixtures + pipeline step — COMPLETE.** See "What V2-C
+added" below for the full slice. `master`/production/Render/Neon `production` are untouched — this
+checkpoint lives entirely on `claude/v2-c-enrichment`, targeting a PR into
+`feature/v2-contact-enrichment` (never `master`) per `docs/V2_IMPLEMENTATION_PLAN.md` Part 12.
 
-This slice of I2 closed the one specific blocker named for it: the operator session cookie's intended
-same-site topology, broken by the frontend/API being separate origins with no custom domain. See "What
-Checkpoint I2 added" below. Checkpoints A–I1 remain intact and byte-identical — this is a frontend-only
-change; nothing in `apps/api` was touched.
+v1 (Checkpoints A–I2, table above) remains production-stable on `master` throughout — v2 development
+never touches it until the single V2-J integration PR.
 
-A future session should read `CLAUDE.md`, `docs/ARCHITECTURE.md`, and this file before starting any
-further work.
+A future session should read `CLAUDE.md`, `docs/V2_IMPLEMENTATION_PLAN.md`, `docs/ARCHITECTURE.md`, and
+this file before starting any further work.
 
 ---
 
@@ -3229,15 +3226,225 @@ or environment secrets.
 
 ---
 
+## What V2-C added
+
+**Scope: the provider boundary activates, Demo-only.** No Apollo, no Gmail, no Live enrichment, no
+V2-E UI, no V2-F channel-outreach changes beyond what keeps the pipeline compiling. Every external call
+in this checkpoint is fixture-backed; zero OpenAI/Tavily/Apollo/Hunter/Gmail calls were made anywhere in
+its implementation or tests.
+
+**A. Provider Protocol** (`groundwork/providers/contact_base.py`, new — separate from `providers/base.py`
+only to avoid a 700-line file, same idioms). `EnrichmentAttemptKind`/`EnrichmentAttemptTelemetry`
+(mirrors `SearchAttemptTelemetry` field-for-field), `PersonEnrichmentQuery`, `PersonEnrichmentResult`
+(observations only — D2; never `EmailDiscoveryState`/`EmailVerificationState`/
+`LinkedInResolutionState`/`LinkedInIdentityState`/a review verdict/action eligibility), the
+`EnrichmentProviderError` hierarchy (`EnrichmentTimeout`/`EnrichmentProviderUnavailable`/
+`EnrichmentRateLimited` step-retryable; `EnrichmentAuthError`/`EnrichmentInvalidResponse`/
+`EnrichmentQuotaExceeded`/`EnrichmentBudgetExceeded` permanent), and the `EnrichmentProvider` Protocol
+itself — `name`, `origin`, and an adapter-owned `email_status_map` attribute (so `engine/enrichment.py`
+and the repository stay provider-agnostic; `domain/` never contains a provider's name — D2).
+`ProviderEmailObservation`/`ProviderLinkedInObservation` stay defined in `models/schemas.py` (V2-B) and
+are re-exported here, mirroring the `SourceDocument` precedent in `providers/base.py`.
+
+**B. `DemoEnrichmentProvider`** (`groundwork/providers/demo/contact_enrichment.py`, new) —
+fixture-backed, `origin = DEMO_FIXTURE` always. Looks up the fixture company by `company_domain` (the
+Protocol never sees a `CompanySeed`/slug — `FixturePack.company_by_domain()`, new). Scripted failures
+keyed by `(ctx_key, EnrichmentOperation.PERSON_ENRICHMENT)`, mirroring `DemoSearchProvider`'s
+`(run_id, prospect_id, step_name)` idiom exactly. `DEMO_EMAIL_STATUS_MAP` (the demo provider's own raw
+status vocabulary — `verified`/`catch_all`/`risky`/`unverifiable`/`invalid` — lives here, not in
+`domain/`, mirroring where `APOLLO_EMAIL_STATUS_MAP` will live in V2-D). An `EnrichmentCallBudget`
+(`groundwork/engine/enrichment_budget.py`, new — mirrors `SearchCallBudget`'s atomic reserve-before-call
+lock exactly) is checked *inside* the provider, constructor-injected, exactly where `SearchCallBudget`/
+`RunBudget` are checked in their own live providers — never at the `call_enrichment()` call site.
+
+**C. Fixture pack extension** (`groundwork/providers/demo/fixtures.py`) — `FixtureEnrichmentEmail`/
+`FixtureEnrichmentLinkedIn`/`FixtureEnrichment` (observations, never verdicts — no fixture field for
+`LinkedInResolutionState`/`LinkedInIdentityState`/`EmailDiscoveryState`), plus
+`enrichment`/`enrichment_failure_script` on `FixtureCompany`. Purely additive to the YAML schema —
+existing fixture fields untouched.
+
+**D. Canonical Demo matrix** (`groundwork/fixtures/demo_pack.yaml`) — exactly Part 7's frozen matrix,
+added only to Northwind Labs and Sable Compute (the only two the plan specifies an `enrichment:` block
+for):
+- **Northwind** — `priya.natarajan@northwindlabs.com` / `provider_status: verified` /
+  `demo://linkedin/priya-natarajan` asserting the same name/company/domain already grounded by the v1
+  fixture → derives `FOUND`+`VERIFIED` (email) and `RESOLVED`+`STRONG_MATCH` (LinkedIn). The hero path:
+  both actions eligible once V2-H lands.
+- **Sable** — `marcus.webb@sablecompute.dev` / `provider_status: catch_all` /
+  `demo://linkedin/marcus-webb` → derives `FOUND`+`RISKY` (email — permanently unsendable, no override,
+  D7) and `RESOLVED`+`STRONG_MATCH` (LinkedIn) — proves the two axes are independent.
+- **Riverbend** (`PERSONA_ONLY`, no named person) and **Ferrous** (`UNAVAILABLE`, no leadership at all) —
+  `contact_enrichment` step skips (`ctx.contact.full_name is None`) — `NOT_ATTEMPTED` by omission (no
+  `contact_channels` row at all).
+- **Cobalt** (hard-disqualified, excluded industry) — the step also skips when `ctx.score.disqualified`
+  is true ("not attempted; never actionable" per the frozen matrix) — a deliberate, documented step-level
+  rule, not a fixture omission; Cobalt *does* have a named, VERIFIED persona (Dana Whitfield), so without
+  this check it would otherwise be attempted.
+- **Quarry** — never reaches `contact_enrichment` at all (research exhausts its retries first).
+- **Northwind Labs Inc.** (duplicate) — pipeline never runs for it.
+
+**E. Pipeline step** (`groundwork/engine/steps/contact_enrichment.py`, new — deliberately never named
+`enrich`, C4/§F: `engine/steps/enrich.py` already means the v1 field-precedence merge). Wired
+`contact -> contact_enrichment -> personalize` in `engine/pipeline.py` (`personalize`'s `depends_on`
+retargeted from `contact` to `contact_enrichment`); `Step(optional=True, max_retries=
+budget.contact_enrichment_max_retries, retry_on=ENRICHMENT_STEP_RETRYABLE)` — a provider failure degrades
+only this one prospect's enrichment (visible in the trace as a `FAILED` `contact_enrichment` task row),
+never crashes the run. No new `STAGE_BY_STEP`/`ProspectStage` entry (deliberate — an additive sub-step of
+CONTACT, not a new pipeline phase; avoids a redundant `prospect.stage_changed` event and any frontend
+`KNOWN_EVENT_TYPES` change). `Contact.verification` is never written here (C3) — only `contact_channels`.
+`PipelineBudget.contact_enrichment_max_retries` (default `1`) is a new additive field; `DEMO_BUDGET`'s
+existing v1 fields are untouched.
+
+**F. Engine call seam** (`groundwork/engine/enrichment.py::call_enrichment`, new) — the only place
+enrichment telemetry is persisted, mirroring `call_structured`/`call_search` exactly: invoke
+`ctx.providers.enrichment.enrich_person(...)`, persist on success, persist-then-reraise on
+`EnrichmentProviderError`. Returns `None` (no call made) when `ctx.providers.enrichment is None` — Live
+Mode before V2-D, or enrichment disabled — never a fixture fallback (honors the "no Live -> fixture
+fallback" invariant `llm`/`search` already keep). `ProviderBundle` gained an `enrichment: EnrichmentProvider
+| None = None` field (a `TYPE_CHECKING`-only import from `contact_base.py` avoids a runtime circular
+import with `providers/base.py`); Live's `build_provider_bundle` passes no enrichment provider at all
+(V2-D scope), so a Live run's `contact_enrichment` step is honestly `NOT_ATTEMPTED` today.
+
+**G. `ContactEnrichmentRepository`** (`groundwork/repositories/contact_enrichment.py`, new) — the §3.6
+last-known-good algorithm exactly:
+- `record_success()`: `enrichment_calls` attempt row(s) → `add → flush()` → the immutable
+  `contact_enrichments` observation row (re-validated through the `ContactEnrichment` Pydantic schema —
+  its model validators enforce the origin-bound LinkedIn grammar a SECOND time, independent of
+  `domain/contact_identity.py`'s own check, per §H's "scrubbed twice" discipline) → `flush()` → derive
+  both channels via the pure `domain/contact_identity.py` functions → upsert `contact_channels`.
+  `derivation_version` is `IDENTITY_MATCH_VERSION` (`"v1"`) on both channel rows.
+- `record_failure()`: `enrichment_calls` row(s) only. Per channel: if a provider-backed state already
+  exists (`discovery_state` not in `{None, "NOT_ATTEMPTED"}`), touch ONLY `last_attempt_*`; otherwise
+  derive `PROVIDER_ERROR` via `email_discovery_state_after_failed_call`/
+  `linkedin_resolution_state_after_failed_call`.
+- `EnrichmentCallRecorder` (`groundwork/observability/enrichment_calls.py`, new, bound to `ctx.enrichment_calls`)
+  wraps these calls but — unlike `LLMCallRecorder`/`SearchCallRecorder` — deliberately does NOT swallow
+  persistence exceptions: `contact_channels` is load-bearing state a later checkpoint's action policy
+  reads, not pure observability, so a genuine persistence defect surfaces (caught by the step's
+  `optional=True`, not silently lost to a log line).
+
+**H. `ProspectContext`/`Repos` wiring** — exactly one new `ProspectContext` field
+(`enrichment_calls: EnrichmentCallRecorder`, per-prospect-bound like `llm_calls`/`search_calls`) and one
+new `Repos` field (`contact_enrichment: ContactEnrichmentRepository`, via `Repos.build()` so `runner.py`
+and `api/deps.py` both pick it up automatically). Two pre-existing direct-construction tests
+(`test_live_retrieval.py`, `test_profile_provenance.py`) updated to supply it.
+
+**I. API aggregate — additive only** (`groundwork/api/schemas.py`/`routers/prospects.py`) —
+`ProspectAggregate.contact_channels: list[dict] = []`, populated from the new repository read method.
+No existing field changed shape; no frontend/`lib/types.ts` change (V2-E's job, not this checkpoint's).
+
+**J. Demo reset** — no code change needed: `scripts/reset.py`'s wipe-and-recreate
+(`Base.metadata.drop_all`/`create_all` against the SQLite file) already clears every v2 table by
+construction, verified by a dedicated test rather than assumed.
+
+**K. No migration.** Every table/column V2-C writes to (`contact_enrichments`, `enrichment_calls`,
+`contact_channels`) already exists from V2-B's `1ec5eceed8d4` revision — confirmed by grep before writing
+any code, and by `test_migration_drift.py` staying green with zero changes to `models/tables.py` or
+`alembic/versions/`.
+
+**Tests — 21 new, all green; zero paid provider calls.**
+- `tests/test_demo_enrichment_provider.py` (5, new) — matched result carries only synthetic
+  observations; an unmatched company is a legitimate not-matched observation (not an error); determinism
+  across two provider instances with the same seed; a scripted failure raises then succeeds on the next
+  attempt; budget exhaustion raises `EnrichmentBudgetExceeded` with `NOT_ATTEMPTED_BUDGET` telemetry.
+- `tests/test_enrichment_last_known_good.py` (4, new) — success derives channel state; a first-ever
+  failure derives `PROVIDER_ERROR`; a later failure preserves the prior identifier/state/`observed_at`
+  and touches only `last_attempt_*`; a success after a prior failure replaces the `PROVIDER_ERROR` state.
+- `tests/test_contact_enrichment_orchestration.py` (3, new) — step order
+  (`contact < contact_enrichment < personalize`); the step is `optional`; a real end-to-end run with a
+  permanently-failing enrichment provider still completes the prospect (drafts produced, real terminal
+  status) with `PROVIDER_ERROR` on both channels and a `FAILED` trace row.
+- `tests/test_demo_reset_enrichment.py` (2, new) — a wipe-and-recreate clears every v2 enrichment row;
+  the canonical Demo run is deterministic across a reset.
+- `tests/test_fixture_provenance.py` (+4) — no fixture LinkedIn URL is a real external URL; no fixture
+  email status word is a precomputed Groundwork verdict; every fixture email address is at the company's
+  own fixture domain (never a real free-provider address); the fixture schema itself has no field for a
+  precomputed resolution/verdict state.
+- `tests/test_provider_purity.py` (+2) — `domain/` never imports a provider implementation;
+  `providers/demo/*` never imports `providers/live/*` (the source-level proof that a Demo run cannot
+  reach Apollo/OpenAI/Tavily regardless of config).
+- `tests/test_isolation.py` (extended, same test) — each prospect's own enrichment email/LinkedIn
+  identifier appears only on its own `contact_channels` rows, never the other's, under the same real
+  concurrent fan-out the canary test already exercises.
+- `tests/test_api_prospects.py` (+1) — `contact_channels` is present and additive; every pre-existing
+  aggregate field (`score`, `review`, `company`) is untouched.
+- `tests/test_run_integration.py` (extended, same test) — the full canonical 7-prospect `contact_channels`
+  matrix asserted alongside every unchanged v1 status/score assertion, in the same test that already
+  guards byte-identical v1 output.
+
+**Full backend suite: 649 passed, 1 skipped** (the same pre-existing, unrelated Postgres-DSN-gated skip
+from V2-B) on SQLite. **Canonical Demo regression: byte-identical** — `PASS:2 NEEDS_REVIEW:2 REJECTED:1
+DUPLICATE:1 FAILED:1`, Northwind 92 / Riverbend 35 / Cobalt 25 / Ferrous 58 / Sable 79, unchanged review
+verdicts, unchanged evidence counts. Also verified via `make demo-reset && make demo` (the headless
+engine script) — same board, plus the new `contact_enrichment` trace rows showing real (~30-150ms
+jittered) provider calls for Northwind/Sable and near-zero-duration skips for Riverbend/Ferrous/Cobalt.
+`ruff check` clean on every new/changed backend file.
+
+**Postgres/drift validation:** no Postgres instance or `GROUNDWORK_TEST_POSTGRES_DSN` was available in
+this session (confirmed — no local Postgres listening, env var unset), so the Postgres-parametrized suite
+ran its SQLite path only, same as the pre-existing skip pattern; `test_migration_drift.py` passed against
+SQLite. This checkpoint made zero schema changes, so there is nothing new for the Postgres suite to have
+exercised regardless — the risk surface V2-B's own Postgres pass already covered.
+
+**Database target verification:** no `apps/api/.env` (and therefore no `DATABASE_URL`/Neon credential)
+exists in this session — confirmed via `ls`/`find`, mirroring V2-B's own finding. Every test and the
+`make demo`/`make demo-reset` run above used the local SQLite default
+(`sqlite+aiosqlite:///./groundwork.db`) or an isolated per-test temp SQLite file. **Zero writes of any
+kind were made to Neon (`v2-development` or `production`) in this session.**
+
+**Files changed:** `groundwork/providers/contact_base.py` (new), `groundwork/providers/demo/
+contact_enrichment.py` (new), `groundwork/engine/enrichment.py` (new), `groundwork/engine/
+enrichment_budget.py` (new), `groundwork/engine/steps/contact_enrichment.py` (new), `groundwork/
+repositories/contact_enrichment.py` (new), `groundwork/observability/enrichment_calls.py` (new); 4 new
+test files; `groundwork/providers/{base,registry}.py`, `groundwork/providers/demo/fixtures.py`,
+`groundwork/engine/{context,runner,pipeline,budget}.py`, `groundwork/config.py`, `groundwork/api/
+schemas.py`, `groundwork/api/routers/prospects.py`, `groundwork/fixtures/demo_pack.yaml` (extended);
+`tests/{test_fixture_provenance,test_isolation,test_provider_purity,test_api_prospects,
+test_run_integration,test_live_retrieval,test_profile_provenance}.py` (extended). **Zero changes** to
+`apps/web`, `models/tables.py`, `alembic/`, `domain/review.py` or `domain/action_policy.py` (both stay
+V2-B's v1-review-check-form / V2-H-consumer scope), Render configuration, or environment secrets.
+
+**Known risks/findings:**
+- A real bug was caught and fixed during test-writing, not shipped: an early draft of the orchestration
+  test mutated `load_fixture_pack()`'s `lru_cache`d singleton's `.companies` list in place to inject a
+  scripted failure, which silently corrupted Northwind's fixture for every other test in the same session
+  (a full-suite run surfaced 4 unrelated failures that passed individually). Fixed by building a fresh
+  `FixturePack` instead of mutating the cached one — the same pattern `test_isolation.py`'s hand-built
+  pack already used, now also documented as the required pattern in the new test's own comment. Worth
+  flagging for V2-D onward: any test that needs a scripted-failure fixture must build a fresh `FixturePack`,
+  never mutate `load_fixture_pack()`'s return value.
+- `Cobalt Retail Systems` needed a deliberate, non-obvious step-level rule (skip `contact_enrichment` when
+  `ctx.score.disqualified`) to match the frozen matrix's "not attempted; never actionable" — Cobalt's
+  fixture *does* carry a named, `VERIFIED` persona (Dana Whitfield), so without this rule it would
+  otherwise have been attempted (a legitimate not-matched or matched observation, not an error) and the
+  matrix would not have matched. This is new step logic beyond what §Part 4's docstring literally lists
+  for `NOT_ATTEMPTED` ("enrichment disabled, or no named person to look up") — documented here explicitly
+  as a discrepancy-surfaced-not-silently-resolved item per `CLAUDE.md`, in case a future session
+  reconsiders the exact skip condition once V2-F/H review checks start consuming `contact_channels`.
+- No `.env`/Neon credentials were present in this session (same finding V2-B recorded) — this checkpoint's
+  "Neon v2-development" verification is therefore schema-only (no new migration needed, confirmed by
+  grep + `test_migration_drift.py`), not a live-connection check. A future session with real credentials
+  should do a quick sanity read against `v2-development` before V2-D's first real Apollo-adjacent work,
+  the same way V2-B's own migration was ultimately verified by the user directly.
+
+**Next checkpoint: V2-D — Live Apollo enrichment** (`claude/v2-d-live-apollo`) — the only
+credential-dependent, money-spending v2 checkpoint. Per the frozen plan's ordering note, it can slip after
+V2-F/G without blocking anything, since the provider boundary is now settled.
+
+---
+
 ## Next task
 
-**Immediate next task: V2-C — Enrichment boundary + Demo fixtures + pipeline step.** Scope, acceptance
-criteria, and the required test files are specified in `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Neon
-`v2-development` is migrated to `1ec5eceed8d4` (see "What V2-B added" → "J. Database safety
-verification" above) — V2-C can proceed against it without a prior migration step.
+**Immediate next task: V2-D — Live Apollo enrichment.** Scope, acceptance criteria, and the required test
+files are specified in `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. `providers/live/apollo_enrichment.py`
+(`origin = LIVE_PROVIDER`) + a process-scoped `ApolloRuntime`, the real Apollo email-status map, bounds/
+budget wiring reusing `EnrichmentCallBudget`, `scripts/enrichment_smoke.py` guarded by
+`--i-understand-this-costs-money` + a configured key, never automated, never in CI. It is the only
+checkpoint in the whole v2 plan expected to spend real money (one manual smoke against ≤2 real people) —
+confirm with the user before running that smoke script for real.
 
 **V1/I2's own leftover backlog** (see below) remains folded into V2-J per the "v2" section above — not
-scheduled before V2-C.
+scheduled before V2-D.
 
 **This I2 slice (same-origin proxy) is complete.** Checkpoints A–I1 remain unchanged and verified
 byte-identical; nothing in `apps/api` was touched. Zero real (paid) OpenAI/Tavily calls were made
@@ -3478,3 +3685,17 @@ anywhere in this session's implementation or tests.
   server-only (never `NEXT_PUBLIC_`-prefixed) and must stay read at request time inside the handler, not
   hoisted to module scope — that's what makes the API's real URL changeable without a frontend rebuild.
   `apps/api` has zero changes from this checkpoint; do not attribute any backend behavior change to I2.
+- **V2-C's own do-not-touch:** `engine/steps/contact_enrichment.py` must never be renamed to (or
+  collide with) `enrich` — `engine/steps/enrich.py` is a different, pre-existing v1 step (C4). It must
+  never write `ctx.contact`/`Contact.verification` — that is the v1 person-identity axis and feeds
+  `persona_availability` scoring (C3); writing to it here would move every ICP score in the canonical
+  demo. The `EnrichmentCallBudget`/`RunBudget`/`SearchCallBudget` precedent — checked *inside* the
+  provider implementation, constructor-injected, never at the `call_enrichment()`/`call_structured()`/
+  `call_search()` engine call site — must stay consistent across all three; don't move the check into
+  `engine/enrichment.py` for enrichment alone. `EnrichmentCallRecorder`'s deliberate non-swallowing of
+  persistence exceptions (unlike `LLMCallRecorder`/`SearchCallRecorder`) is intentional, documented in
+  its own module docstring — don't "fix" it into the swallow-and-log pattern without re-reading why.
+  Any future test that needs a scripted-provider-failure fixture must build a fresh `FixturePack`
+  (`FixturePack(play_spec=..., companies=[...])`), never mutate `load_fixture_pack()`'s `lru_cache`d
+  return value in place — see "Known risks/findings" under "What V2-C added" for the real bug this
+  caused during this checkpoint's own test-writing.

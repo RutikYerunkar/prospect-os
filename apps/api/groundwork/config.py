@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     max_concurrent_prospects: int = 3
     run_wall_clock_timeout_s: float = 180.0
 
+    # --- v2 §Part 4/§E: contact-enrichment call budget ---
+    # A per-run HARD ceiling on enrichment-provider calls (`EnrichmentCallBudget`,
+    # checked inside the provider itself, exactly like `SearchCallBudget`).
+    # Generous relative to `target_count` (7 in the canonical demo) — this
+    # exists as a structural safety bound, not a throttle a normal run should
+    # ever hit.
+    max_enrichment_calls_per_run: int = 20
+
     # `NoDecode`: pydantic-settings would otherwise try to JSON-decode any
     # env value for a `list[str]` field *before* our own validator runs, and
     # raise a hard `SettingsError` on a plain comma-separated string (invalid
