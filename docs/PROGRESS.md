@@ -80,15 +80,36 @@ manual production validation of the I2 proxy, the per-IP-rate-limiting-behind-th
 `make search-smoke` all move to V2-J's scope alongside v2's own quality/metrics/release work
 (`docs/V2_IMPLEMENTATION_PLAN.md` Part 13).
 
-**Next checkpoint: V2-B — Domain model + additive persistence** (`claude/v2-b-domain-persistence`).
-Scope, acceptance criteria, and the required test files are specified in
-`docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
-
 **V2-A verification.** `git diff` against the pre-V2-A tree touches exactly four files, all
 documentation: `docs/V2_IMPLEMENTATION_PLAN.md` (new), `docs/ARCHITECTURE.md`, `docs/PROGRESS.md` (this
 file), `CLAUDE.md`. Zero files under `apps/api` or `apps/web` changed. Zero migrations added. Zero
 OpenAI/Tavily/Apollo/Gmail/Hunter calls made. `make test` was not run because no application code
 changed.
+
+**V2-B — domain model + additive persistence completed** (`claude/v2-b-domain-persistence`). Implements
+only the deterministic domain primitives and additive persistence layer — no provider integration, no
+pipeline wiring, no user-visible feature flow. Full detail in "What V2-B added" below.
+**Next checkpoint: V2-C — Enrichment boundary + Demo fixtures + pipeline step**
+(`claude/v2-c-enrichment`). Scope, acceptance criteria, and the required test files are specified in
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
+
+**Documents-vs-reality conflict, surfaced per `CLAUDE.md`'s instruction rather than silently resolved:**
+the V2-B task brief assumes a local `apps/api/.env` already exists with `DATABASE_URL` pointed at the
+Neon `v2-development` branch, and instructs applying the new Alembic revision there. **This session's
+remote container has no `apps/api/.env` and no Neon credentials of any kind** — this is a fresh,
+ephemeral clone (see `CLAUDE.md`'s "Environment configuration"), not the user's own machine where a
+prior session's `.env` might live. There was therefore no way to connect to Neon `v2-development` (or
+any Neon branch) from this session, and consequently no risk of an accidental production migration
+either — the credentials simply aren't present here. **The migration was never applied to any Neon
+branch.** Instead, correctness against a real Postgres server was verified against a **local, disposable
+Postgres 16 instance provisioned inside this sandbox for testing only** (`apt`-installed, a scratch
+`groundwork_test` role/database, connected via `GROUNDWORK_TEST_POSTGRES_DSN` — the exact mechanism
+`tests/test_migration_drift.py`'s own Postgres check and CI's Postgres service container already use).
+That instance is destroyed with the container; it is not reachable from anywhere else and is unrelated
+to Neon. **A future session (or the user) running this branch's migration against the real Neon
+`v2-development` branch still needs to perform Part J's safety checklist for real** — git branch, DB host
+inspection, `channel_binding` check — against that real environment; this session could not do that step
+and is not claiming to have.
 
 ---
 
@@ -3009,9 +3030,188 @@ touched, so no frontend build/lint/typecheck/test was run. Zero OpenAI/Tavily ca
 
 ---
 
+## What V2-B added
+
+**Scope: domain/schema capability only.** No provider calls (Apollo/Gmail/Hunter), no pipeline wiring,
+no user-visible feature flow — those are V2-C onward. V2-B builds the deterministic primitives and the
+additive database shape everything later plugs into, and proves the migration is safe and drift-free.
+
+**A. Domain enums** (`groundwork/models/enums.py`) — `Channel`, `EmailDiscoveryState`,
+`EmailVerificationState`, `LinkedInResolutionState`, `LinkedInIdentityState`, `EnrichmentOrigin`,
+`EnrichmentOperation`, `EnrichmentAttemptStatus`, `ActionType` (exactly two members — no `LINKEDIN_SEND`),
+`ActionExecutionOrigin`, `ActionExecutionStatus` (`CLAIMED`/`IN_FLIGHT`/`SUCCEEDED`/`FAILED`/`UNCERTAIN`/
+`ABANDONED`), `SendOutcome`, `ReconcileStatus`, `ApprovalScope`, `ActionPolicyVerdict`.
+
+**B. Pure email identity normalization** (`groundwork/domain/contact_identity.py::normalize_email_identity`)
+— NFKC, exactly-one-`@` fail-closed, trailing-dot-stripped + casefolded + IDNA-encoded (`uts46=True`,
+via the `idna` package — pinned as a new direct dependency since domain code imports it directly rather
+than relying on it as someone else's transitive dependency) domain, casefolded local part. Plus-tags and
+dots deliberately NOT stripped (provider-specific folding, not universal). Idempotent
+(`normalize(normalize(x)) == normalize(x)`, property-tested). Raises `InvalidEmailIdentity` (a
+`ValueError` subclass) on any malformed input — never a silent pass-through.
+
+**C. Deterministic LinkedIn identifier grammar + identity matching** (same module) —
+`validate_linkedin_identifier()` selects one of two mutually exclusive grammars by `EnrichmentOrigin`
+(`demo://linkedin/<slug>` for `DEMO_FIXTURE`; strict `https://…linkedin.com/in/…` — no userinfo, no
+explicit port, no fragment, registrable domain via the existing `domain/psl.py` — for `LIVE_PROVIDER`),
+rejecting the other's shape. `_norm_text` (NFKC, ASCII-fold, casefold, punctuation->space, whitespace
+collapse), `match_person` (honorific/suffix stripping, last-token-equal + first-token-equal-or-initial,
+nicknames are conflicts by design — `jon` vs `john` is `PERSON_CONFLICT`), `match_company`
+(domain-equality-when-both-sides-have-one takes precedence over name-equality-with-corporate-suffix-
+stripped; `labs`/`ai`/`technologies`/`systems` are never stripped), `combine_identity` (fail-closed: a
+conflict on either axis is always `MISMATCH`, even when the other axis matches). `derive_linkedin_channel`
+and `derive_email_channel` turn a provider *observation* into a *state* — `domain/` never contains a
+provider's name (D2). `email_discovery_state_after_failed_call`/
+`linkedin_resolution_state_after_failed_call` are the pure half of §3.6's last-known-good rule:
+`PROVIDER_ERROR` only when no successful provider-backed observation has ever been obtained, never
+overwriting an existing `FOUND`/`NOT_FOUND`/`RESOLVED` state.
+
+**D. The normative content/action hash** (`groundwork/domain/content_hash.py`) — `HASH_VERSION = "v1"`,
+`content_hash()` over exactly `hash_version`/`channel`/`sender_identifier`/`recipient_identifier`/
+`subject`/`body`, canonicalized (NFC text with normalized line endings and trimmed blank lines/trailing
+whitespace; email identifiers through the SAME `normalize_email_identity()` the recipient-dedup rule
+uses, so identity/dedup/hashing can never disagree; LinkedIn identifiers compared exactly, no casefold),
+serialized with sorted keys and compact separators, SHA-256. Every exclusion in the frozen spec (ids,
+timestamps, `claim_map`, `policy_snapshot`, provider names, credentials) is structural — the function
+signature has no parameter for any of them, so there is no way to accidentally include one.
+
+**E. The deterministic action policy** (`groundwork/domain/action_policy.py::evaluate()`) — all 14
+`EMAIL_SEND` clauses and the `LINKEDIN_COPY_AND_OPEN` subset (clauses 1, 2, 5, 6-body-only, 8, 9, plus
+the two LinkedIn-specific eligibility checks), pure and typed exactly like `domain/review.py::run_checks`.
+No override parameter exists anywhere in the function signature (D7) — verified by a test that passing
+one raises `TypeError`, not just by docstring claim. Clause 12 (the `LIVE_EXTERNAL`-only recipient-dedup
+rule) takes a caller-computed `RecipientConflict` (`NONE`/`CLAIMED`/`IN_FLIGHT`/`SUCCEEDED`/`UNCERTAIN`/
+`ABANDONED` — deliberately no `FAILED` member, since `FAILED` is what frees a recipient identity) and is
+structurally skipped for `DEMO_SIMULATED` regardless of what a caller passes, so a demo proposal can
+never be blocked by it and never blocks anything else through it.
+
+**F/G. Schemas** (`groundwork/models/schemas.py`) — `ProviderEmailObservation`/`ProviderLinkedInObservation`
+(pure data, mirroring the not-yet-built `providers/contact_base.py` Part 4 shapes field-for-field — the
+same "define the pure type in `schemas.py`, let the provider module re-export it later" precedent
+`SourceDocument` already established, so `domain/` never needs to import a not-yet-existent provider
+module), `ContactEnrichment` (validators 1-2: origin-bound LinkedIn grammar, the
+`Evidence._no_fake_sources` discipline extended), `ActionProposal` (validator 4: a `DEMO_SIMULATED`
+`sender_identifier` must end in `@groundwork.invalid`), `ActionExecution` (validator 3: a
+`DEMO_SIMULATED` `provider_message_id` must start with `demo://`). The demo LinkedIn grammar's regex
+(`DEMO_LINKEDIN_URL_PATTERN`) lives in `schemas.py` as the single source of truth; `domain/
+contact_identity.py` imports it rather than redeclaring it, so the model validator and the pure
+derivation can never drift apart.
+
+**H. Additive database schema** (`groundwork/models/tables.py`) —
+- `outreach_drafts`: `+ content_hash` (nullable), `+ hash_version` (`"v1"` default/server_default),
+  `subject` -> nullable, `+ index (prospect_id, channel)`.
+- `approvals`: `+ scope` (`"PROSPECT"` default/server_default), `+ action_proposal_id` (nullable FK),
+  `+ content_hash`/`+ hash_version` (nullable), `+ CHECK ck_approvals_action_scope_complete` (`scope <>
+  'ACTION' OR (action_proposal_id AND content_hash AND hash_version all NOT NULL)`) — every v1 row
+  survives unchanged, defaulting to `scope='PROSPECT'` with the three new columns `NULL`.
+- Nine new tables, exactly per Part 5's grain table: `contact_enrichments`, `enrichment_calls`,
+  `contact_channels`, `action_proposals`, `action_executions`, `action_send_calls`, `action_events`,
+  `gmail_connections`, `oauth_states`.
+- `action_executions.idempotency_key`: plain non-partial `UNIQUE` (Mechanism A — binds in BOTH origins).
+- `action_executions`: partial unique index `uq_action_executions_live_recipient` on
+  `(action_type, recipient_identity_key)`, predicated `origin='LIVE_EXTERNAL' AND action_type='EMAIL_SEND'
+  AND status IN ('CLAIMED','IN_FLIGHT','SUCCEEDED','UNCERTAIN','ABANDONED')` — `FAILED` deliberately
+  excluded (Mechanism B, §3.5B), declared with both `sqlite_where=` and `postgresql_where=` from one
+  shared literal predicate string (`_LIVE_RECIPIENT_INDEX_PREDICATE`) so the ORM declaration and the
+  migration's raw SQL can never render differently and trip Alembic's `compare_metadata` — this was the
+  V2-B risk the frozen plan itself flagged (Part 5's "Partial-index implementation note"), and it did
+  NOT reproduce: drift is clean against a real Postgres 16 with the exact literal predicate, first try.
+- `contacts` unchanged, as specified.
+- No ORM `relationship()` added anywhere, matching the existing repo convention.
+
+**I. Migration** (`alembic/versions/1ec5eceed8d4_v2b_domain_model_and_additive_.py`, revises
+`38cbecdcd585`) — one additive revision, autogenerated then hand-corrected in exactly one respect:
+the approvals/outreach_drafts `ALTER`s (add FK, add CHECK, alter a column's nullability) are wrapped in
+`op.batch_alter_table(...)` rather than plain `op.add_column`/`op.create_foreign_key`/`op.alter_column` —
+SQLite has no `ALTER TABLE ADD CONSTRAINT`/`ALTER COLUMN`, so the plain autogenerated form works on
+Postgres but raises `NotImplementedError` on SQLite; batch mode uses the copy-and-move strategy on
+SQLite and plain `ALTER` statements on every other dialect, so one migration body is correct on both.
+This matters because `test_migration_drift.py` runs `alembic upgrade head` unconditionally against
+SQLite (not only Postgres) as its schema-drift oracle.
+
+**J. Database safety verification actually performed** (see the "documents-vs-reality conflict" note
+above for what could NOT be performed and why): confirmed no `apps/api/.env` exists in this session's
+container (`ls`/`find` — none found) and therefore no Neon connection string of any kind was ever
+configured or reachable from here. `alembic upgrade head` was run and verified against (1) a fresh
+scratch SQLite file, and (2) a real local Postgres 16 server provisioned inside this sandbox
+specifically for testing (`apt`-installed `postgresql-16`, a scratch `groundwork_test` role/database,
+`localhost:5432`, connected only via `GROUNDWORK_TEST_POSTGRES_DSN` — never `DATABASE_URL`, never
+anything resembling a Neon connection string, and it is destroyed with this container). Directly
+verified against that Postgres instance with `psql`: a v1-shaped `approvals` insert (no `scope` given)
+lands as `scope='PROSPECT'` with the three new columns `NULL`; an explicit `scope='ACTION'` insert with
+the three fields left `NULL` is rejected by `ck_approvals_action_scope_complete`; `\d approvals` shows
+the CHECK constraint and FK; `pg_indexes` shows `uq_action_executions_live_recipient`'s `WHERE` clause
+verbatim. **Neon `v2-development` was never touched, was never reachable, and no credential for it exists
+anywhere in this session.**
+
+**K. Tests — 190 new, all green; zero paid provider calls.**
+- `tests/test_contact_identity.py` (45) — the full person/company/combination matrix; `PROVIDER_ERROR !=
+  NOT_FOUND`; an unmapped email-verification status fails closed to `UNVERIFIED`.
+- `tests/test_linkedin_identifier_grammar.py` (23) — the four required proofs (a-d) plus both
+  `ContactEnrichment` model validators.
+- `tests/test_email_identity_normalization.py` (28) — casefolding, Unicode/IDNA collapse, plus-tags/dots
+  retained, invalid forms raise, idempotence.
+- `tests/test_content_hash.py` (19) — field sensitivity (sender/recipient/subject/body/channel each
+  independently change the hash), excluded-field/canonicalization invariance (casing, CRLF, trailing
+  whitespace, blank lines), a hand-computed-payload cross-check, and real cross-process stability (a
+  fresh `python -m` subprocess reproduces the identical digest).
+- `tests/test_action_policy.py` (61) — every clause independently, both action types, the no-override
+  structural proof, the full clause-12 `RecipientConflict` matrix (including proving `DEMO_SIMULATED` is
+  never blocked by it even if a caller wrongly passes a conflict), sender-changed vs. sender-not-connected
+  distinguished, hash-version-mismatch supersede.
+- `tests/test_action_schema_validators.py` (10) — validators 3-4 (demo sender/message-id conventions),
+  including that a `LIVE_EXTERNAL` row is NOT bound by the demo convention in either direction.
+- `tests/test_migration_drift.py` (+4) — a v1-shaped approval survives migration unchanged (`scope`
+  defaults, three new columns `NULL`); an incomplete `ACTION`-scope insert is rejected
+  (`IntegrityError`); the CHECK constraint is present via `inspect()`; the partial index's raw SQL is
+  present with the correct predicate and `FAILED` verified absent from it. All against the real migrated
+  schema (`alembic upgrade head`), not `create_all()`.
+
+**Full backend suite: 628 passed, 1 skipped** (the pre-existing, unrelated Postgres-DSN-gated skip) on
+SQLite alone. **647 passed, 0 skipped with `GROUNDWORK_TEST_POSTGRES_DSN` set for the whole run** (not
+just the drift tests) — the previously-skipped Postgres drift test now runs and passes, and every
+dialect-parametrized test (`tests/dialect_helpers.py::available_dialects()`) runs its Postgres case in
+addition to its SQLite case, accounting for the rest of the increase. Zero failures either way.
+**Canonical Demo regression: byte-identical**
+(`test_run_integration.py::test_full_demo_run_produces_expected_distribution` passes unchanged — 7
+prospects, `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`). No V2-B code writes enrichment
+results during the pipeline — this checkpoint creates domain/schema capability only, exactly as scoped.
+
+**Files changed:** `groundwork/models/{enums,schemas,tables}.py` (extended); `groundwork/domain/
+{contact_identity,content_hash,action_policy}.py` (new); `pyproject.toml`/`uv.lock` (added `idna` as a
+pinned direct dependency); `alembic/versions/1ec5eceed8d4_v2b_domain_model_and_additive_.py` (new); six
+new test files plus an extended `tests/test_migration_drift.py`; this file. **Zero changes** to
+`apps/web`, any `providers/*`, `engine/*`, `repositories/*`, `api/*`, fixture data, Render configuration,
+or environment secrets.
+
+**Known risks/findings:**
+- The Neon `v2-development` migration itself is unverified from this session (see the conflict note
+  above) — a future session with real credentials should run it and confirm `alembic upgrade head` is
+  clean there too before V2-C starts writing rows.
+- `idna` was previously only a transitive dependency (pulled in by `httpx`/similar); it is now pinned
+  directly in `pyproject.toml` since `domain/contact_identity.py` imports it explicitly — this is a new
+  direct dependency edge, worth knowing about if a future minimal-install context ever trims transitive
+  extras.
+- The partial-index drift risk the frozen plan flagged as the biggest V2-B unknown did NOT materialize —
+  worth noting as a positive finding since the plan spent real words preparing a fallback for it.
+
+**Next checkpoint: V2-C — Enrichment boundary + Demo fixtures + pipeline step** (`claude/v2-c-enrichment`).
+
+---
+
 ## Next task
 
-**Immediate next task: V2-B — Domain model + additive persistence** (see the "v2" section above and
+**Immediate next task: V2-C — Enrichment boundary + Demo fixtures + pipeline step.** Scope, acceptance
+criteria, and the required test files are specified in `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Before
+starting, a future session should attempt the real Neon `v2-development` migration (see "documents-vs-
+reality conflict" above) if it has credentials this session did not.
+
+**V1/I2's own leftover backlog** (see below) remains folded into V2-J per the "v2" section above — not
+scheduled before V2-C.
+
+**This I2 slice (same-origin proxy) is complete.** Checkpoints A–I1 remain unchanged and verified
+byte-identical; nothing in `apps/api` was touched. Zero real (paid) OpenAI/Tavily calls were made
+anywhere in this session's implementation or tests.
 `docs/V2_IMPLEMENTATION_PLAN.md` Part 13). The list below is v1/I2's own leftover backlog, preserved
 here as the historical record of what I2 left open — per the "v2" section above, it is **intentionally
 folded into V2-J**, not scheduled before V2-B.
