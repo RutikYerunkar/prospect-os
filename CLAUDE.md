@@ -51,6 +51,64 @@ drift from it.
 
 ---
 
+## v2 invariants — Contact Enrichment & Governed Outbound Action
+
+Groundwork v2 (`docs/V2_IMPLEMENTATION_PLAN.md`, frozen Rev 4) extends the pipeline with contact
+enrichment and governed outbound action. These invariants are as load-bearing as the v1 list above —
+any fresh session picking up v2 work must preserve them without re-deriving or re-litigating them:
+
+- The five contact axes (person identity, email discovery, email verification, LinkedIn resolution,
+  LinkedIn identity match) are independent — never collapsed into one flag.
+- Enrichment never writes `Contact.verification` — that column is the person-identity axis only, and
+  writing to it from enrichment would move every ICP score in the canonical demo.
+- No LLM-authored identifiers, anywhere. An email address or LinkedIn URL reaches the system only from a
+  provider observation row.
+- No LLM identity matching. LinkedIn identity matching is deterministic, versioned, string-based
+  matching in `domain/contact_identity.py` — no fuzzy matching, no edit distance.
+- Provider observations are not verdicts — `domain/` derives states from them, pure and offline;
+  `domain/` never contains a provider's name (e.g. never the string `"apollo"`).
+- Origin determines legal identifier grammar. A `DEMO_FIXTURE` observation may carry only `demo://…`
+  identifiers; a `LIVE_PROVIDER` observation may carry only validated real ones — enforced twice (model
+  validator + pure derivation), never inferred.
+- Demo identifiers are synthetic and must never be real-looking external URLs or addresses — the same
+  `Evidence._no_fake_sources` discipline applied to two new identifier classes.
+- An approval binds channel + sender + recipient + subject + body through a versioned content hash. Any
+  change to any of those fields voids the approval.
+- An `ACTION`-scope approval carries `action_proposal_id`, `content_hash`, **and** `hash_version`
+  together — never just the hash.
+- `VERIFIED` is the only sendable email verification state.
+- `PASS` (the review verdict) is the send hard floor for `EMAIL_SEND`.
+- No override path exists anywhere in v2. A blocked action shows why and offers no button.
+- No `LINKEDIN_SEND` executor exists. `ActionType` has exactly two members
+  (`EMAIL_SEND`, `LINKEDIN_COPY_AND_OPEN`); LinkedIn action is copy-and-open only.
+- Post-dispatch ambiguity becomes `UNCERTAIN`, never a guess in either direction.
+- Never automatically resend an ambiguous (`UNCERTAIN`) send.
+- Request idempotency applies in both Demo and Live — the same approved execution can never run twice in
+  either mode.
+- **One initial `LIVE_EXTERNAL` email per normalized recipient identity, across runs.** This recipient-
+  level rule is `LIVE_EXTERNAL`-only — it does not apply to, and is never checked against, Demo rows.
+- `DEMO_SIMULATED` executions never reserve or consume the live recipient identity, and a prior Demo
+  execution never blocks a later Live send to the same address.
+- `sender_identifier` is canonicalized (via `normalize_email_identity`) before it is persisted on a
+  proposal — computed once, at proposal creation, never re-derived downstream.
+- Live execution remains operator-gated — a valid operator session is one of five required server-side
+  gates, none of which is the UI.
+- Public Demo execution is zero-egress — `DemoEmailSendProvider` opens no socket and performs no DNS
+  lookup, by construction, not by convention.
+- No fixture fallback in Live, ever. A missing key or disabled enrichment degrades honestly
+  (`NOT_ATTEMPTED` / `422`); it never silently substitutes Demo data.
+- Zero paid provider calls in CI. Every smoke script (Apollo, Gmail) is gated by
+  `--i-understand-this-costs-money` and a configured key, and is never invoked by `make test`.
+- Checkpoint PRs target `feature/v2-contact-enrichment`, never `master`.
+- `master` remains untouched until the single V2-J integration PR; Render keeps deploying `master` only.
+
+**Note on `ActionExecutionOrigin.LIVE_EXTERNAL`:** it means execution on the live external-action
+path — capable of a real external side effect. It is **not** proof that a message actually left the
+system or was delivered. Delivery outcome is represented separately, by execution status/outcome
+(`SUCCEEDED` / `FAILED` / `UNCERTAIN` / `ABANDONED`). Do not conflate origin with outcome.
+
+---
+
 ## Commands
 
 - `make dev` — starts the API (`:8000`) and web app (`:3000`) together.
