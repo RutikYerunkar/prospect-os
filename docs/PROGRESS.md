@@ -25,7 +25,7 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-B — Domain model + additive persistence** | (branch `claude/v2-b-domain-persistence`) | v2 enums, pure `domain/contact_identity.py` (email identity normalization, origin-aware LinkedIn identifier grammar, deterministic person/company identity matching, last-known-good pure helpers), `domain/content_hash.py`, `domain/action_policy.py`; nine additive tables + `approvals.hash_version`/CHECK + the `LIVE_EXTERNAL`-only partial unique recipient index; one additive Alembic revision, drift-clean on a real Postgres 16; Neon `v2-development` migrated to `1ec5eceed8d4` by the user. See "What V2-B added" below. |
 | **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step** | `f43a134` (merged to `claude/v2-c-enrichment` / PR #15) | `providers/contact_base.py` (`EnrichmentProvider` Protocol, observations only — D2); `DemoEnrichmentProvider` (`origin=DEMO_FIXTURE`, fixture-backed, scripted failures, an `EnrichmentCallBudget`); `engine/enrichment.py::call_enrichment` (the only enrichment telemetry-persistence seam); the `contact_enrichment` pipeline step (never named `enrich` — C4), optional, wired `contact -> contact_enrichment -> personalize`; `ContactEnrichmentRepository` (§3.6 last-known-good, guarded upserts); the canonical Demo matrix (Northwind VERIFIED+STRONG_MATCH, Sable RISKY-email+STRONG_MATCH-LinkedIn, everyone else NOT_ATTEMPTED by omission); an additive `contact_channels` field on the prospect aggregate API. Canonical v1 board byte-identical. No migration (schema already landed at V2-B). Zero paid/live provider calls. See "What V2-C added" below. |
 | **V2-D — Live Apollo enrichment** | `0672671` (merged to `feature/v2-contact-enrichment` via PR #16) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape; the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session. **The paid smoke is BLOCKED, not merely deferred: the user's Apollo account (personal Gmail/free tier) cannot enable `api/v1/people/match` at all**, so the exact no-match response shape and every other smoke-dependent fact remain genuinely unverified — no workaround was attempted. See "What V2-D added" below. |
-| **V2-DH — Live Hunter enrichment** | *this commit* (branch `claude/v2-dh-live-hunter`) | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`). Canonical Demo byte-identical. Zero real Hunter calls anywhere in this session — `scripts/hunter_smoke.py` exists, money-gated, not run. See "What V2-DH added" below. |
+| **V2-DH — Live Hunter enrichment** | *this commit* (branch `claude/v2-dh-live-hunter`) | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`); a follow-up fix adding `--use-test-api-key` (§Part 16) to `scripts/hunter_smoke.py`. Canonical Demo byte-identical. Zero real Hunter calls in this session's own implementation/tests; **the real Hunter smoke was subsequently run by the user, with explicit approval, outside this session's automated work** — real authentication, real-person matching, the `data`+`meta` success envelope, and the `x-request-id` header are now confirmed live; the exact HTTP-200 no-email body shape remains the one open wire unknown. See "What V2-DH added" and "Real Hunter smoke — validated" below. |
 
 ---
 
@@ -35,10 +35,12 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 `EnrichmentProvider` behind the exact same `EnrichmentProvider` Protocol Apollo already satisfies — never
 a second pipeline, never Hunter-specific domain enums/repository methods/tables/retry framework/budget
 system/sendability logic, per the frozen Rev-3 plan. Every scripted/automated contract test is green
-(**788 passed, 1 skipped** — the same pre-existing Postgres-DSN-gated skip; 84 new tests over V2-D's
-704); the canonical Demo board remains byte-identical; **zero real Hunter (or Apollo, or any other
-external provider) calls were made anywhere** — in implementation, in automated tests, or via the smoke
-script, which exists but was deliberately not run this session per the task's explicit instruction.
+(**798 passed, 1 skipped** — the same pre-existing Postgres-DSN-gated skip); the canonical Demo board
+remains byte-identical; **zero real Hunter (or Apollo, or any other external provider) calls were made by
+this session's implementation, automated tests, or documentation work.** The real Hunter smoke has since
+been run — by the user, manually, with explicit approval, outside any automated session step — validating
+the adapter against a real account; see "Real Hunter smoke — validated" under "What V2-DH added" below
+for the full observed results and what they resolve.
 
 **V2-D's Apollo-named activation/runtime plumbing was generalized, not duplicated.** `app.state.
 apollo_runtime` → `app.state.enrichment_runtime`; `get_apollo_runtime` → `get_enrichment_runtime`;
@@ -3873,23 +3875,74 @@ No new table, no new column, no new enum. The Hunter/Apollo runtime distinction 
 application-layer config and provider selection, never in the schema — exactly per §Part 19's "STOP
 before creating one" instruction, which never had to fire.
 
-**Zero real provider calls confirmed.** No `HUNTER_API_KEY`, `APOLLO_API_KEY`, or any other live
-credential exists in this session's environment. Every HTTP exchange in every new/modified test is
-scripted through `httpx.MockTransport` (`tests/live_hunter_helpers.py`/`tests/live_enrichment_helpers.py`).
-`scripts/hunter_smoke.py` was written and its CLI surface unit-tested, but its `main()`/`_run_one()` were
-never invoked — no process in this session ever opened a socket to `api.hunter.io` (or `api.apollo.io`,
-or any OpenAI/Tavily/Gmail endpoint).
+**Zero real provider calls made by this session's own implementation, automated tests, or documentation
+work.** No `HUNTER_API_KEY`, `APOLLO_API_KEY`, or any other live credential ever existed in this session's
+own environment. Every HTTP exchange in every new/modified automated test is scripted through
+`httpx.MockTransport` (`tests/live_hunter_helpers.py`/`tests/live_enrichment_helpers.py`); no test in this
+repository ever opens a socket to `api.hunter.io`/`api.apollo.io`/any OpenAI/Tavily/Gmail endpoint. This
+does **not** describe the real Hunter smoke itself — that was run separately, manually, by the user, with
+explicit approval, from the user's own machine with real credentials; see "Real Hunter smoke — validated"
+immediately below for what that run observed and confirmed.
 
-**Known unresolved wire facts (both explicitly deferred by the frozen plan, not guessed at):**
-1. **The exact HTTP-200 no-email response body shape is UNVERIFIED.** `_issue()` stays lenient (a
+**Real Hunter smoke — validated (run by the user, manually, with explicit approval; not run by this or
+any prior automated session step).** Two probes were completed:
+
+- **The zero-cost `--use-test-api-key` contract probe (§Part 16) succeeded first:** HTTP 200; `X-API-KEY`
+  accepted; the exact production request shape (`GET /v2/email-finder`, `domain`+`full_name` query params)
+  accepted; a `data`+`meta` envelope confirmed; `x-request-id` observed; a dummy "valid" verification
+  result returned (as expected for Hunter's own documented test key). Zero account credits used.
+- **The real, billed smoke (real `HUNTER_API_KEY`, exactly one real person) succeeded:** HTTP 200;
+  top-level keys `data`+`meta` (matching the test-key probe's envelope shape); `meta` keys: `params`;
+  `data.email` found (masked by the smoke script before printing — the raw address was never written
+  anywhere, including here); `data.verification.status = "valid"`; `data.verification.date` present;
+  `data.score = 95` (integer); `data.accept_all = false` (boolean); `data.linkedin_url`/`data.company`/
+  `data.position` all present; `data.sources` count `1`, distinct source hostname `www.google.com`;
+  response header `x-request-id` present; `errors[0].id = None` (no error — this field is only ever
+  populated on a documented error envelope); no usage/credit-shaped top-level numeric field observed in
+  the body. The smoke reported `"OK — no structural invariant violated."` No email/message/action was
+  sent — this was enrichment only, exactly as designed; V2-DH ships no send capability at all.
+- **One earlier real request, made by operator mistake** (a real email address supplied in the
+  `company_domain` slot instead of a domain), correctly returned **HTTP 400, `errors[0].id =
+  "invalid_domain"`**. The adapter's existing "unknown 4xx → permanent `INVALID_RESPONSE`, never guessed
+  at, never retried" handling (§Part 8) is exactly the path a `400` falls into, since `400` isn't one of
+  the pinned status codes (`401`/`403`/`404`/`422`/`429`/`451`/`5xx`) — this is Hunter and the adapter both
+  behaving correctly in response to bad input, **not a provider or implementation failure**, and requires
+  no code change.
+
+**Resolved by this live validation** (previously listed as unverified/unobserved):
+- **Hunter real authentication works** — a real `HUNTER_API_KEY` via `X-API-KEY` was accepted (HTTP 200).
+- **Real-person matching works** — a real person's email, verification, score, and profile fields were
+  correctly found and returned.
+- **`x-request-id` is the observed request/correlation header** — `_request_id_from_headers()`'s
+  conventional-name guess was correct; no code change needed.
+- **The real success envelope matches `data`+`meta`** — confirmed identically by both the test-key probe
+  and the real smoke, and matches what `HunterEnrichmentProvider._issue()`/`enrich_person()` already parse.
+- **The `verification`/`score`/`accept_all`/`linkedin_url`/`company`/`position`/`sources` shapes were all
+  observed live**, matching the mapping this checkpoint already implemented — no mapping code required a
+  change.
+
+**On credits/usage — stated precisely, per the frozen plan's own discipline against inventing numbers:**
+the real smoke's response body exposed no numeric usage/credit-shaped field, so `credits_used`/`cost_usd`
+correctly stayed `None` for this call, exactly as designed. This is **not** a claim that the lookup was
+free — Hunter's own account/billing system may have deducted credits for it, per Hunter's normal billing
+behavior, independent of what its HTTP response body happens to expose. Groundwork did not observe, and
+therefore does not record, any numeric usage value — the correct behavior either way.
+
+**Exactly ONE remaining wire unknown, kept deliberately open:**
+1. **The exact HTTP-200 no-email response body shape remains UNVERIFIED.** Both live probes above returned
+   a MATCH (an email was found); neither exercised a genuine no-match. `_issue()` stays lenient (a
    missing/`null` `data` object, or a `data.email` that's `null`/missing/empty-string, is treated as a
-   legitimate empty result) and fails closed only on an unambiguously wrong field type — this is a
-   deliberate design choice to fail safely without knowing the exact shape, not a confirmation of it.
-   Closing this is the real Hunter smoke's primary purpose (§Part 17), not run this session.
-2. **Whether Hunter's response carries a request-id/correlation header, and its exact name, is
-   UNVERIFIED.** `_request_id_from_headers()` reads a conventional `x-request-id` header, best-effort,
-   `None` if absent — never fabricated. The smoke script additionally prints every response header NAME
-   matching `request-id`/`rate-limit`/`credit` hints, to help close this without a code change once run.
+   legitimate empty result) and fails closed only on an unambiguously wrong field type. **This is
+   explicitly non-blocking:** the current parser already fails safely (closed) on any successful response
+   shape it doesn't recognize — it never silently misclassifies an unrecognized 200 as a false match or a
+   false failure — and Groundwork will not manufacture additional real lookups against real people just to
+   force a no-match and close this single documentation gap. Closing it fully is deferred to whenever a
+   genuine no-match is naturally observed (a future real lookup that happens to find nobody), not scheduled
+   as separate work.
+
+(Whether Hunter's response carries a request-id/correlation header, and its exact name, was the OTHER item
+in this list before the live validation above — it is now resolved, per "Resolved by this live
+validation.")
 
 **403/429 semantics, confirmed against Hunter's own documented (not observed) contract:** `403` is treated
 as bounded-retryable `RATE_LIMITED` — deliberately different from Apollo's permanent `401`/`403` →
@@ -3951,13 +4004,16 @@ touched by any v2 checkpoint so far.
 requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
 enabled — this is a hard prerequisite for that later checkpoint, not optional polish.
 
-**Real Hunter smoke:** `scripts/hunter_smoke.py`/`make hunter-smoke` are ready — but must NOT be run
-without the user's explicit approval, per this session's instruction. Running it in real-key mode (with a
-real `HUNTER_API_KEY` and exactly one real `--person`) would close both "Known unresolved wire facts"
-above. The zero-cost `--use-test-api-key` mode (§Part 16, added in the post-implementation fix above) can
-partially probe the same contract — `full_name`/`X-API-KEY` acceptance and the success envelope shape —
-without spending money or needing a real key, but per the frozen plan it cannot prove real-person
-matching, the real no-match body, or real billing behavior; neither mode was run this session.
+**Real Hunter smoke: COMPLETE.** Both the zero-cost `--use-test-api-key` probe and the real, billed smoke
+(one real person) have been run — by the user, manually, with explicit approval, outside any automated
+session step. See "Real Hunter smoke — validated" under "What V2-DH added" for the full observed results.
+Real authentication, real-person matching, the `data`+`meta` envelope, and the `x-request-id` header are
+now confirmed live. Exactly one wire unknown remains open by design (the exact HTTP-200 no-email body
+shape) — non-blocking, since the parser already fails safely on any unrecognized successful response, and
+closing it is deliberately NOT scheduled as separate work (it will close naturally whenever a future real
+lookup happens to find nobody, never by manufacturing a lookup just to force that outcome). Do not run
+`scripts/hunter_smoke.py`/`make hunter-smoke` again without the user's fresh explicit approval — every
+real invocation is a real, billed Hunter API call regardless of how many times it has run before.
 
 **The V2-D Apollo work itself needs no further action** unless/until the user's Apollo account
 entitlement changes: the adapter, runtime, activation wiring, and scripted tests are complete and
@@ -4241,9 +4297,12 @@ anywhere in this session's implementation or tests.
 - **V2-DH's own do-not-touch:** `providers/live/hunter_enrichment.py::_issue()`'s lenient-envelope/
   strict-field-type parsing (a missing/`null` `data` fails safe as empty; only a wrong field TYPE for
   `data`/`data.email` is `INVALID_RESPONSE`) must not be tightened into Apollo's strict single-shape
-  envelope check, and must not be loosened into accepting a malformed `data.email` type, without first
-  running the real Hunter smoke and confirming the actual no-email shape — see "Known unresolved wire
-  facts" under "What V2-DH added". `HUNTER_API_ORIGIN`/`HUNTER_EMAIL_FINDER_PATH` in `hunter_runtime.py`
+  envelope check, and must not be loosened into accepting a malformed `data.email` type. The real Hunter
+  smoke has run and confirmed the MATCH envelope (`data`+`meta`, all mapped fields) live, but no genuine
+  no-match has been observed yet — do not change this parsing without first actually observing a real
+  no-email 200 response (never by manufacturing a lookup deliberately to force one; see "Exactly ONE
+  remaining wire unknown" under "What V2-DH added" for why that isn't scheduled work).
+  `HUNTER_API_ORIGIN`/`HUNTER_EMAIL_FINDER_PATH` in `hunter_runtime.py`
   must stay pinned module constants — no `HUNTER_BASE_URL` setting. `HunterRuntime.create()` must keep
   hardcoding `price_usd_per_credit=None` — no `HUNTER_PRICE_USD_PER_CREDIT` setting exists, and none
   should be added without a confirmed, directly-observed numeric usage field. The `403`→`RATE_LIMITED`
