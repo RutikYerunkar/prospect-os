@@ -117,6 +117,20 @@ async def lifespan(app: FastAPI):
 
         app.state.live_search_runtime = LiveSearchRuntime.create(settings)
 
+    # V2-D: process-scoped Apollo enrichment runtime, same lifecycle
+    # discipline — created once here, closed once at shutdown. Guarded by
+    # BOTH conditions: a stray `APOLLO_API_KEY` with `ENRICHMENT_PROVIDER=
+    # none` must build no `ApolloRuntime`, open no client, and never even
+    # import `providers/live/apollo_enrichment.py` (the import stays lazy,
+    # here and in `providers/registry.py`). Enrichment is optional even in
+    # Live Mode — unlike `live_runtime`/`live_search_runtime`, a missing
+    # Apollo runtime never disables Live Mode itself.
+    app.state.apollo_runtime = None
+    if settings.enrichment_provider == "apollo" and settings.apollo_api_key:
+        from groundwork.providers.live.enrichment_runtime import ApolloRuntime
+
+        app.state.apollo_runtime = ApolloRuntime.create(settings)
+
     yield
 
     # --- Shutdown (Checkpoint I1 Phase 4) ---
@@ -157,6 +171,8 @@ async def lifespan(app: FastAPI):
         await app.state.live_runtime.close()
     if app.state.live_search_runtime is not None:
         await app.state.live_search_runtime.close()
+    if app.state.apollo_runtime is not None:
+        await app.state.apollo_runtime.close()
     await engine.dispose()
 
     logger.info("groundwork api shutdown complete", extra={"executor_id": app.state.executor_id})

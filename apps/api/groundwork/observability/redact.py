@@ -27,6 +27,8 @@ def _configured_secrets() -> list[str]:
         secrets.append(settings.openai_api_key)
     if settings.tavily_api_key:
         secrets.append(settings.tavily_api_key)
+    if settings.apollo_api_key:
+        secrets.append(settings.apollo_api_key)
     return [s for s in secrets if s]
 
 

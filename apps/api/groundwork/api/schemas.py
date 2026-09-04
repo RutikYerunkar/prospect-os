@@ -185,6 +185,11 @@ class LiveAvailability(BaseModel):
     available: bool
     llm_available: bool = False
     search_available: bool = False
+    # V2-D: additive, never part of `available`'s AND — enrichment is
+    # optional even in Live Mode, so an unconfigured/absent Apollo runtime
+    # must never disable Live Mode itself.
+    enrichment_provider: str = "none"
+    enrichment_available: bool = False
     operator_login_configured: bool = False
     is_operator: bool = False
     model: str
@@ -211,6 +216,10 @@ class ProviderSettingsResponse(BaseModel):
     mode: str
     llm: ProviderInfo
     search: ProviderInfo
+    # V2-D: additive. `name` is `"none"` or `"apollo"` (mirrors
+    # `settings.enrichment_provider`); `configured` never exposes the key,
+    # only whether one is present when Apollo is selected.
+    enrichment: ProviderInfo
     live: LiveAvailability
     # Checkpoint I1 Phase 9: sourced from the API rather than a duplicated
     # frontend constant — see apps/web/lib/constants.ts's old

@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke db-upgrade db-downgrade db-current db-history docker-build prod-smoke
+.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke enrichment-smoke db-upgrade db-downgrade db-current db-history docker-build prod-smoke
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -43,6 +43,14 @@ search-spike:
 # automatically by `make test`/CI.
 search-smoke:
 	cd apps/api && uv run python -m groundwork.scripts.search_smoke --i-understand-this-costs-money
+
+# V2-D real smoke: ONE real Apollo `people/match` call per --person (max 2),
+# real money. Requires APOLLO_API_KEY, explicit confirmation, and at least
+# one --person — see scripts/enrichment_smoke.py. Never run automatically by
+# `make test`/CI. Usage:
+#   make enrichment-smoke PERSON="Jane Doe:example.com:VP of Sales"
+enrichment-smoke:
+	cd apps/api && uv run python -m groundwork.scripts.enrichment_smoke --i-understand-this-costs-money --person "$(PERSON)"
 
 # Alembic migrations (Checkpoint I1 Phase 5) — explicit schema management
 # against whatever DATABASE_URL is currently set. SQLite local dev normally

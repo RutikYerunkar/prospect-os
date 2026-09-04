@@ -103,6 +103,8 @@ async def _run_and_finalize(
     live_runtime,
     run_budget,
     search_runtime=None,
+    enrichment_runtime=None,
+    enrichment_budget=None,
     executor_id: str | None = None,
 ) -> None:
     events = EventEmitter(run_id=run_id, events=repos.events)
@@ -125,6 +127,7 @@ async def _run_and_finalize(
             mode, seed=seed, live_runtime=live_runtime, run_budget=run_budget,
             search_runtime=search_runtime, search_budget=search_budget,
             search_bounds=live_search_bounds_from_settings() if mode is Mode.LIVE else None,
+            enrichment_runtime=enrichment_runtime, enrichment_budget=enrichment_budget,
         )
         budget = DEMO_BUDGET if mode is Mode.DEMO else live_budget_from_settings()
         discovery_bounds = DiscoveryBounds() if mode is Mode.DEMO else live_discovery_bounds_from_settings()
@@ -174,12 +177,15 @@ def launch_run(
     live_runtime=None,
     run_budget=None,
     search_runtime=None,
+    enrichment_runtime=None,
+    enrichment_budget=None,
     executor_id: str | None = None,
 ) -> None:
     task = asyncio.create_task(
         _run_and_finalize(
             run_id, play_spec, mode, seed, repos,
             live_runtime=live_runtime, run_budget=run_budget, search_runtime=search_runtime,
+            enrichment_runtime=enrichment_runtime, enrichment_budget=enrichment_budget,
             executor_id=executor_id,
         )
     )
