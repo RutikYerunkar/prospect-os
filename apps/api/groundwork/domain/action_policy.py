@@ -98,6 +98,81 @@ def _is_stale(observed_at: datetime | None, now: datetime, stale_after_days: int
     return (now - observed_aware).total_seconds() > stale_after_days * 86400
 
 
+def is_enrichment_stale(
+    observed_at: datetime | None, now: datetime, stale_after_days: int = ENRICHMENT_STALE_AFTER_DAYS_DEFAULT
+) -> bool:
+    """Public wrapper around `_is_stale` (V2-E, §7) — lets a read-only API
+    surface (the prospect aggregate's `contact_channels`) reuse the exact
+    same staleness semantics clause 5/5-analogue already enforce, without a
+    second implementation to drift out of sync. `observed_at is None` fails
+    closed to stale, same as the send-policy path."""
+    return _is_stale(observed_at, now, stale_after_days)
+
+
+class PreservedEnrichmentState(StrEnum):
+    """V2-E, §8 — what the API additionally tells the UI about a channel's
+    CURRENT state when the most recent enrichment attempt did not itself
+    produce that state (§3.6 last-known-good). `None` (not a member here)
+    means the current state was produced by the most recent attempt itself
+    — nothing is being preserved underneath it."""
+
+    REFRESH_FAILED = "REFRESH_FAILED"
+    REFRESH_FOUND_NOTHING = "REFRESH_FOUND_NOTHING"
+
+
+_NOT_A_PROVIDER_BACKED_STATE = (None, "NOT_ATTEMPTED", "PROVIDER_ERROR")
+
+
+def derive_preserved_enrichment_state(
+    *,
+    discovery_state: str | None,
+    identifier: str | None,
+    observed_at: datetime | None,
+    last_attempt_status: str | None,
+    latest_enrichment_observed_at: datetime | None,
+) -> PreservedEnrichmentState | None:
+    """Pure derivation from `contact_channels` columns already read by the
+    prospect aggregate (§3.6's two last-known-good branches, made visible):
+
+    - `ContactEnrichmentRepository._apply_failure_to_channel`'s early return
+      (a failed attempt touches only `last_attempt_*`, leaving a genuine
+      provider-backed state exactly as it was) -> `REFRESH_FAILED`, but only
+      when that state is genuinely provider-backed (`PROVIDER_ERROR` itself
+      is the honest current state after repeated failures with no prior
+      good data — nothing is being "preserved" underneath it, so this stays
+      `None` in that case).
+    - `._upsert_success_channel`'s empty-success guard (a later SUCCESSFUL
+      call whose own observation was empty never overwrites a previously
+      observed real identifier) -> `REFRESH_FOUND_NOTHING`. Detected by
+      `latest_enrichment_observed_at` (the newest `contact_enrichments.
+      observed_at` across ALL of this prospect's enrichment calls) being
+      strictly newer than the state's own `observed_at` — the guard is the
+      only path where a channel's `observed_at` can lag behind a call it
+      participated in. A tie (they're equal) means the most recent call IS
+      what produced the current state — never `REFRESH_FOUND_NOTHING`.
+
+    Never re-derive this in TypeScript — the frontend renders this value,
+    it does not recompute it.
+    """
+    if last_attempt_status is None:
+        return None
+
+    if last_attempt_status != "OK":
+        if discovery_state not in _NOT_A_PROVIDER_BACKED_STATE:
+            return PreservedEnrichmentState.REFRESH_FAILED
+        return None
+
+    if (
+        identifier is not None
+        and observed_at is not None
+        and latest_enrichment_observed_at is not None
+        and latest_enrichment_observed_at > observed_at
+    ):
+        return PreservedEnrichmentState.REFRESH_FOUND_NOTHING
+
+    return None
+
+
 def _recipient_normalizes(recipient_identifier: str | None) -> bool:
     if not recipient_identifier:
         return False

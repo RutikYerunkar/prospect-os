@@ -255,11 +255,55 @@ export interface ProspectScore {
 export interface ProspectContact {
   full_name: string | null;
   title: string | null;
-  persona: string | null;
+  // §15 regression fix: this is `ContactRow.persona` / `Contact.persona_match`
+  // on the backend — a boolean flag ("does this title match a persona"),
+  // never a string. Was mistyped here; the only frontend consumer is
+  // `ContactPanel`, audited and updated alongside this fix.
+  persona: boolean;
   linkedin_url: string | null;
   email: string | null;
   verification: ContactVerification;
   evidence_ids: string[];
+}
+
+// --- v2 contact enrichment axes (V2-E) ---
+
+export type EmailDiscoveryState = "NOT_FOUND" | "FOUND" | "PROVIDER_ERROR";
+export type EmailVerificationState = "UNVERIFIED" | "UNVERIFIABLE" | "RISKY" | "VERIFIED" | "INVALID";
+export type LinkedInResolutionState = "NOT_FOUND" | "RESOLVED" | "PROVIDER_ERROR";
+export type LinkedInIdentityState = "UNKNOWN" | "MISMATCH" | "WEAK_MATCH" | "STRONG_MATCH";
+export type EnrichmentOrigin = "DEMO_FIXTURE" | "LIVE_PROVIDER";
+export type PreservedEnrichmentState = "REFRESH_FAILED" | "REFRESH_FOUND_NOTHING";
+
+/**
+ * One row per (prospect, channel) — additive, read-only (§Part 4/§L, V2-E
+ * §5/§6). A channel that was never attempted has NO entry at all (absence
+ * is `NOT_ATTEMPTED`, never a row with a literal state) — see
+ * `ContactChannelAxes` for how the UI renders that. State strings are kept
+ * as `string` (not the closed union types above) so an unrecognized future
+ * enum value fails open to a neutral "unknown state" render instead of a
+ * TypeScript narrowing mismatch at runtime.
+ */
+export interface ContactChannel {
+  channel: string;
+  identifier: string | null;
+  discovery_state: string | null;
+  verification_state: string | null;
+  identity_match_state: string | null;
+  derivation_version: string | null;
+  observed_at: string | null;
+  last_attempt_at: string | null;
+  last_attempt_status: string | null;
+  last_attempt_error_type: string | null;
+  origin: string | null;
+  provider: string | null;
+  stale: boolean | null;
+  stale_after_days: number | null;
+  preserved_state: string | null;
+  // Observations only (§4) — never affect or appear inside a state's "why"
+  // explanation. Email channel only; always `null` for `linkedin`.
+  provider_confidence: number | null;
+  is_catch_all: boolean | null;
 }
 
 export interface ClaimMapEntry {
@@ -351,6 +395,7 @@ export interface ProspectAggregate {
   review: ReviewResult | null;
   trace: AgentTaskTrace[];
   approval: ApprovalInfo;
+  contact_channels: ContactChannel[];
 }
 
 // --- evaluation (GET /api/runs/{id}/evaluation) ---
