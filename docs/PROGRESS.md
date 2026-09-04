@@ -25,13 +25,113 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-B — Domain model + additive persistence** | (branch `claude/v2-b-domain-persistence`) | v2 enums, pure `domain/contact_identity.py` (email identity normalization, origin-aware LinkedIn identifier grammar, deterministic person/company identity matching, last-known-good pure helpers), `domain/content_hash.py`, `domain/action_policy.py`; nine additive tables + `approvals.hash_version`/CHECK + the `LIVE_EXTERNAL`-only partial unique recipient index; one additive Alembic revision, drift-clean on a real Postgres 16; Neon `v2-development` migrated to `1ec5eceed8d4` by the user. See "What V2-B added" below. |
 | **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step** | `f43a134` (merged to `claude/v2-c-enrichment` / PR #15) | `providers/contact_base.py` (`EnrichmentProvider` Protocol, observations only — D2); `DemoEnrichmentProvider` (`origin=DEMO_FIXTURE`, fixture-backed, scripted failures, an `EnrichmentCallBudget`); `engine/enrichment.py::call_enrichment` (the only enrichment telemetry-persistence seam); the `contact_enrichment` pipeline step (never named `enrich` — C4), optional, wired `contact -> contact_enrichment -> personalize`; `ContactEnrichmentRepository` (§3.6 last-known-good, guarded upserts); the canonical Demo matrix (Northwind VERIFIED+STRONG_MATCH, Sable RISKY-email+STRONG_MATCH-LinkedIn, everyone else NOT_ATTEMPTED by omission); an additive `contact_channels` field on the prospect aggregate API. Canonical v1 board byte-identical. No migration (schema already landed at V2-B). Zero paid/live provider calls. See "What V2-C added" below. |
 | **V2-D — Live Apollo enrichment** | `0672671` (merged to `feature/v2-contact-enrichment` via PR #16) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape; the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session. **The paid smoke is BLOCKED, not merely deferred: the user's Apollo account (personal Gmail/free tier) cannot enable `api/v1/people/match` at all**, so the exact no-match response shape and every other smoke-dependent fact remain genuinely unverified — no workaround was attempted. See "What V2-D added" below. |
-| **V2-DH — Live Hunter enrichment** | *this commit* (branch `claude/v2-dh-live-hunter`) | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`); a follow-up fix adding `--use-test-api-key` (§Part 16) to `scripts/hunter_smoke.py`. Canonical Demo byte-identical. Zero real Hunter calls in this session's own implementation/tests; **the real Hunter smoke was subsequently run by the user, with explicit approval, outside this session's automated work** — real authentication, real-person matching, the `data`+`meta` success envelope, and the `x-request-id` header are now confirmed live; the exact HTTP-200 no-email body shape remains the one open wire unknown. See "What V2-DH added" and "Real Hunter smoke — validated" below. |
+| **V2-DH — Live Hunter enrichment** | `claude/v2-dh-live-hunter` | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`); a follow-up fix adding `--use-test-api-key` (§Part 16) to `scripts/hunter_smoke.py`. Canonical Demo byte-identical. Zero real Hunter calls in this session's own implementation/tests; **the real Hunter smoke was subsequently run by the user, with explicit approval, outside this session's automated work** — real authentication, real-person matching, the `data`+`meta` success envelope, and the `x-request-id` header are now confirmed live; the exact HTTP-200 no-email body shape remains the one open wire unknown. See "What V2-DH added" and "Real Hunter smoke — validated" below. |
+| **V2-E — Contact enrichment UI** | *this commit* (branch `claude/v2-e-contact-enrichment-ui`) | `ContactPanel` extended in place into one "Contact & Enrichment" surface showing all five contact axes (person identity, email discovery, email verification, LinkedIn resolution, LinkedIn identity match) independently, each with a label/badge/provider-neutral explanation; a null channel axis renders `NOT OBSERVED`, never silently omitted. Backend: additive-only `contact_channels` fields (`origin`, `provider`, `stale`, `stale_after_days`, `preserved_state`, `provider_confidence`, `is_catch_all`) on the existing `GET /api/prospects/{id}` aggregate — no new endpoint, no new table, no migration; two new pure `domain/action_policy.py` helpers (`is_enrichment_stale`, `derive_preserved_enrichment_state`) compute staleness/preservation server-side, never re-derived in TypeScript. Frontend: `lib/linkedinSafety.ts` mirrors the backend's LIVE_PROVIDER LinkedIn URL grammar independently (defense-in-depth) — only `channel=linkedin` + `origin=LIVE_PROVIDER` + `discovery_state=RESOLVED` + a validated canonical `https://[www.]linkedin.com/in/<id>` URL may become an `href`; `demo://` identifiers render as a synthetic/simulated-profile line, never a link. Fixed a real type bug: `ProspectContact.persona` was typed `string \| null` in `lib/types.ts` but is `boolean` end to end on the backend (`ContactRow.persona`/`Contact.persona_match`) — audited (only consumer was `ContactPanel`) and corrected. Canonical Demo byte-identical. Zero external provider calls. See "What V2-E added" below. |
 
 ---
 
 ## Current checkpoint
 
-**V2-DH — Live Hunter contact enrichment — implementation COMPLETE.** Hunter is wired as a SECOND live
+**V2-E — Contact enrichment UI — COMPLETE.** Extends the existing `ContactPanel` in place into one
+"Contact & Enrichment" surface (§1) showing all five independent contact axes — person identity (v1,
+unchanged), email discovery, email verification, LinkedIn resolution, LinkedIn identity match (§2) — each
+with an explicit label, a badge, and a visible provider-neutral "why" explanation (§3). Confidence and
+catch-all render as separate observation chips that never appear inside a state's explanation text (§4).
+Backend changes are additive/read-only only (§5): `_contact_channel_dict` in
+`api/routers/prospects.py` gained `origin`, `provider`, `stale`, `stale_after_days`, `preserved_state`,
+`provider_confidence` (email only), `is_catch_all` (email only) — no new endpoint, no new persistence
+model, no migration (§6). Two new pure functions in `domain/action_policy.py` — `is_enrichment_stale`
+(a public wrapper reusing the exact same staleness semantics clause 5 already enforces) and
+`derive_preserved_enrichment_state` (§8, returning `REFRESH_FAILED` / `REFRESH_FOUND_NOTHING` / `None`) —
+compute these server-side from columns the aggregate already reads; the frontend renders the value, it
+never re-derives it (§8). A null channel axis renders `NOT OBSERVED` with a neutral explanation, never
+silently omitted or mapped to `UNKNOWN`/`VERIFIED` (§9). `lib/linkedinSafety.ts` is a hand-rolled,
+independent mirror of `domain/contact_identity.py::validate_linkedin_identifier`'s LIVE_PROVIDER grammar
+(§10) — only `channel=linkedin` + `origin=LIVE_PROVIDER` + `discovery_state=RESOLVED` + a validated
+canonical `https://[www.]linkedin.com/in/<id>[/]` URL may become an `href`; `demo://` never does, and a
+malformed/lookalike/wrong-path/userinfo/port/fragment/http/unsupported-host URL renders as plain text.
+Demo simulated-profile identifiers render as a synthetic line with no external URL (§11). A prospect's
+full professional email renders only on this page (already true pre-V2-E); no mailto, no copy button, no
+send/approve affordance was added anywhere in this surface (§12). The Run board is untouched (§13).
+Tests use Vitest + `react-dom/server`'s `renderToStaticMarkup` only — no Playwright/jsdom/testing-library
+introduced (§14; `vitest.config.mts`'s `include` was extended to also collect `*.test.tsx`, the one
+config change this needed). The pre-existing `ProspectContact.persona` frontend type bug (`string | null`
+instead of `boolean` — the real backend shape, confirmed at `ContactRow.persona` /
+`Contact.persona_match`) is fixed; every frontend usage was grep-audited (`ContactPanel` was the only
+consumer, and no longer reads `.persona` as display text at all) (§15). The pre-existing v1
+`contact.linkedin_url` is now gated by the same safe-URL predicate (§16) — unsafe values render as text,
+never as an anchor.
+
+**No separate frozen "V2-E Rev-2" plan document exists in this repository or environment** — searched by
+filename, by content (`rev-2`/`rev 2`), and across git history/branches; `docs/V2_IMPLEMENTATION_PLAN.md`
+Part 13's own V2-E entry is a short, high-level summary consistent with (a subset of) the numbered
+decisions the task brief itself supplied verbatim. Per `CLAUDE.md`'s own instruction ("flag the conflict
+explicitly rather than silently resolving it"), this is recorded here rather than silently assumed: the
+task brief's 18 numbered decisions were treated as authoritative and implemented exactly as given, since
+they are fully self-contained and don't conflict with the plan-doc summary or any v1/v2 invariant. Two
+implementation details the brief named by outcome but not by exact algorithm were designed from first
+principles against the existing `ContactEnrichmentRepository`/`contact_channels` semantics, and should be
+treated as this session's own engineering judgment rather than a byte-for-byte reproduction of an unseen
+spec — a future session with access to the actual Rev-2 document should diff these against it:
+
+- **`derive_preserved_enrichment_state`'s exact detection rule.** `REFRESH_FAILED` fires when
+  `last_attempt_status != "OK"` AND the channel already carries a genuine provider-backed state
+  (`discovery_state` not in `{None, "NOT_ATTEMPTED", "PROVIDER_ERROR"}` — `PROVIDER_ERROR` itself is the
+  honest current state after repeated failures with no prior good data, so nothing is being "preserved"
+  underneath it). `REFRESH_FOUND_NOTHING` fires when `last_attempt_status == "OK"` AND the channel's own
+  `identifier`/`observed_at` are set AND the newest `contact_enrichments.observed_at` across ALL of the
+  prospect's enrichment calls is strictly newer than this channel's `observed_at` — the only path in
+  `ContactEnrichmentRepository._upsert_success_channel` where a channel's `observed_at` can lag behind a
+  call it participated in is its empty-success guard (§V2-DH). A tie (equal timestamps) is deliberately
+  `None`, not `REFRESH_FOUND_NOTHING` — verified directly by `test_timestamp_tie_is_not_preserved` /
+  `TestDerivePreservedEnrichmentState::test_timestamp_tie_is_none`.
+- **`lib/linkedinSafety.ts`'s exact parser.** Deliberately does NOT use the built-in `URL` object — the
+  WHATWG URL algorithm silently strips an explicit default port and (in some environments) treats a
+  backslash as a path separator, either of which would let something the backend rejects slip past a
+  mirror built on it. Instead it hand-parses the URL shape with a regex mirroring Python's `urlsplit`
+  semantics, rejects any backslash/whitespace outright, and matches the registrable-domain check
+  (`host === "linkedin.com" || host.endsWith(".linkedin.com")`) without a full public-suffix-list
+  library, since `linkedin.com` itself has no interior-dot suffix complexity to worry about.
+
+Every other numbered decision in the task brief was implemented as literally specified, with no
+interpretation required.
+
+`master`/production/Render/Neon `production` are untouched — this checkpoint lives entirely on
+`claude/v2-e-contact-enrichment-ui`, targeting a future PR into `feature/v2-contact-enrichment` (never
+`master`). No PR was created this session, per the task's explicit instruction to stop before PR
+creation/merge/V2-F.
+
+**Full backend suite: 820 passed, 1 skipped** (same pre-existing Postgres-DSN-gated skip), up from
+V2-DH's 788 — new/extended: `tests/test_prospect_aggregate_v2e.py` (10 new, additive API serialization:
+fresh success has no preserved state and isn't stale; no forbidden/unapproved field is exposed; stale
+after the configured window; `PROVIDER_ERROR`-only stays `None` not `REFRESH_FAILED`; `REFRESH_FAILED`;
+`REFRESH_FOUND_NOTHING`; a timestamp tie stays `None`; empty `contact_channels`; null `contact`; the
+persona-boolean regression) and `tests/test_action_policy.py` (extended: `TestIsEnrichmentStale`,
+`TestDerivePreservedEnrichmentState` — every combination named above, in isolation). `ruff`-clean.
+**Frontend: `pnpm lint` / `pnpm typecheck` / `pnpm build` all clean; `pnpm test` — 59 passed** across
+4 files (`lib/linkedinSafety.test.ts`, new, 24 tests — every §10 predicate case, including the canonical
+`www.linkedin.com`/`linkedin.com` pairs, malformed/lookalike/port/userinfo/fragment/backslash/overlength
+rejections; `components/ContactPanel.test.tsx`, new, 16 tests via `renderToStaticMarkup` — Northwind- and
+Sable-shaped hero paths, `PROVIDER_ERROR`/`NOT_FOUND` distinctness, stale badge, both preserved-state
+notes, `NOT OBSERVED` × 5 when `contact_channels` is empty, a graceful unknown-future-state render, no
+send/approve/copy/mailto affordance anywhere, and both the safe and malicious LinkedIn href cases end to
+end through the component; plus the two pre-existing I2 proxy test files, unchanged).
+**Alembic: `alembic heads` reports `1ec5eceed8d4 (head)`, unchanged — zero new revision files, zero
+`models/tables.py` change.** **Canonical Demo regression: manually walked through the real
+API+UI** (`make seed`, a real run through `POST /api/plays`+`/runs`, screenshots of both a populated
+five-axis hero path and an empty/`NOT OBSERVED` path) — `contact_channels` serialized exactly as designed
+(`stale: false`, `preserved_state: null`, `origin`/`provider` populated, `provider_confidence`/
+`is_catch_all` present only on the email channel); the fixture pack, `demo_pack.yaml`, was not touched by
+this checkpoint (`git diff --stat` against it is empty), so the byte-identical PASS:2/NEEDS_REVIEW:2/
+REJECTED:1/DUPLICATE:1/FAILED:1 and Northwind 92/Riverbend 35/Cobalt 25/Ferrous 58/Sable 79 distribution
+from prior checkpoints is structurally unaffected (nothing in this checkpoint's diff touches scoring,
+orchestration, fixtures, or Demo provider behavior). **Zero external provider calls of any kind** were
+made anywhere in this session — no Hunter/Apollo/OpenAI/Tavily/Gmail/LinkedIn network call, real or
+simulated-over-the-wire; the one local run driven above used only Demo Mode's existing offline fixture
+providers.
+
+**V2-DH — Live Hunter contact enrichment — COMPLETE**, merged before this checkpoint began. Hunter is
+wired as a SECOND live
 `EnrichmentProvider` behind the exact same `EnrichmentProvider` Protocol Apollo already satisfies — never
 a second pipeline, never Hunter-specific domain enums/repository methods/tables/retry framework/budget
 system/sendability logic, per the frozen Rev-3 plan. Every scripted/automated contract test is green
@@ -3993,14 +4093,161 @@ Hunter calls were made while diagnosing or fixing this — neither smoke mode wa
 
 ---
 
+## What V2-E added
+
+**Files changed.** Backend: `groundwork/domain/action_policy.py` (additive — `is_enrichment_stale`,
+`PreservedEnrichmentState`, `derive_preserved_enrichment_state`; every pre-existing function/constant
+unchanged), `groundwork/api/routers/prospects.py` (`_contact_channel_dict` extended, `_load_aggregate`
+now also reads `get_contact_enrichments` to compute `latest_enrichment_observed_at` and an
+`enrichment_by_id` lookup), `tests/test_action_policy.py` (extended), `tests/
+test_prospect_aggregate_v2e.py` (new). Frontend: `lib/types.ts` (`ProspectContact.persona` fixed to
+`boolean`; new `ContactChannel`/axis-state types; `ProspectAggregate.contact_channels` added),
+`lib/linkedinSafety.ts` (new), `lib/linkedinSafety.test.ts` (new), `components/ContactPanel.tsx`
+(rewritten in place — same file, same export, five axes instead of one), `components/
+ContactPanel.test.tsx` (new), `app/prospects/[id]/page.tsx` (panel title renamed "Contact & Enrichment";
+now passes `contactChannels={prospect.contact_channels}`), `vitest.config.mts` (`include` extended to
+also collect `*.test.tsx` — the one test-infra change this checkpoint needed to run
+`renderToStaticMarkup`-based component tests at all). No file outside these was touched; in particular
+`apps/api/groundwork/fixtures/demo_pack.yaml`, `apps/api/alembic/`, `apps/api/groundwork/domain/
+scoring.py`, `apps/api/groundwork/domain/review.py`, `apps/api/groundwork/engine/*`, and every
+`providers/` module are byte-identical to before this checkpoint.
+
+**Backend additions, precisely.** `_contact_channel_dict` (per `channel` row) now also returns:
+`origin`/`provider` — read off the `ContactEnrichmentRow` the channel's `derived_from_enrichment_id`
+points to (via a `{id: row}` map built once per aggregate load from the already-existing
+`get_contact_enrichments` repository method — no new query shape, no new repository method); both `None`
+when the channel has never had a successful observation (`derived_from_enrichment_id is None`, e.g. a
+`PROVIDER_ERROR`-only channel). `stale`/`stale_after_days` — `is_enrichment_stale(row.observed_at,
+utcnow(), ENRICHMENT_STALE_AFTER_DAYS_DEFAULT)`, the exact same fail-closed-on-`None` semantics
+`action_policy.evaluate()`'s clause 5 already enforces for send eligibility, now exposed read-only rather
+than re-implemented. `preserved_state` — `derive_preserved_enrichment_state(...).value` or `None`; see
+"Current checkpoint" above for the exact rule and the explicit note that its detection algorithm is this
+session's own derivation, not a reproduction of an unseen frozen spec. `provider_confidence`/
+`is_catch_all` — `ContactEnrichmentRow.email_provider_confidence`/`.email_is_catch_all`, exposed ONLY for
+the `email` channel (always `None` for `linkedin`, since those fields are email-shaped observations with
+no LinkedIn equivalent). Confirmed NOT exposed anywhere in the new fields (asserted directly by
+`test_no_forbidden_or_unapproved_fields_are_exposed`, which asserts the exact approved key set and scans
+for forbidden substrings): `email_provider_status`, `raw_digest`, `provider_person_id`, any API key, any
+raw provider error text (`last_attempt_error_type` is a categorical error TYPE string, e.g.
+`"EnrichmentTimeout"`, never a raw provider error message — unchanged from V2-C, not new in V2-E).
+
+**Five-axis rendering, confirmed.** `ContactPanel` renders, top to bottom: person identity (v1,
+byte-identical copy/tone to before, `contact.linkedin_url` now gated by `isSafeLinkedInProfileUrl`), email
+discovery, email verification, LinkedIn resolution, LinkedIn identity match. Each of the four new axes
+reads its own `AxisCopy` (badge/tone/explanation) from a small `Record<string, AxisCopy>` map keyed by the
+exact backend enum string; an unrecognized value (a future enum member this UI doesn't know about yet)
+falls back to a neutral `UNKNOWN STATE` badge rather than crashing or guessing — verified by
+`ContactPanel.test.tsx`'s `gracefully renders an unrecognized future enum value` case. A missing channel
+row (the axis was never attempted) renders `NOT OBSERVED` with a neutral explanation for both of that
+channel's axes — verified by the empty-`contact_channels` test asserting exactly 5 `NOT OBSERVED` badges
+(4 channel axes + the person-identity axis, which already used the same badge text for its own
+`contact === null` case pre-V2-E). `provider_confidence`/`is_catch_all` render as their own small
+`Badge` chips (`EmailObservations`), never folded into `EMAIL_VERIFICATION_COPY`'s explanation strings —
+verified by a dedicated test asserting the RISKY explanation text never contains the word "catch-all".
+
+**Link-safety implementation.** `lib/linkedinSafety.ts::isSafeLinkedInProfileUrl` hand-parses the URL
+shape with a regex (never the built-in `URL` object — see "Current checkpoint" above for why) and
+requires ALL of: `https` scheme (case-insensitive), no userinfo, no port (including an explicit default
+port), no fragment, host exactly `linkedin.com` or ending `.linkedin.com`, and a path matching
+`^/in/[A-Za-z0-9\-_%]{1,120}/?$`. `isSafeLinkedInHref` additionally requires `channel === "linkedin"`,
+`origin === "LIVE_PROVIDER"`, and `discovery_state === "RESOLVED"` before ever calling the URL check — a
+`demo://` identifier is rejected structurally (by the `startsWith("demo://")` short-circuit) before the
+URL parser even runs. `ContactPanel`'s `LinkedInIdentifierLine` calls this predicate before rendering an
+`<a>`; every other case (unsafe, or a `demo://` identifier) renders the identifier as plain
+`<span>`/`<p>` text. The same predicate (`isSafeLinkedInProfileUrl` only, since the v1 field carries no
+channel/origin/state metadata) now gates the pre-existing `contact.linkedin_url` too. Verified by 24
+`linkedinSafety.test.ts` cases (both canonical accept cases, every named reject case from the task brief:
+malformed, wrong host, lookalike host, wrong path, userinfo, port — including the explicit-default-port
+case a naive `URL`-based mirror would miss — fragment, HTTP, unsupported scheme, backslash-smuggling,
+overlength) plus two `ContactPanel.test.tsx` end-to-end cases (a safe LIVE_PROVIDER+RESOLVED URL becomes a
+real `href`; a lookalike `linkedin.com.evil.com` URL claiming the same LIVE_PROVIDER+RESOLVED never does).
+
+**Preserved-state implementation.** See `domain/action_policy.py::derive_preserved_enrichment_state`'s
+docstring and "Current checkpoint" above for the full rule and its rationale. Rendered in
+`ContactPanel` as `PreservedStateNote` — a one-line amber note beneath the relevant axis's explanation,
+textually distinct for `REFRESH_FAILED` ("the most recent refresh attempt failed") vs.
+`REFRESH_FOUND_NOTHING` ("the most recent refresh found nothing new"), both saying "showing the last
+known state" — verified by `ContactPanel.test.tsx` asserting the two notes render distinct text and never
+each other's.
+
+**Persona bug correction and usage audit.** `grep -rn "\.persona\b" apps/web --include=*.ts --include=*.tsx`
+(run both before and after the fix) found exactly one non-declaration usage in the entire frontend:
+`ContactPanel.tsx`'s old `contact.title ?? contact.persona ?? "—"` fallback — a real latent bug, since the
+backend always sends a boolean there (`ContactRow.persona`/`Contact.persona_match`), so a real deployment
+that ever hit this fallback would have rendered the literal text `"true"`/`"false"` where a title or
+em-dash was intended. The fallback was removed (persona is not meaningful as display text — it's
+redundant with `verification` for every real code path, since `resolve_contact` only ever sets
+`persona_match=True` alongside `VERIFIED`/`PERSONA_ONLY`), and `lib/types.ts::ProspectContact.persona` is
+now typed `boolean`, matching `groundwork/models/schemas.py::Contact.persona_match: bool` and
+`groundwork/repositories/prospect_data.py::upsert_contact`'s `persona=contact.persona_match` exactly. No
+other frontend file references `.persona` (confirmed by the same grep, re-run after the fix). A backend
+regression test, `test_persona_is_a_boolean_at_the_api_layer`, pins the real wire shape
+(`agg.contact["persona"] is True`, `isinstance(..., bool)`) so a future backend change can't silently
+reintroduce a string here without a test failing; a frontend test,
+`renders a boolean persona without leaking 'true'/'false' as visible text`, pins the rendering side.
+
+**Test counts/results.** Backend: `tests/test_prospect_aggregate_v2e.py` — 10 new (fresh success has no
+preserved state and isn't stale; no forbidden/unapproved field exposed; stale after the configured window;
+`PROVIDER_ERROR`-only stays `None`; `REFRESH_FAILED`; `REFRESH_FOUND_NOTHING`; a timestamp tie stays
+`None`; empty `contact_channels`; null `contact`; the persona-boolean regression).
+`tests/test_action_policy.py` — extended with `TestIsEnrichmentStale` (4) and
+`TestDerivePreservedEnrichmentState` (8), covering every named-in-the-brief case (stale true/false,
+identifier-none, timestamp tie, `PROVIDER_ERROR`-only, `REFRESH_FAILED`, `REFRESH_FOUND_NOTHING`) at the
+pure-function level in addition to the API-integration level. Full suite: **820 passed, 1 skipped**
+(same pre-existing Postgres-DSN-gated skip), up from V2-DH's 788. `ruff check` clean on every
+new/changed file. Frontend: `pnpm test` — **59 passed** (`lib/proxyHeaders.test.ts` 6,
+`components/ContactPanel.test.tsx` 16 new, `lib/linkedinSafety.test.ts` 24 new,
+`app/api/[...path]/route.test.ts` 13 — the last two files pre-existing and unmodified in behavior).
+`pnpm lint` — clean. `pnpm typecheck` (`next typegen && tsc --noEmit`) — clean. `pnpm build` — succeeds
+(`next build`, all routes compile, including the unchanged `/prospects/[id]` route).
+
+**Alembic.** `uv run alembic heads` → `1ec5eceed8d4 (head)` — unchanged from V2-B/V2-C/V2-D/V2-DH.
+`uv run alembic current`/`check` were exercised against a real seeded local SQLite DB during manual
+verification (see below) rather than an empty scratch DB — both are consistent with "no migration needed"
+for this checkpoint; `test_migration_drift.py` (Postgres-gated, skipped in this SQLite-only environment
+the same way it has been every checkpoint since V2-B) stayed green in the full-suite run above with
+`models/tables.py`/`alembic/` completely untouched.
+
+**Canonical Demo regression — manual walkthrough.** `make seed` (schema + fixture pack load), then a real
+run through the actual HTTP API (`POST /api/plays` → `POST /api/plays/{id}/runs` → polled
+`GET /api/runs/{id}/prospects`), then `GET /api/prospects/{id}` for both a hero-path prospect (Northwind,
+VERIFIED email/STRONG_MATCH LinkedIn) and a persona-only prospect with no enrichment call at all
+(Riverbend). Confirmed by direct inspection of the JSON response: `contact_channels[*].stale === false`,
+`preserved_state === null`, `origin === "DEMO_FIXTURE"`, `provider === "demo_fixture"`,
+`provider_confidence`/`is_catch_all` present only on the `email` entry. Then started the real Next.js dev
+server against this same API and captured full-page screenshots (via the pre-installed Playwright
+Chromium) of both prospects' detail pages: the hero path shows all five axes populated (VERIFIED / FOUND
++ Confidence 94% + Not a catch-all domain / VERIFIED / RESOLVED + the `demo://linkedin/priya-natarajan`
+identifier rendered as plain text with "simulated profile, not a real URL", never a link / STRONG MATCH);
+the persona-only path shows `NOT OBSERVED` for all four channel axes with the neutral explanation text,
+alongside the pre-existing `PERSONA_ONLY` person-identity content rendered unchanged. This session used
+its own ad hoc `objective`/no `icp_overrides` for the manual walkthrough run, so its own displayed scores
+(52/23/…) are NOT the canonical `demo_pack.yaml` reference numbers — the canonical distribution itself
+was verified unaffected by inspecting the diff (`demo_pack.yaml` untouched; no scoring/orchestration/
+provider file touched), not by re-running the exact canonical New Play parameters through the UI. Local
+seed DB and `.env.local` were deleted after verification; nothing from this manual walkthrough is
+committed.
+
+**Deviations, none beyond what's already flagged above** (the absent frozen Rev-2 plan document, and the
+two implementation details designed from first principles rather than reproduced from an unseen spec).
+Every other numbered decision in the task brief was implemented exactly as given.
+
+**Confirmed: zero external provider calls of any kind** in this session — no Hunter, Apollo, OpenAI,
+Tavily, Gmail, or LinkedIn network call, real or otherwise. The one live run driven during manual
+verification used only Demo Mode's existing, pre-existing, zero-egress fixture providers
+(`DemoLLMProvider`/`DemoSearchProvider`/`DemoEnrichmentProvider`) — no new provider code was written or
+touched by this checkpoint at all.
+
+---
+
 ## Next task
 
-**Immediate next task: V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`), per
-`docs/V2_IMPLEMENTATION_PLAN.md` Part 13 — surfacing the additive `contact_channels` data (already
-returned by the prospect aggregate API since V2-C) in `apps/web`. Not started; no frontend file has been
-touched by any v2 checkpoint so far.
+**Immediate next task: V2-F — Channel-specific outreach + guardrails** (`claude/v2-f-channel-outreach`),
+per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-F. V2-E (Contact enrichment UI) is now COMPLETE — see
+"Current checkpoint"/"What V2-E added" above; do not re-open it or begin any V2-F work in the same
+session unless the user explicitly authorizes rolling into the next checkpoint.
 
-**Before V2-E, or as part of a future V2-H/V2-I session:** the BLOCKING `claimed_email` suppression
+**Before V2-F reaches V2-H/V2-I, the BLOCKING `claimed_email` suppression
 requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
 enabled — this is a hard prerequisite for that later checkpoint, not optional polish.
 
@@ -4324,3 +4571,28 @@ anywhere in this session's implementation or tests.
   by anything in this checkpoint — do not treat the `451` permanent-failure handling as if it also
   suppressed a prior successful observation; it does not, by design, until a future V2-H/V2-I session
   implements that separately.
+- **V2-E's own do-not-touch:** `lib/linkedinSafety.ts` must keep hand-parsing the URL shape with its own
+  regex — do not replace it with the built-in `URL`/`URLSearchParams` objects "for simplicity"; the
+  WHATWG URL algorithm normalizes an explicit default port and, in some environments, treats a backslash
+  as a path separator, either of which would silently reopen a case the backend's `validate_linkedin_
+  identifier` rejects. `isSafeLinkedInHref`'s four-way gate (`channel === "linkedin"` AND
+  `origin === "LIVE_PROVIDER"` AND `discovery_state === "RESOLVED"` AND a passing `isSafeLinkedInProfileUrl`)
+  must stay a hard AND — never relaxed to "OR one of these looks right," and a `demo://` identifier must
+  keep short-circuiting to rejected before the URL parser ever runs. `domain/action_policy.py::
+  derive_preserved_enrichment_state` must keep excluding `PROVIDER_ERROR` from "a real state exists" —
+  do not remove that exclusion to "simplify" the condition; doing so would mislabel a channel that has
+  NEVER had a successful observation as `REFRESH_FAILED`, implying a good state is being hidden when none
+  ever existed. Its `REFRESH_FOUND_NOTHING` detection depends on `latest_enrichment_observed_at` being the
+  MAX `observed_at` across every `contact_enrichments` row for the prospect (computed once in
+  `_load_aggregate`, not per-channel) — do not narrow it to a per-channel query; the empty-success guard in
+  `ContactEnrichmentRepository._upsert_success_channel` is what makes a channel's own `observed_at` lag
+  behind a call it participated in, and that guard is prospect-call-scoped, not channel-scoped. `_contact_
+  channel_dict`'s `provider_confidence`/`is_catch_all` must stay email-channel-only (always `None` for
+  `linkedin`) — there is no LinkedIn-shaped equivalent, and inventing one would violate §4 (confidence/
+  catch-all are observations, never folded into a state's explanation, and never fabricated for an axis
+  that has no such observation). `ProspectContact.persona` must stay `boolean` in `lib/types.ts` — the
+  real backend shape (`ContactRow.persona`/`Contact.persona_match`) was always boolean; the frontend type
+  was simply wrong before this checkpoint. `vitest.config.mts`'s `include` must keep collecting both
+  `*.test.ts` and `*.test.tsx` — narrowing it back to `.test.ts` only would silently stop
+  `ContactPanel.test.tsx` (and any future component test) from ever running, with `pnpm test` reporting
+  green while actually collecting zero of those tests.

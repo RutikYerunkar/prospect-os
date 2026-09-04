@@ -13,9 +13,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from groundwork.domain.action_policy import (
+    ENRICHMENT_STALE_AFTER_DAYS_DEFAULT,
     POLICY_VERSION,
+    PreservedEnrichmentState,
     RecipientConflict,
+    derive_preserved_enrichment_state,
     evaluate,
+    is_enrichment_stale,
 )
 from groundwork.domain.content_hash import HASH_VERSION, content_hash
 from groundwork.models.enums import (
@@ -389,3 +393,107 @@ class TestPolicySnapshot:
         assert result.policy_snapshot["policy_version"] == POLICY_VERSION
         assert result.policy_snapshot["action_type"] == ActionType.EMAIL_SEND.value
         assert result.policy_version == POLICY_VERSION
+
+
+class TestIsEnrichmentStale:
+    """V2-E §7 — the public wrapper the prospect aggregate reuses; must stay
+    behaviorally identical to `_is_stale` (clause 5's own private helper)."""
+
+    def test_none_observed_at_is_stale(self):
+        assert is_enrichment_stale(None, NOW, 30) is True
+
+    def test_within_window_is_not_stale(self):
+        observed = NOW - timedelta(days=29)
+        assert is_enrichment_stale(observed, NOW, 30) is False
+
+    def test_past_window_is_stale(self):
+        observed = NOW - timedelta(days=31)
+        assert is_enrichment_stale(observed, NOW, 30) is True
+
+    def test_default_window_matches_the_shared_constant(self):
+        observed = NOW - timedelta(days=ENRICHMENT_STALE_AFTER_DAYS_DEFAULT + 1)
+        assert is_enrichment_stale(observed, NOW) is True
+
+
+class TestDerivePreservedEnrichmentState:
+    """V2-E §8 — computed once, on the backend, from the exact
+    `contact_channels` columns the prospect aggregate already reads. Never
+    re-derived in TypeScript."""
+
+    def test_never_attempted_is_none(self):
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state=None, identifier=None, observed_at=None,
+                last_attempt_status=None, latest_enrichment_observed_at=None,
+            )
+            is None
+        )
+
+    def test_fresh_success_is_none(self):
+        # the state's own observed_at IS the latest enrichment observation
+        # for the prospect — a tie, never REFRESH_FOUND_NOTHING.
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="FOUND", identifier="a@b.com", observed_at=NOW,
+                last_attempt_status="OK", latest_enrichment_observed_at=NOW,
+            )
+            is None
+        )
+
+    def test_timestamp_tie_is_none(self):
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="RESOLVED", identifier="demo://linkedin/x", observed_at=NOW,
+                last_attempt_status="OK", latest_enrichment_observed_at=NOW,
+            )
+            is None
+        )
+
+    def test_refresh_failed_when_a_real_state_exists(self):
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="FOUND", identifier="a@b.com", observed_at=NOW - timedelta(days=1),
+                last_attempt_status="TIMEOUT", latest_enrichment_observed_at=NOW - timedelta(days=1),
+            )
+            is PreservedEnrichmentState.REFRESH_FAILED
+        )
+
+    def test_refresh_failed_applies_to_a_confirmed_not_found_state_too(self):
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="NOT_FOUND", identifier=None, observed_at=NOW - timedelta(days=1),
+                last_attempt_status="PROVIDER_ERROR", latest_enrichment_observed_at=NOW - timedelta(days=1),
+            )
+            is PreservedEnrichmentState.REFRESH_FAILED
+        )
+
+    def test_repeated_failure_with_no_prior_state_is_none_not_refresh_failed(self):
+        # PROVIDER_ERROR IS the honest current state here — nothing real is
+        # being preserved underneath a repeated failure.
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="PROVIDER_ERROR", identifier=None, observed_at=None,
+                last_attempt_status="PROVIDER_ERROR", latest_enrichment_observed_at=None,
+            )
+            is None
+        )
+
+    def test_refresh_found_nothing_when_a_later_call_did_not_move_the_state(self):
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="FOUND", identifier="a@b.com", observed_at=NOW - timedelta(days=5),
+                last_attempt_status="OK", latest_enrichment_observed_at=NOW,
+            )
+            is PreservedEnrichmentState.REFRESH_FOUND_NOTHING
+        )
+
+    def test_identifier_none_never_yields_refresh_found_nothing(self):
+        # a confirmed NOT_FOUND that a later call re-confirms updates
+        # observed_at every time — never "found nothing new to preserve".
+        assert (
+            derive_preserved_enrichment_state(
+                discovery_state="NOT_FOUND", identifier=None, observed_at=NOW - timedelta(days=5),
+                last_attempt_status="OK", latest_enrichment_observed_at=NOW,
+            )
+            is None
+        )

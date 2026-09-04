@@ -289,8 +289,12 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
           </Panel>
         </div>
 
-        <Panel title="Contact / Buyer">
-          <ContactPanel contact={prospect.contact} evidenceById={evidenceById} />
+        <Panel title="Contact & Enrichment">
+          <ContactPanel
+            contact={prospect.contact}
+            contactChannels={prospect.contact_channels}
+            evidenceById={evidenceById}
+          />
         </Panel>
 
         <Panel title="Outreach">
