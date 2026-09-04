@@ -1,5 +1,5 @@
-"""`python -m groundwork.scripts.enrichment_smoke --full-name "..." \\
-    --company-domain "..." --i-understand-this-costs-money`
+"""`python -m groundwork.scripts.enrichment_smoke --i-understand-this-costs-money \\
+    --person "Jane Doe:example.com:VP of Sales"`
 
 The OPTIONAL real-live V2-D smoke test. Makes real, billed calls to the
 Apollo `POST /api/v1/people/match` endpoint against up to 2 REAL people the

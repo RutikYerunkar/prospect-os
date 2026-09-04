@@ -24,20 +24,43 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-A — v2 architecture & docs** | (branch `claude/v2-a-docs`) | Persisted the frozen Rev 4 v2 architecture into `docs/V2_IMPLEMENTATION_PLAN.md`, the v2 section of `docs/ARCHITECTURE.md`, and the v2 invariants in `CLAUDE.md`. Zero application code, zero migration, zero provider call. |
 | **V2-B — Domain model + additive persistence** | (branch `claude/v2-b-domain-persistence`) | v2 enums, pure `domain/contact_identity.py` (email identity normalization, origin-aware LinkedIn identifier grammar, deterministic person/company identity matching, last-known-good pure helpers), `domain/content_hash.py`, `domain/action_policy.py`; nine additive tables + `approvals.hash_version`/CHECK + the `LIVE_EXTERNAL`-only partial unique recipient index; one additive Alembic revision, drift-clean on a real Postgres 16; Neon `v2-development` migrated to `1ec5eceed8d4` by the user. See "What V2-B added" below. |
 | **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step** | `f43a134` (merged to `claude/v2-c-enrichment` / PR #15) | `providers/contact_base.py` (`EnrichmentProvider` Protocol, observations only — D2); `DemoEnrichmentProvider` (`origin=DEMO_FIXTURE`, fixture-backed, scripted failures, an `EnrichmentCallBudget`); `engine/enrichment.py::call_enrichment` (the only enrichment telemetry-persistence seam); the `contact_enrichment` pipeline step (never named `enrich` — C4), optional, wired `contact -> contact_enrichment -> personalize`; `ContactEnrichmentRepository` (§3.6 last-known-good, guarded upserts); the canonical Demo matrix (Northwind VERIFIED+STRONG_MATCH, Sable RISKY-email+STRONG_MATCH-LinkedIn, everyone else NOT_ATTEMPTED by omission); an additive `contact_channels` field on the prospect aggregate API. Canonical v1 board byte-identical. No migration (schema already landed at V2-B). Zero paid/live provider calls. See "What V2-C added" below. |
-| **V2-D — Live Apollo enrichment** | *this commit* (branch `claude/v2-d-live-apollo`) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape (unverified until the paid smoke); the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session; the paid smoke was **not yet run** — awaiting explicit user approval. See "What V2-D added" below. |
+| **V2-D — Live Apollo enrichment** | *this commit* (branch `claude/v2-d-live-apollo`) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape; the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session. **The paid smoke is BLOCKED, not merely deferred: the user's Apollo account (personal Gmail/free tier) cannot enable `api/v1/people/match` at all**, so the exact no-match response shape and every other smoke-dependent fact remain genuinely unverified — no workaround was attempted. See "What V2-D added" below. |
 
 ---
 
 ## Current checkpoint
 
-**V2-D — Live Apollo enrichment — implementation COMPLETE, paid smoke NOT YET RUN.** See "What V2-D
-added" below for the full slice. All scripted tests are green (702 passed, 1 skipped — the same
-pre-existing Postgres-DSN-gated skip), the canonical Demo board is byte-identical, and zero real Apollo
-calls were made anywhere in implementation or automated tests. `scripts/enrichment_smoke.py` exists and
-is wired into `make enrichment-smoke`, but per the checkpoint brief it is deliberately **not run** until
-the user explicitly approves the paid call. `master`/production/Render/Neon `production` are untouched —
-this checkpoint lives entirely on `claude/v2-d-live-apollo`, targeting a PR into
-`feature/v2-contact-enrichment` (never `master`) per `docs/V2_IMPLEMENTATION_PLAN.md` Part 12.
+**V2-D — Live Apollo enrichment — implementation COMPLETE. Live Apollo smoke BLOCKED by account
+entitlement, not attempted.** The `ApolloEnrichmentProvider`/`ApolloRuntime` implementation is complete;
+every scripted/automated contract test is green (704 passed, 1 skipped — the same pre-existing
+Postgres-DSN-gated skip); the canonical Demo board remains byte-identical; **zero real Apollo calls were
+made anywhere**, in implementation, in automated tests, or via the smoke script.
+
+**The paid smoke itself cannot be completed with the user's current Apollo account.** The user's Apollo
+account is a personal Gmail/free account; in Apollo's own API-key permission UI, `api/v1/people/match` is
+visible but disabled and cannot be selected, and the user will not have an eligible work-domain Apollo
+account before employment. Per the user's explicit instruction: no master-key workaround was created, the
+pinned Apollo endpoint was not changed, and no Apollo call of any kind was made. **The exact HTTP-200
+no-match response shape therefore remains unverified and stays listed as an open unknown** (see "Known
+unknowns" under "What V2-D added") — this was never confirmed and must not be read as confirmed.
+
+`scripts/enrichment_smoke.py` and `make enrichment-smoke` remain in the repository, correct and ready, for
+whenever an eligible Apollo account becomes available — a future session (or the user, from their own
+machine with real credentials) can run it without any code change.
+
+**The provider abstraction is validated by this outcome, not undermined by it.** `EnrichmentProvider`
+(`providers/contact_base.py`, frozen at V2-C) is a pure Protocol — `engine/enrichment.py::call_enrichment`,
+`domain/contact_identity.py`, and `ContactEnrichmentRepository` never import or reference Apollo by name.
+Swapping in a different live enrichment provider (an alternate vendor whose API this account/environment
+*can* actually exercise) requires only a new `providers/live/*` adapter implementing the same Protocol,
+wired the same way `ApolloEnrichmentProvider` is wired here — zero changes to `domain/`, `engine/`
+orchestration, or persistence logic. **The next checkpoint will introduce that alternate live provider**,
+chosen specifically so its real contract can be validated end-to-end from the current account environment,
+rather than continuing to block on Apollo entitlement.
+
+`master`/production/Render/Neon `production` are untouched — this checkpoint lives entirely on
+`claude/v2-d-live-apollo`, targeting a PR into `feature/v2-contact-enrichment` (never `master`) per
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 12.
 
 **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step — COMPLETE** (see "What V2-C
 added" below) and merged to `feature/v2-contact-enrichment` via PR #15 before this checkpoint began.
@@ -3553,10 +3576,20 @@ target) — requires `APOLLO_API_KEY`, requires `--i-understand-this-costs-money
 full engine — it calls `ApolloEnrichmentProvider._issue()` directly (one raw HTTP call per person),
 bypassing `enrich_person()`'s strict-envelope raise so the script can print and inspect whatever Apollo
 actually returns, including a genuine no-match if one is encountered, without a second network call to
-diagnose it. Never prints the API key. Never run by `make test` or CI. **Not run in this session** — see
-"Current checkpoint" above; awaiting the user's explicit go-ahead per the checkpoint brief.
+diagnose it. Never prints the API key. Never run by `make test` or CI.
 
-**Tests — 53 new, all green; zero real Apollo calls.**
+**BLOCKED, not run — account entitlement, not a code or scope issue.** The user's Apollo account (a
+personal Gmail/free account) does not have `api/v1/people/match` enabled — it is visible but disabled in
+Apollo's own API-key permission UI, and the user will not have an eligible work-domain account before
+employment. Per the user's explicit instruction, no master-key workaround was created, the pinned
+endpoint was not changed, and no Apollo call was made to work around this. The script and Makefile target
+are complete and correct, ready to run unmodified the moment an eligible account is available — this is
+an account-access blocker, not an implementation gap. A follow-up pass fixed a stale doc/`--help` example
+left over from an earlier draft (`--full-name`/`--company-domain`, which the parser never actually
+defined) to instead show the real `--person "Full Name:company.domain[:Title]"` flag —
+`tests/test_enrichment_smoke_cli.py` (new, 2 tests) guards the docstring/parser staying in sync.
+
+**Tests — 55 new, all green; zero real Apollo calls.**
 - `tests/test_apollo_adapter.py` (36, new) — full field mapping (including the `asserted_company_domain`
   never-back-filled-from-query proof and the `first_name`+`last_name` fallback); the exact outbound HTTP
   contract (query params, no JSON body, all four opt-outs, no `webhook_url`, full name sent whole); the
@@ -3581,37 +3614,45 @@ diagnose it. Never prints the API key. Never run by `make test` or CI. **Not run
   `RESOLVED` LinkedIn); `ContactEnrichmentRepository` remains the sole persistence owner (exactly one
   `contact_enrichments` row per successful call, tied to its `enrichment_calls` attempt by
   `call_group_id`); last-known-good preserved after a later failed call (only `last_attempt_*` moves).
+- `tests/test_enrichment_smoke_cli.py` (2, new, follow-up pass) — the smoke script's module docstring
+  (also its argparse `description`) documents `--person`/`--i-understand-this-costs-money`, never the
+  stale `--full-name`/`--company-domain` example; the real parser accepts exactly those two flags.
 
-**Full backend suite: 702 passed, 1 skipped** (the same pre-existing, unrelated Postgres-DSN-gated skip)
+**Full backend suite: 704 passed, 1 skipped** (the same pre-existing, unrelated Postgres-DSN-gated skip)
 on SQLite. **Canonical Demo regression: byte-identical** — `PASS:2 NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1
 FAILED:1`, Northwind 92 / Riverbend 35 / Cobalt 25 / Ferrous 58 / Sable 79 — untouched, since this
 checkpoint only wires Apollo into the Live enrichment slot and Demo Mode's provider bundle is unaffected.
 `ruff check` clean on every new/changed backend file.
 
 **Files changed:** `groundwork/providers/live/apollo_enrichment.py` (new), `groundwork/providers/live/
-enrichment_runtime.py` (new), `groundwork/scripts/enrichment_smoke.py` (new); 3 new test files +
-`tests/live_enrichment_helpers.py` (new); `groundwork/config.py`, `groundwork/main.py`, `groundwork/api/
-deps.py`, `groundwork/api/routers/{plays,settings}.py`, `groundwork/api/run_service.py`, `groundwork/api/
-schemas.py`, `groundwork/providers/{registry,profile}.py`, `groundwork/observability/redact.py`,
+enrichment_runtime.py` (new), `groundwork/scripts/enrichment_smoke.py` (new, plus a follow-up doc/`--help`
+fix); 4 new test files + `tests/live_enrichment_helpers.py` (new); `groundwork/config.py`,
+`groundwork/main.py`, `groundwork/api/deps.py`, `groundwork/api/routers/{plays,settings}.py`,
+`groundwork/api/run_service.py`, `groundwork/api/schemas.py`, `groundwork/providers/{registry,profile}.py`,
+`groundwork/observability/redact.py`,
 `pyproject.toml`/`uv.lock`, `Makefile`, `.env.example` (all additive). **Zero changes** to `apps/web`,
 `domain/`, `models/tables.py`, `alembic/`, `engine/{context,runner,pipeline,step}.py`,
 `engine/enrichment.py`, `engine/enrichment_budget.py`, `repositories/contact_enrichment.py`,
 `providers/contact_base.py`, `providers/demo/*`, `fixtures/demo_pack.yaml`, Render configuration, or
 environment secrets.
 
-**Known unknowns, explicitly deferred to the paid smoke (never guessed at in this session):**
-- The exact HTTP-200 no-match response shape — `_issue()` currently treats anything that isn't
-  `{"person": {"id": ...}}` as `EnrichmentInvalidResponse`, which is safe (fails closed) but means a
-  genuine "Apollo searched and found nobody" response will currently surface as a step-level failure
-  (`PROVIDER_ERROR`-shaped in the trace) rather than a clean `matched=False` observation, until a future
-  session adds the confirmed branch.
+**Known unknowns — UNRESOLVED, blocked on Apollo account entitlement, never guessed at in this session:**
+- **The exact HTTP-200 no-match response shape was NOT verified and must not be treated as verified.**
+  `_issue()` still treats anything that isn't `{"person": {"id": ...}}` as `EnrichmentInvalidResponse`,
+  which is safe (fails closed) but means a genuine "Apollo searched and found nobody" response will
+  currently surface as a step-level failure (`PROVIDER_ERROR`-shaped in the trace) rather than a clean
+  `matched=False` observation. This remains open until either the user's Apollo account entitlement
+  changes, or a different live provider (see "Current checkpoint" above) supersedes this question.
 - Whether Apollo's response headers actually carry a request-id (`_request_id_from_headers()` currently
-  reads a conventional `x-request-id` header as a best-effort guess; `None` if absent, never fabricated).
-- Whether Apollo's response body exposes any verified numeric credit/usage field at all — until confirmed,
+  reads a conventional `x-request-id` header as a best-effort guess; `None` if absent, never fabricated) —
+  unverified.
+- Whether Apollo's response body exposes any verified numeric credit/usage field at all — unverified;
   `credits_used`/`cost_usd` stay permanently `None` for every Apollo `enrichment_calls` row, regardless of
   `APOLLO_PRICE_USD_PER_CREDIT`.
-- Real observed authentication/matching behavior against a live key and a real, consented person.
-- Real observed billing/credit behavior for a `people/match` call.
+- Real observed authentication/matching behavior against a live key and a real, consented person —
+  unverified; blocked by the account limitation above.
+- Real observed billing/credit behavior for a `people/match` call — unverified; blocked by the account
+  limitation above.
 
 **Postgres/drift validation:** this checkpoint made zero schema/model changes (no migration, confirmed by
 `test_migration_drift.py` staying green with an unmodified `models/tables.py`/`alembic/`), so there is
@@ -3619,28 +3660,43 @@ nothing new for a Postgres-parametrized pass to exercise beyond what V2-B/V2-C a
 
 **Database target verification:** no `apps/api/.env` (and therefore no `DATABASE_URL`/Neon credential)
 exists in this session, same finding as V2-B/V2-C. Every test used an isolated per-test temp SQLite file.
-**Zero writes of any kind were made to Neon (`v2-development` or `production`) in this session**, and
-zero real Apollo calls were made anywhere — the paid smoke remains unrun, pending explicit user approval.
+**Zero writes of any kind were made to Neon (`v2-development` or `production`) in this session, and zero
+real Apollo calls were made anywhere** — the paid smoke is not merely deferred, it is **blocked**: the
+user's Apollo account cannot authorize `api/v1/people/match` at all (disabled in Apollo's own API-key
+permission UI for a personal Gmail/free account), and no eligible work-domain account will exist before
+employment. No workaround (master key, endpoint change, or any live call) was attempted, per explicit
+instruction.
 
-**Next checkpoint: V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`), per
-`docs/V2_IMPLEMENTATION_PLAN.md` Part 13 — the five contact axes surfaced in `ContactPanel`, origin-gated
-identifier rendering, and the `lib/types.ts` additions. Not started; no frontend file was touched by V2-D.
+**Next checkpoint: an alternate live enrichment provider**, chosen so its real contract can actually be
+exercised end-to-end from the user's current account environment (unlike Apollo's `people/match`, which
+is entitlement-blocked as above — Hunter was raised as one candidate, not yet decided or scoped). It
+slots in behind the same, unchanged `EnrichmentProvider` Protocol `ApolloEnrichmentProvider` already
+implements — `engine/enrichment.py`, `domain/contact_identity.py`, and `ContactEnrichmentRepository` need
+no change to accept it, exactly the same way this checkpoint needed none of them to change to add Apollo
+behind V2-C's boundary. **No Hunter (or any alternate-provider) implementation work has begun** — this
+session's follow-up scope was strictly limited to documentation truth and one CLI help-text fix; see
+"Next task" below. V2-E (Contact enrichment UI, `claude/v2-e-enrichment-ui`,
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13) remains a later checkpoint; not started, no frontend file was
+touched by V2-D.
 
 ---
 
 ## Next task
 
-**Immediate next task: get explicit user approval to run the paid Apollo smoke** (`make enrichment-smoke
-PERSON="Full Name:company.domain:Title"`, or `--person` given twice for the plan's "≤2 real people").
-Every scripted V2-D test is green and the implementation is otherwise complete — see "What V2-D added"
-above for the full slice, the "Known unknowns" it explicitly defers, and the exact contract/mapping/
-error-policy facts already confirmed from the frozen plan. **Do not run the smoke without that
-approval.** After it runs, update ONLY the evidence-backed contract details the smoke actually confirms
-(the no-match shape if encountered, request-id header availability, any real numeric usage field,
-observed billing behavior) — do not speculatively rewrite anything else.
+**Immediate next task: pick and scope an alternate live enrichment provider** — one whose API contract
+the user's current account environment can actually exercise (Apollo's `api/v1/people/match` cannot; see
+"Current checkpoint" and "What V2-D added" above for the full, verbatim account-limitation finding).
+Hunter was named by the user as one candidate but is explicitly **not started** and not yet decided —
+that decision, and any implementation, is deliberately left to a future session/task, not this one.
 
-**After the smoke (or if the user defers it), next checkpoint is V2-E — Contact enrichment UI**
-(`claude/v2-e-enrichment-ui`), per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
+**The V2-D Apollo work itself needs no further action** unless/until the user's Apollo account
+entitlement changes: the adapter, runtime, activation wiring, and 55 scripted tests are complete and
+green; the smoke script is ready and unmodified in its actual behavior (only its `--help` text was
+corrected); the exact HTTP-200 no-match shape and every other "Known unknown" listed above remain
+genuinely open, not resolved by this session.
+
+**Next checkpoint after that (unchanged): V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`),
+per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
 
 **V1/I2's own leftover backlog** (see below) remains folded into V2-J per the "v2" section above — not
 scheduled before V2-E.
