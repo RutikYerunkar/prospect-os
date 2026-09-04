@@ -45,14 +45,19 @@ def build_provider_bundle(
     `DemoLLMProvider`/`DemoSearchProvider` for either half — see H1/H2's
     "no Live -> fixture fallback" invariant.
 
-    V2-D: enrichment is DIFFERENT from LLM/search — it's optional even in
-    Live Mode. `enrichment_runtime is None` (whether because
+    V2-D/V2-DH: enrichment is DIFFERENT from LLM/search — it's optional even
+    in Live Mode. `enrichment_runtime is None` (whether because
     `ENRICHMENT_PROVIDER=none`, or because the caller already 422'd a
-    misconfigured `ENRICHMENT_PROVIDER=apollo` before ever reaching this
-    function) simply means `enrichment=None` on the bundle -> NOT_ATTEMPTED,
-    never an error and never a fixture fallback. The caller (`api/routers/
-    plays.py::start_run`) alone decides whether a missing runtime should
-    have blocked the run — this function only wires whatever it's handed.
+    misconfigured `ENRICHMENT_PROVIDER=apollo|hunter` before ever reaching
+    this function) simply means `enrichment=None` on the bundle ->
+    NOT_ATTEMPTED, never an error and never a fixture fallback. The caller
+    (`api/routers/plays.py::start_run`) alone decides whether a missing
+    runtime should have blocked the run — this function only wires whatever
+    it's handed. Which concrete provider gets wired (Apollo vs Hunter, never
+    both) is read from `settings.enrichment_provider` — `"hunter"` selects
+    `HunterEnrichmentProvider`; anything else (including a non-"none" value
+    a direct caller hands in without setting it) preserves V2-D's original
+    Apollo default.
     """
     if mode is Mode.DEMO:
         return build_demo_provider_bundle(seed, fixture_pack)
@@ -77,11 +82,16 @@ def build_provider_bundle(
     if enrichment_runtime is not None:
         # Imported lazily for the same reason as the two providers above —
         # a run with `ENRICHMENT_PROVIDER=none` (the default) must never
-        # import this module, mirroring the "stray key activates nothing"
-        # invariant.
-        from groundwork.providers.live.apollo_enrichment import ApolloEnrichmentProvider
+        # import either module, mirroring the "stray key activates nothing"
+        # invariant. Exactly one of Apollo/Hunter is ever wired.
+        if settings.enrichment_provider == "hunter":
+            from groundwork.providers.live.hunter_enrichment import HunterEnrichmentProvider
 
-        enrichment = ApolloEnrichmentProvider(runtime=enrichment_runtime, budget=enrichment_budget)
+            enrichment = HunterEnrichmentProvider(runtime=enrichment_runtime, budget=enrichment_budget)
+        else:
+            from groundwork.providers.live.apollo_enrichment import ApolloEnrichmentProvider
+
+            enrichment = ApolloEnrichmentProvider(runtime=enrichment_runtime, budget=enrichment_budget)
 
     bounds = search_bounds or {}
     return ProviderBundle(

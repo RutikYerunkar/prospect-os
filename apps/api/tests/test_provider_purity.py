@@ -65,6 +65,27 @@ def test_domain_never_imports_a_provider_implementation():
     assert violations == [], "domain/ imports a provider implementation:\n" + "\n".join(violations)
 
 
+def test_domain_never_contains_a_provider_name_string():
+    """§Part 15 (V2-DH) — `domain/` derives states from provider
+    OBSERVATIONS (D2) and must never itself know or branch on which provider
+    produced them; a provider-name string literal (`"apollo"`, `"hunter"`)
+    appearing in `domain/` source would be exactly that kind of leak, even if
+    no import is involved. Scans every `domain/` module's source text for
+    the two live provider names as standalone string literals (quoted, word-
+    bounded) — a substring match inside an unrelated word would false-
+    positive, so this checks for the quoted-literal shape specifically."""
+    import re
+
+    literal_re = re.compile(r"""['"](apollo|hunter)['"]""", re.IGNORECASE)
+    violations = []
+    for path in _source_files(domain_pkg):
+        text = path.read_text()
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if literal_re.search(line):
+                violations.append(f"{path.relative_to(Path(domain_pkg.__file__).parent.parent)}:{lineno}: {line.strip()}")
+    assert violations == [], "domain/ contains a provider-name string literal:\n" + "\n".join(violations)
+
+
 def test_demo_providers_never_import_a_live_provider_module():
     """§N.5 — 'no paid/live provider is instantiated in Demo tests', at the
     source level: `providers/demo/*` must never import `providers/live/*`,

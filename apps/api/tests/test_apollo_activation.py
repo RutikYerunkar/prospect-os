@@ -6,7 +6,7 @@ providers` provenance. No network calls anywhere in this file.
 
 from __future__ import annotations
 
-from groundwork.api.deps import get_apollo_runtime, get_live_runtime, get_live_search_runtime
+from groundwork.api.deps import get_enrichment_runtime, get_live_runtime, get_live_search_runtime
 from groundwork.config import settings
 from groundwork.main import app
 from groundwork.models.enums import EnrichmentOrigin, Mode
@@ -57,7 +57,7 @@ async def test_start_run_422s_when_apollo_selected_without_configured_runtime(cl
 
     app.dependency_overrides[get_live_runtime] = lambda: _FakeRuntime()
     app.dependency_overrides[get_live_search_runtime] = lambda: _FakeRuntime()
-    app.dependency_overrides[get_apollo_runtime] = lambda: None
+    app.dependency_overrides[get_enrichment_runtime] = lambda: None
     try:
         play = await create_play(client)
         run = await client.post(f"/api/plays/{play['id']}/runs", json={"mode": "live"})
@@ -66,7 +66,7 @@ async def test_start_run_422s_when_apollo_selected_without_configured_runtime(cl
     finally:
         app.dependency_overrides.pop(get_live_runtime, None)
         app.dependency_overrides.pop(get_live_search_runtime, None)
-        app.dependency_overrides.pop(get_apollo_runtime, None)
+        app.dependency_overrides.pop(get_enrichment_runtime, None)
 
 
 async def test_start_run_never_422s_for_apollo_when_provider_is_none(client, session_factory, monkeypatch) -> None:
@@ -76,20 +76,20 @@ async def test_start_run_never_422s_for_apollo_when_provider_is_none(client, ses
     await login_as_operator(client, monkeypatch)
     monkeypatch.setattr(settings, "enrichment_provider", "none")
 
-    app.dependency_overrides[get_apollo_runtime] = lambda: None
+    app.dependency_overrides[get_enrichment_runtime] = lambda: None
     try:
         play = await create_play(client)
         run = await client.post(f"/api/plays/{play['id']}/runs", json={"mode": "live"})
         assert run.status_code == 422
         assert "APOLLO_API_KEY" not in run.json()["detail"]
     finally:
-        app.dependency_overrides.pop(get_apollo_runtime, None)
+        app.dependency_overrides.pop(get_enrichment_runtime, None)
 
 
 async def test_stray_apollo_key_with_provider_none_never_activates_apollo(client, session_factory, monkeypatch) -> None:
     """A stray `APOLLO_API_KEY` with `ENRICHMENT_PROVIDER=none` must build
     no `ApolloRuntime` and activate no enrichment — modeled here the same
-    way `main.py`'s lifespan gate would leave `app.state.apollo_runtime`
+    way `main.py`'s lifespan gate would leave `app.state.enrichment_runtime`
     unset: the dependency returns `None` regardless of the key being
     "configured", because the lifespan guard never even looked at the key
     when the provider isn't `"apollo"`."""

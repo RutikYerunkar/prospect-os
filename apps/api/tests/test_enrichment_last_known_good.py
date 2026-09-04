@@ -140,6 +140,106 @@ async def test_later_failure_preserves_prior_success_and_only_updates_attempt_te
     assert after["email"].last_attempt_at != before["email"].last_attempt_at
 
 
+def _empty_result() -> PersonEnrichmentResult:
+    """A SUCCESSFUL call that legitimately found nothing — matched=False,
+    both channel observations absent. Provider-neutral: nothing here reads a
+    provider's name."""
+    return PersonEnrichmentResult(
+        matched=False, provider_person_id=None, email=None, linkedin=None,
+        origin=EnrichmentOrigin.DEMO_FIXTURE, raw_digest="rd-empty",
+        telemetry=_telemetry(EnrichmentAttemptStatus.OK, attempt=1),
+    )
+
+
+async def test_first_ever_empty_success_stores_not_found(session_factory) -> None:
+    repos = Repos.build(session_factory)
+    run_id, prospect_id = await _new_prospect(session_factory, repos)
+
+    await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-1",
+        telemetry=_empty_result().telemetry, result=_empty_result(), email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+
+    channels = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+    assert channels["email"].discovery_state == "NOT_FOUND"
+    assert channels["email"].identifier is None
+    assert channels["linkedin"].discovery_state == "NOT_FOUND"
+    enrichments = await repos.contact_enrichment.get_contact_enrichments(prospect_id)
+    assert len(enrichments) == 1, "an empty success is still an observation, and IS persisted"
+
+
+async def test_later_successful_but_empty_call_preserves_prior_email_and_linkedin(session_factory) -> None:
+    """§Part 7 fix: a prior success followed by a LATER successful call that
+    itself found nothing must preserve the prior identifier/state/
+    observed_at — only `last_attempt_*` moves, exactly like a failed call."""
+    repos = Repos.build(session_factory)
+    run_id, prospect_id = await _new_prospect(session_factory, repos)
+    result = _matched_result()
+
+    await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-1",
+        telemetry=result.telemetry, result=result, email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+    before = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+
+    empty = _empty_result()
+    await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-2",
+        telemetry=empty.telemetry, result=empty, email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+    after = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+
+    assert after["email"].discovery_state == before["email"].discovery_state == "FOUND"
+    assert after["email"].verification_state == before["email"].verification_state == "VERIFIED"
+    assert after["email"].identifier == before["email"].identifier == "priya@x.com"
+    assert after["email"].observed_at == before["email"].observed_at
+    assert after["email"].last_attempt_status == "OK"
+    assert after["email"].last_attempt_at != before["email"].last_attempt_at
+
+    assert after["linkedin"].discovery_state == before["linkedin"].discovery_state == "RESOLVED"
+    assert after["linkedin"].identity_match_state == before["linkedin"].identity_match_state == "STRONG_MATCH"
+    assert after["linkedin"].identifier == before["linkedin"].identifier == "demo://linkedin/priya-x"
+
+    # The empty call is still a real observation row, persisted alongside
+    # the earlier one — only `contact_channels` is preserved, never
+    # `contact_enrichments`.
+    enrichments = await repos.contact_enrichment.get_contact_enrichments(prospect_id)
+    assert len(enrichments) == 2
+
+
+async def test_empty_success_then_later_real_success_becomes_current(session_factory) -> None:
+    """The mirror case: an empty-first call followed by a later call that
+    DOES find something must become the current state — the empty-guard
+    only blocks a later EMPTY call, never a later real one."""
+    repos = Repos.build(session_factory)
+    run_id, prospect_id = await _new_prospect(session_factory, repos)
+
+    empty = _empty_result()
+    await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-1",
+        telemetry=empty.telemetry, result=empty, email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+    channels = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+    assert channels["email"].discovery_state == "NOT_FOUND"
+
+    result = _matched_result()
+    await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-2",
+        telemetry=result.telemetry, result=result, email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+    channels = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+    assert channels["email"].discovery_state == "FOUND"
+    assert channels["email"].verification_state == "VERIFIED"
+    assert channels["email"].identifier == "priya@x.com"
+    assert channels["linkedin"].discovery_state == "RESOLVED"
+    assert channels["linkedin"].identifier == "demo://linkedin/priya-x"
+
+
 async def test_success_after_prior_failure_replaces_provider_error_state(session_factory) -> None:
     repos = Repos.build(session_factory)
     run_id, prospect_id = await _new_prospect(session_factory, repos)

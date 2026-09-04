@@ -65,16 +65,18 @@ def get_live_search_runtime(request: Request):
 LiveSearchRuntimeDep = Annotated[object, Depends(get_live_search_runtime)]
 
 
-def get_apollo_runtime(request: Request):
-    """The process-scoped `ApolloRuntime` created once in `main.py`'s
-    lifespan, or `None` if `ENRICHMENT_PROVIDER` isn't `"apollo"` or
-    `APOLLO_API_KEY` isn't configured (V2-D) — the enrichment-side analogue
-    of `get_live_runtime`/`get_live_search_runtime`. Unlike those two,
-    `None` here never disables Live Mode itself — enrichment is optional."""
-    return getattr(request.app.state, "apollo_runtime", None)
+def get_enrichment_runtime(request: Request):
+    """The process-scoped `ApolloRuntime`/`HunterRuntime` created once in
+    `main.py`'s lifespan, or `None` if `ENRICHMENT_PROVIDER` is `"none"` or
+    the selected provider's API key isn't configured (V2-D/V2-DH) — the
+    enrichment-side analogue of `get_live_runtime`/`get_live_search_runtime`.
+    Unlike those two, `None` here never disables Live Mode itself —
+    enrichment is optional, and at most one of Apollo/Hunter is ever active
+    at a time (never both — one `EnrichmentProvider` slot)."""
+    return getattr(request.app.state, "enrichment_runtime", None)
 
 
-ApolloRuntimeDep = Annotated[object, Depends(get_apollo_runtime)]
+EnrichmentRuntimeDep = Annotated[object, Depends(get_enrichment_runtime)]
 
 
 def get_operator_session(request: Request) -> bool:

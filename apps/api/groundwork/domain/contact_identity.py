@@ -355,7 +355,7 @@ def derive_email_channel(
     (verbatim, casefolded) to an `EmailVerificationState`; an unmapped
     status fails closed to `UNVERIFIED` — never silently treated as
     verified. Kept adapter-agnostic (a plain string-keyed map, not an
-    Apollo-specific type) so this stays pure and provider-neutral (D2):
+    provider-specific type) so this stays pure and provider-neutral (D2):
     `domain/` never contains a provider's name."""
     if obs is None or not obs.address:
         return EmailDiscoveryState.NOT_FOUND, EmailVerificationState.UNVERIFIED

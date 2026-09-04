@@ -46,14 +46,14 @@ class Settings(BaseSettings):
     # ever hit.
     max_enrichment_calls_per_run: int = 20
 
-    # --- V2-D: Live Apollo contact enrichment ---
+    # --- V2-D/V2-DH: Live Apollo/Hunter contact enrichment ---
     # Selects which `EnrichmentProvider` slot Live Mode wires, independent of
     # `mode`/`openai_api_key`/`tavily_api_key` — enrichment is optional even
     # in Live Mode. "none" -> `enrichment=None` -> NOT_ATTEMPTED, zero
     # provider calls, never a fixture fallback. Never special-cased inside
     # `engine/`/`domain/` — only `providers/registry.py`'s Live wiring reads
     # this.
-    enrichment_provider: Literal["none", "apollo"] = "none"
+    enrichment_provider: Literal["none", "apollo", "hunter"] = "none"
     # Never logged, never persisted, never returned by any endpoint (added to
     # `observability/redact.py`'s choke point) — GET /settings/providers
     # reports `configured: bool` only.
@@ -69,6 +69,18 @@ class Settings(BaseSettings):
     apollo_price_usd_per_credit: float | None = None
     # No `APOLLO_BASE_URL` — the endpoint/origin/path are pinned constants in
     # `providers/live/enrichment_runtime.py`, deliberately not configurable.
+
+    # V2-DH: Hunter is a SECOND Live `EnrichmentProvider`, behind the same
+    # Protocol Apollo satisfies — never a second pipeline. Never logged,
+    # never persisted, never returned by any endpoint.
+    hunter_api_key: str | None = None
+    hunter_call_deadline_s: float = 15.0
+    hunter_max_concurrency: int = 2
+    hunter_max_transport_retries: int = 1
+    # Deliberately NO `hunter_price_usd_per_credit` field (frozen §Part 12)
+    # — `credits_used`/`cost_usd` stay permanently `None` for every Hunter
+    # attempt. No `HUNTER_BASE_URL` — pinned constants in
+    # `providers/live/hunter_runtime.py`.
 
     # `NoDecode`: pydantic-settings would otherwise try to JSON-decode any
     # env value for a `list[str]` field *before* our own validator runs, and

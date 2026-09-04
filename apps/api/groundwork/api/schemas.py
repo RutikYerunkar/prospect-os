@@ -185,9 +185,9 @@ class LiveAvailability(BaseModel):
     available: bool
     llm_available: bool = False
     search_available: bool = False
-    # V2-D: additive, never part of `available`'s AND — enrichment is
-    # optional even in Live Mode, so an unconfigured/absent Apollo runtime
-    # must never disable Live Mode itself.
+    # V2-D/V2-DH: additive, never part of `available`'s AND — enrichment is
+    # optional even in Live Mode, so an unconfigured/absent Apollo/Hunter
+    # runtime must never disable Live Mode itself.
     enrichment_provider: str = "none"
     enrichment_available: bool = False
     operator_login_configured: bool = False
@@ -216,9 +216,9 @@ class ProviderSettingsResponse(BaseModel):
     mode: str
     llm: ProviderInfo
     search: ProviderInfo
-    # V2-D: additive. `name` is `"none"` or `"apollo"` (mirrors
-    # `settings.enrichment_provider`); `configured` never exposes the key,
-    # only whether one is present when Apollo is selected.
+    # V2-D/V2-DH: additive. `name` is `"none"`, `"apollo"`, or `"hunter"`
+    # (mirrors `settings.enrichment_provider`); `configured` never exposes
+    # the key, only whether one is present when a live provider is selected.
     enrichment: ProviderInfo
     live: LiveAvailability
     # Checkpoint I1 Phase 9: sourced from the API rather than a duplicated

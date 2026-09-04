@@ -7,13 +7,29 @@ Two entry points, mirroring the frozen last-known-good algorithm exactly:
   not-found; both are observations): insert the `enrichment_calls` attempt
   row(s), insert the immutable `contact_enrichments` observation row, derive
   both channels' states via the pure `domain/contact_identity.py` functions,
-  and upsert `contact_channels` to the newly derived state.
+  and upsert `contact_channels` to the newly derived state — UNLESS this
+  successful call's own observation for a channel is legitimately empty
+  (no email address / no LinkedIn URL) AND that channel already carries a
+  real, previously observed identifier: a later successful-but-empty call
+  must never destroy a prior real identifier (§3.6, the V2-DH fix below) —
+  only a later successful call that itself found something may replace it.
 - `record_failure()` — a FAILED provider call: insert the `enrichment_calls`
   attempt row(s) only. If a channel already carries a provider-backed state,
   touch ONLY its `last_attempt_*` columns (the identifier, the three state
   columns, `observed_at` and `derived_from_enrichment_id` are untouched). If
   no provider-backed state has ever existed for that channel, derive
   `PROVIDER_ERROR` (email) / `PROVIDER_ERROR` (LinkedIn) instead.
+
+**V2-DH fix (provider-neutral):** prior to this fix, `_upsert_success_channel`
+unconditionally overwrote a channel's identifier/state/observed_at on every
+SUCCESSFUL call, including one whose own observation was empty — so a
+provider call that legitimately found nothing could silently erase a
+previously observed real email/LinkedIn identifier. The fix: a successful
+call with `identifier is None` never overwrites an existing row that already
+carries a real `identifier` — only its `last_attempt_*` columns move, exactly
+like a failed call's last-known-good treatment. This applies identically to
+Apollo, Hunter, Demo, and any future provider — nothing here reads a
+provider's name.
 
 `derived_from_enrichment_id` (`contact_enrichments -> contact_channels`) is a
 raw FK column with no ORM `relationship()` anywhere in this codebase, so the
@@ -236,6 +252,19 @@ class ContactEnrichmentRepository:
         derived_from_enrichment_id: str, observed_at: datetime, now: datetime,
     ) -> None:
         row = await self._get_channel_row(session, prospect_id=prospect_id, channel=channel)
+
+        # §3.6 last-known-good, successful-but-empty fix: THIS call's own
+        # observation is empty (no email address / no LinkedIn URL). If a
+        # real identifier was already on record, a legitimately-empty
+        # SUCCESSFUL call must never erase it — only a later successful call
+        # that itself found something may replace it. Touch ONLY the
+        # attempt-telemetry columns here, exactly like a failed call.
+        if identifier is None and row is not None and row.identifier is not None:
+            row.last_attempt_at = now
+            row.last_attempt_status = "OK"
+            row.last_attempt_error_type = None
+            return
+
         if row is None:
             session.add(
                 ContactChannelRow(

@@ -24,46 +24,70 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-A — v2 architecture & docs** | (branch `claude/v2-a-docs`) | Persisted the frozen Rev 4 v2 architecture into `docs/V2_IMPLEMENTATION_PLAN.md`, the v2 section of `docs/ARCHITECTURE.md`, and the v2 invariants in `CLAUDE.md`. Zero application code, zero migration, zero provider call. |
 | **V2-B — Domain model + additive persistence** | (branch `claude/v2-b-domain-persistence`) | v2 enums, pure `domain/contact_identity.py` (email identity normalization, origin-aware LinkedIn identifier grammar, deterministic person/company identity matching, last-known-good pure helpers), `domain/content_hash.py`, `domain/action_policy.py`; nine additive tables + `approvals.hash_version`/CHECK + the `LIVE_EXTERNAL`-only partial unique recipient index; one additive Alembic revision, drift-clean on a real Postgres 16; Neon `v2-development` migrated to `1ec5eceed8d4` by the user. See "What V2-B added" below. |
 | **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step** | `f43a134` (merged to `claude/v2-c-enrichment` / PR #15) | `providers/contact_base.py` (`EnrichmentProvider` Protocol, observations only — D2); `DemoEnrichmentProvider` (`origin=DEMO_FIXTURE`, fixture-backed, scripted failures, an `EnrichmentCallBudget`); `engine/enrichment.py::call_enrichment` (the only enrichment telemetry-persistence seam); the `contact_enrichment` pipeline step (never named `enrich` — C4), optional, wired `contact -> contact_enrichment -> personalize`; `ContactEnrichmentRepository` (§3.6 last-known-good, guarded upserts); the canonical Demo matrix (Northwind VERIFIED+STRONG_MATCH, Sable RISKY-email+STRONG_MATCH-LinkedIn, everyone else NOT_ATTEMPTED by omission); an additive `contact_channels` field on the prospect aggregate API. Canonical v1 board byte-identical. No migration (schema already landed at V2-B). Zero paid/live provider calls. See "What V2-C added" below. |
-| **V2-D — Live Apollo enrichment** | *this commit* (branch `claude/v2-d-live-apollo`) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape; the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session. **The paid smoke is BLOCKED, not merely deferred: the user's Apollo account (personal Gmail/free tier) cannot enable `api/v1/people/match` at all**, so the exact no-match response shape and every other smoke-dependent fact remain genuinely unverified — no workaround was attempted. See "What V2-D added" below. |
+| **V2-D — Live Apollo enrichment** | `0672671` (merged to `feature/v2-contact-enrichment` via PR #16) | `providers/live/apollo_enrichment.py` (`ApolloEnrichmentProvider`, `origin=LIVE_PROVIDER`) — no Apollo SDK, raw `httpx` against the pinned `POST /api/v1/people/match` (query params only, no JSON body); process-scoped `ApolloRuntime` (`providers/live/enrichment_runtime.py`, mirrors `LiveSearchRuntime`); `ENRICHMENT_PROVIDER=none|apollo` config switch — enrichment is optional even in Live Mode, unlike LLM/search; `ENRICHMENT_PROVIDER=apollo` + missing key 422s before run start, a stray key with `ENRICHMENT_PROVIDER=none` activates nothing; the real Apollo email-status map (`verified`→`VERIFIED`, `extrapolated`→`RISKY`); a strict `{"person": {"id": ...}}` envelope parser that never invents a no-match shape; the full retry/error/budget/telemetry policy mirroring `TavilySearchProvider`; additive `enrichment_provider`/`enrichment_origin` provenance in `provider_profile` and `GET /settings/providers`; `scripts/enrichment_smoke.py` (money-gated, never run automatically). Canonical Demo byte-identical (untouched — Apollo only wires into Live). Zero real Apollo calls in this session. **The paid smoke is BLOCKED, not merely deferred: the user's Apollo account (personal Gmail/free tier) cannot enable `api/v1/people/match` at all**, so the exact no-match response shape and every other smoke-dependent fact remain genuinely unverified — no workaround was attempted. See "What V2-D added" below. |
+| **V2-DH — Live Hunter enrichment** | *this commit* (branch `claude/v2-dh-live-hunter`) | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`). Canonical Demo byte-identical. Zero real Hunter calls anywhere in this session — `scripts/hunter_smoke.py` exists, money-gated, not run. See "What V2-DH added" below. |
 
 ---
 
 ## Current checkpoint
 
-**V2-D — Live Apollo enrichment — implementation COMPLETE. Live Apollo smoke BLOCKED by account
-entitlement, not attempted.** The `ApolloEnrichmentProvider`/`ApolloRuntime` implementation is complete;
-every scripted/automated contract test is green (704 passed, 1 skipped — the same pre-existing
-Postgres-DSN-gated skip); the canonical Demo board remains byte-identical; **zero real Apollo calls were
-made anywhere**, in implementation, in automated tests, or via the smoke script.
+**V2-DH — Live Hunter contact enrichment — implementation COMPLETE.** Hunter is wired as a SECOND live
+`EnrichmentProvider` behind the exact same `EnrichmentProvider` Protocol Apollo already satisfies — never
+a second pipeline, never Hunter-specific domain enums/repository methods/tables/retry framework/budget
+system/sendability logic, per the frozen Rev-3 plan. Every scripted/automated contract test is green
+(**788 passed, 1 skipped** — the same pre-existing Postgres-DSN-gated skip; 84 new tests over V2-D's
+704); the canonical Demo board remains byte-identical; **zero real Hunter (or Apollo, or any other
+external provider) calls were made anywhere** — in implementation, in automated tests, or via the smoke
+script, which exists but was deliberately not run this session per the task's explicit instruction.
 
-**The paid smoke itself cannot be completed with the user's current Apollo account.** The user's Apollo
-account is a personal Gmail/free account; in Apollo's own API-key permission UI, `api/v1/people/match` is
-visible but disabled and cannot be selected, and the user will not have an eligible work-domain Apollo
-account before employment. Per the user's explicit instruction: no master-key workaround was created, the
-pinned Apollo endpoint was not changed, and no Apollo call of any kind was made. **The exact HTTP-200
-no-match response shape therefore remains unverified and stays listed as an open unknown** (see "Known
-unknowns" under "What V2-D added") — this was never confirmed and must not be read as confirmed.
+**V2-D's Apollo-named activation/runtime plumbing was generalized, not duplicated.** `app.state.
+apollo_runtime` → `app.state.enrichment_runtime`; `get_apollo_runtime` → `get_enrichment_runtime`;
+`ApolloRuntimeDep` → `EnrichmentRuntimeDep`; `_require_apollo_runtime` → `_require_enrichment_runtime`
+(now takes the selected provider name and names the right env var — `APOLLO_API_KEY` or
+`HUNTER_API_KEY` — in its 422). A new shared `LiveEnrichmentRuntime` dataclass base in `providers/live/
+enrichment_runtime.py` holds exactly the lifecycle pieces genuinely common to both providers (the shared
+`httpx.AsyncClient`, semaphore, call-deadline/retry bounds, the unset→null pricing contract); `ApolloRuntime`
+and `HunterRuntime` (the latter new, in `providers/live/hunter_runtime.py`) each keep their own
+provider-specific `create()` (auth header name/case, pinned base URL, which settings fields feed which
+bound). `providers/registry.py::build_provider_bundle` picks the concrete provider by reading
+`settings.enrichment_provider` (`"hunter"` → `HunterEnrichmentProvider`; anything else with a non-null
+runtime → `ApolloEnrichmentProvider`, preserving V2-D's original default for any caller that hands in a
+runtime without explicitly selecting `"hunter"`) — no registry/factory framework was built; the refactor
+stayed narrow, per the frozen plan's explicit instruction.
 
-`scripts/enrichment_smoke.py` and `make enrichment-smoke` remain in the repository, correct and ready, for
-whenever an eligible Apollo account becomes available — a future session (or the user, from their own
-machine with real credentials) can run it without any code change.
+**Apollo remains completely intact and behaviorally unchanged.** `providers/live/apollo_enrichment.py`
+was not touched at all; `providers/live/enrichment_runtime.py`'s `ApolloRuntime` keeps its exact prior
+fields/behavior, now as a subclass of the new shared base. Every V2-D Apollo test still passes unmodified
+except for the renamed dependency imports (`get_apollo_runtime` → `get_enrichment_runtime` in
+`tests/test_apollo_activation.py`, mechanical only).
 
-**The provider abstraction is validated by this outcome, not undermined by it.** `EnrichmentProvider`
-(`providers/contact_base.py`, frozen at V2-C) is a pure Protocol — `engine/enrichment.py::call_enrichment`,
-`domain/contact_identity.py`, and `ContactEnrichmentRepository` never import or reference Apollo by name.
-Swapping in a different live enrichment provider (an alternate vendor whose API this account/environment
-*can* actually exercise) requires only a new `providers/live/*` adapter implementing the same Protocol,
-wired the same way `ApolloEnrichmentProvider` is wired here — zero changes to `domain/`, `engine/`
-orchestration, or persistence logic. **The next checkpoint will introduce that alternate live provider**,
-chosen specifically so its real contract can be validated end-to-end from the current account environment,
-rather than continuing to block on Apollo entitlement.
+**The one approved repository behavior change (§7 of the task brief) is provider-neutral.**
+`ContactEnrichmentRepository._upsert_success_channel` used to unconditionally overwrite a channel's
+identifier/state/observed_at on every SUCCESSFUL call, including one whose own observation was
+legitimately empty — so a provider call that correctly found nothing could silently erase a previously
+observed real email/LinkedIn identifier. Fixed: a successful call with no identifier of its own never
+overwrites an existing row that already carries a real identifier — only its `last_attempt_*` columns
+move, exactly like a failed call's existing last-known-good treatment. Verified against all five required
+scenarios (first-ever empty success → `NOT_FOUND`; prior success + later empty success → preserved;
+prior success + later real success → preserved is N/A, replaced correctly; empty-first + later real
+success → new success becomes current; failure semantics unchanged) — see "What V2-DH added" below. This
+touches Apollo, Hunter, and Demo identically; nothing in the fix reads a provider's name. Canonical Demo
+byte-identical, since the fixture pack never issues more than one enrichment call per prospect per run.
 
 `master`/production/Render/Neon `production` are untouched — this checkpoint lives entirely on
-`claude/v2-d-live-apollo`, targeting a PR into `feature/v2-contact-enrichment` (never `master`) per
-`docs/V2_IMPLEMENTATION_PLAN.md` Part 12.
+`claude/v2-dh-live-hunter`, targeting a future PR into `feature/v2-contact-enrichment` (never `master`)
+per `docs/V2_IMPLEMENTATION_PLAN.md` Part 12. No PR was created this session, per the task's explicit
+instruction to stop before PR creation/merge/the real Hunter smoke/V2-E.
+
+**V2-D — Live Apollo enrichment — COMPLETE** (see "What V2-D added" below) and merged to
+`feature/v2-contact-enrichment` via PR #16 before this checkpoint began. Its real-Apollo-smoke block
+(the user's personal Gmail/free Apollo account cannot enable `api/v1/people/match`) is unchanged and
+unrelated to this checkpoint — Hunter was chosen specifically as an alternate provider whose contract
+*can* eventually be exercised from the user's current account environment, though the real Hunter smoke
+was explicitly not run this session either (task instruction: implementation + scripted tests only).
 
 **V2-C — Enrichment provider boundary + Demo fixtures + pipeline step — COMPLETE** (see "What V2-C
-added" below) and merged to `feature/v2-contact-enrichment` via PR #15 before this checkpoint began.
+added" below) and merged to `feature/v2-contact-enrichment` via PR #15 before V2-D began.
 
 v1 (Checkpoints A–I2, table above) remains production-stable on `master` throughout — v2 development
 never touches it until the single V2-J integration PR.
@@ -3681,22 +3705,236 @@ touched by V2-D.
 
 ---
 
+## What V2-DH added
+
+**Architecture/refactor summary.** Hunter slots in exactly where the frozen Rev-3 plan specified — a
+second concrete `EnrichmentProvider` behind the unchanged Protocol, sharing `engine/enrichment.py::
+call_enrichment`, `domain/contact_identity.py`, `ContactEnrichmentRepository`, and `EnrichmentCallBudget`
+with Apollo and Demo. Nothing about `engine/steps/contact_enrichment.py` changed. New files:
+`providers/live/hunter_runtime.py` (`HunterRuntime`, pinned `HUNTER_API_ORIGIN`/`HUNTER_EMAIL_FINDER_PATH`
+constants — no `HUNTER_BASE_URL` env override), `providers/live/hunter_enrichment.py`
+(`HunterEnrichmentProvider`), `scripts/hunter_smoke.py` (money-gated, not run). `providers/live/
+enrichment_runtime.py` gained a shared `LiveEnrichmentRuntime` dataclass base (`client`, `semaphore`,
+`call_deadline_s`, `max_transport_retries`, `price_usd_per_credit`, `provider_name`, plus
+`pricing_configured`/`estimate_cost_usd()`/`close()`) that `ApolloRuntime` now subclasses — its own fields
+and `create()` behavior are otherwise unchanged. Activation plumbing renamed provider-neutral throughout
+`config.py`/`main.py`/`api/deps.py`/`api/routers/{plays,settings}.py`/`providers/{registry,profile}.py` —
+see "Current checkpoint" above for the exact rename table.
+
+**Config/activation.** `ENRICHMENT_PROVIDER` is now `Literal["none", "apollo", "hunter"]`, default
+unchanged (`"none"`). New settings: `HUNTER_API_KEY` (never logged/persisted/returned), `HUNTER_CALL_
+DEADLINE_S=15.0`, `HUNTER_MAX_CONCURRENCY=2`, `HUNTER_MAX_TRANSPORT_RETRIES=1`. Deliberately **no**
+`HUNTER_PRICE_USD_PER_CREDIT` (frozen plan) — `HunterRuntime.create()` hardcodes `price_usd_per_credit=
+None`, so `credits_used`/`cost_usd` stay permanently `None` for every Hunter attempt regardless of any
+future confirmed usage field, unless a future session adds the setting deliberately. Verified all four
+activation matrix cells from the frozen plan: LIVE + `none` → no runtime, no import, `NOT_ATTEMPTED`;
+LIVE + `hunter` + key → active, `origin=LIVE_PROVIDER`; LIVE + `hunter` + missing key → 422 naming
+`HUNTER_API_KEY` before the `Run` row exists; a stray `HUNTER_API_KEY` with `ENRICHMENT_PROVIDER=none` (or
+`=apollo`) → inert, no runtime, no import, no network. Demo Mode structurally cannot reach Hunter or
+Apollo (`build_demo_provider_bundle` never reads `enrichment_provider`).
+
+**Hunter HTTP contract, pinned exactly per §Part 3.** `GET https://api.hunter.io/v2/email-finder`,
+`X-API-KEY` header auth (key never in the URL/query — verified by a dedicated test), query parameters
+EXACTLY `domain=<company_domain>` and `full_name=<full_name>` — no `api_key`, `first_name`, `last_name`,
+`company`, `linkedin_handle`, `max_duration`, or `title` param, no JSON body. `full_name` is sent
+verbatim — no `_split_name()`, no honorific/suffix stripping, no nickname inference; the existing pipeline
+already stops when `ctx.contact.full_name is None`. One defense-in-depth addition: a
+blank/whitespace-only `full_name` reaching the adapter directly (bypassing the pipeline's own guard, e.g.
+via the smoke script or a future caller) short-circuits to a `NOT_FOUND`-shaped result with zero network
+and zero budget consumption, per §Part 4.
+
+**Response mapping, per §Part 5.** `data.email` → `ProviderEmailObservation.address`: a non-empty string
+is stripped and kept; missing/`null`/empty-string is a legitimate no-match (`address=None`, `matched=
+False`, still a SUCCESSFUL, persisted observation); any other type (int/bool/list/dict) is `INVALID_
+RESPONSE`, permanent, never silently coerced. `data.verification.status` → `provider_status` verbatim
+(any absent/malformed shape yields `None`, which `derive_email_channel`'s `status_map.get(key, UNVERIFIED)`
+already fails closed on). `data.score` → `provider_confidence` as `[0,1]` (`score/100.0`) only for an
+in-range, non-bool numeric value — bool, non-numeric, or out-of-range all fail closed to `None` (`isinstance
+(True, int)` being `True` in Python was deliberately guarded against). `data.accept_all` → `is_catch_all`
+only if an actual `bool`. `data.linkedin_url` → `ProviderLinkedInObservation.profile_url` verbatim (a
+`null` never affects the email observation — independent fields, independent nullability). `data.
+first_name`+`data.last_name` (RESPONSE fields only, never the request name) → `asserted_full_name`. `data.
+company` → `asserted_company_name`. `data.domain` → **never** mapped to `asserted_company_domain`, which
+is `None` by construction always — mapping it would let the query's own `domain` parameter self-confirm
+company identity. `data.position` → `asserted_title`. `provider_person_id` is always `None` (Hunter's
+Email Finder has no person-id concept). `data.sources` and `verification.date` are read by nothing in the
+adapter (not persisted, per §Part 5) — the smoke script alone may print structural facts about them.
+`raw_digest` is a digest only; the raw body is never persisted, matching Apollo's discipline exactly.
+
+**Verification-status mapping is the exact Hunter-documented three-word vocabulary** — `valid`→`VERIFIED`,
+`accept_all`→`RISKY`, `unknown`→`UNVERIFIED`; any absent/malformed/undocumented/future status word falls
+closed to `UNVERIFIED` via the same generic `status_map` mechanism V2-C already built (`domain/
+contact_identity.py::derive_email_channel` never sees a provider's raw vocabulary directly — only the
+already-mapped `EmailVerificationState`). Only `valid` can ever become `VERIFIED`; the numeric `score`
+never promotes an `unknown`/absent status, verified directly by test.
+
+**Error taxonomy, HTTP-status-driven only, per §Part 8.** `401`→`AUTH_ERROR`/`EnrichmentAuthError`,
+permanent. `403`→`RATE_LIMITED`/`EnrichmentRateLimited`, bounded-retryable — deliberately different from
+Apollo, where `401`/`403` are both permanent `AUTH_ERROR`. `404`/`422`/`451`→`INVALID_RESPONSE`/
+`EnrichmentInvalidResponse`, permanent, never retried (`451`'s `claimed_email` case in particular — see
+below). `429`→`QUOTA_EXHAUSTED`/`EnrichmentQuotaExceeded`, permanent, never a transport or step retry.
+`5xx`→`PROVIDER_ERROR`/`EnrichmentProviderUnavailable`, retryable. Timeout/other transport errors→
+`TIMEOUT`/`PROVIDER_ERROR`, retryable. Unknown 4xx / unexpected 3xx / malformed successful body (bad
+`data`/`data.email` type) → `INVALID_RESPONSE`, permanent. `errors[0].id` is extracted best-effort for
+telemetry text only (never load-bearing for classification — verified directly by a test that strips it
+entirely and still gets the right classification). The exact HTTP-200 no-email BODY shape remains
+genuinely unverified (see "Known unresolved wire facts" below); the parser stays lenient at the envelope
+level (a missing/`null` `data` object is treated as a legitimate empty result) and fails closed only on an
+unambiguously wrong field type — this is a deliberate difference from Apollo's stricter
+`{"person":{"id":...}}`-only-match envelope, because the frozen plan gives Hunter explicit
+per-field fallback rules Apollo's plan never gave for its own no-match shape.
+
+**Repository last-known-good fix (§Part 7, the one approved repository behavior change).**
+`ContactEnrichmentRepository._upsert_success_channel` now checks, before overwriting: if the NEW call's
+own `identifier` is `None` (a legitimate empty success) AND the existing row already carries a real
+`identifier`, only `last_attempt_at`/`last_attempt_status`/`last_attempt_error_type` move — the
+identifier/state/`observed_at`/`derived_from_enrichment_id` are left exactly as they were, mirroring a
+failed call's existing treatment. A first-ever empty success (no prior row, or a prior row with no real
+identifier — e.g. a `PROVIDER_ERROR` placeholder) still correctly becomes the current `NOT_FOUND` state.
+An empty-first-then-real-success sequence still correctly replaces the empty state (the guard only ever
+blocks a later call whose OWN identifier is `None`). `record_failure`'s pre-existing last-known-good
+behavior is completely untouched. Nothing in the fix reads a provider's name — the same code path serves
+Apollo, Hunter, and Demo. New tests: `tests/test_enrichment_last_known_good.py` (three new scenarios,
+provider-neutral, using the Demo fixture provider's own shapes) plus `tests/
+test_live_hunter_pipeline_integration.py::test_last_known_good_preserved_after_a_later_successful_but_
+empty_hunter_call` (through the real repository, Hunter-flavored `call_group_id`s).
+
+**Security/redaction.** `HUNTER_API_KEY` added to `observability/redact.py`'s `_configured_secrets()`
+choke point (never logged/persisted/returned by any endpoint — verified by a dedicated redaction test
+mirroring Apollo's). `HunterRuntime.create()` places the key directly into the shared `httpx.
+AsyncClient`'s `X-API-KEY` header — it never enters a query string or the request URL, verified by
+`test_api_key_absent_from_request_url_string`. No bespoke Hunter-specific URL-scrubbing was written
+(per the frozen plan) since the key structurally never reaches the URL.
+
+**Provider profile / settings.** `GET /api/settings/providers`'s `ProviderInfo.configured` semantics were
+audited against the REV-3 wording-inconsistency note and pinned as-is (no redesign): `"none"` is always
+`configured=True` (nothing is needed for it); a selected live provider (`"apollo"` or `"hunter"`) reports
+`configured=bool(<that provider's own key>)`. `build_provider_profile`'s `enrichment_provider`/
+`enrichment_origin` now read `settings.enrichment_provider` directly (`"apollo"`/`"hunter"`/`None`) rather
+than hardcoding the `"apollo"` string. `test_hunter_activation.py::test_provider_info_configured_
+semantics_pinned` pins the chosen behavior with a test, per the frozen plan's instruction.
+
+**Domain purity.** `domain/contact_identity.py`'s one Apollo-named docstring line ("not an Apollo-specific
+type") was reworded to "not a provider-specific type" — no algorithm change. A new static test,
+`tests/test_provider_purity.py::test_domain_never_contains_a_provider_name_string`, scans every `domain/`
+module's source text for a quoted `"apollo"`/`"hunter"` literal and fails the build if one ever appears —
+extending the existing import-based purity checks with a string-literal check, since a provider name could
+leak into `domain/` without ever being imported.
+
+**Tests written and verified** (84 new, 3 modified for renamed imports/behavior, full suite green):
+- `tests/live_hunter_helpers.py` (new) — `ScriptedHunterTransport`, `hunter_data()`/
+  `email_finder_response()` fixture builders (every documented+undocumented response field individually
+  toggleable), `make_hunter_provider()`.
+- `tests/test_hunter_adapter.py` (new, ~55 tests) — every mapping rule, the exact outbound HTTP contract
+  (method/path/origin/params/headers/no-body), name handling (ordinary/multi-token/honorific/whitespace-
+  only), the full error taxonomy (401/403/404/422/429/451/5xx/timeout/transport/unknown-4xx/unexpected-3xx/
+  malformed-JSON/malformed-`data`/malformed-`email`), retry bounds, budget (before-socket, one-slot-across-
+  retries, zero-network-on-whitespace-name, zero-network-on-denial), telemetry (attempt numbering,
+  `call_group_id`, digests, no invented cost/credits), provider purity, no arbitrary `requests.*` fetch.
+- `tests/test_hunter_activation.py` (new) — registry wiring both directions (Hunter selected → `Hunter
+  EnrichmentProvider`; Apollo selected → unchanged `ApolloEnrichmentProvider`, proving coexistence behind
+  one Protocol); Demo bundle unaffected by Hunter settings; the `HUNTER_API_KEY`-named 422 before run
+  creation (and that it never mentions `APOLLO_API_KEY`, and vice versa); `ENRICHMENT_PROVIDER=none` never
+  422s for Hunter; the stray-key-non-activation proof (both `none` and cross-provider — a stray
+  `HUNTER_API_KEY` under `ENRICHMENT_PROVIDER=apollo` activates nothing); `GET /settings/providers`'
+  fields in all states; the key never appears in the response body; `provider_profile` provenance; the
+  `ProviderInfo.configured` semantics pin; the redaction choke-point test.
+- `tests/test_live_hunter_pipeline_integration.py` (new) — `contact < contact_enrichment < personalize`
+  step order unchanged (shared with Apollo's own such test); a scripted Live Hunter run through the REAL
+  engine writes `LIVE_PROVIDER`-origin `contact_enrichments` rows and correctly-derived `contact_channels`
+  state; `ContactEnrichmentRepository` remains the sole persistence owner; last-known-good preserved after
+  both a later FAILED call and a later SUCCESSFUL-but-EMPTY call (the new §7 fix, exercised through the
+  real repository).
+- `tests/test_hunter_smoke_cli.py` (new) — the smoke script's module docstring documents the real CLI
+  (`--person`/`--i-understand-this-costs-money`, `HUNTER_API_KEY`); the parser accepts exactly those flags;
+  `_parse_person()`'s name/domain/title splitting and its required-arg/malformed-input failure modes;
+  `_mask_email()` never leaks the local part of a real address.
+- `tests/test_provider_purity.py` (extended) — the new domain-provider-name-string-literal scan.
+- `tests/test_enrichment_last_known_good.py` (extended) — the three new successful-but-empty scenarios.
+- `tests/test_apollo_activation.py` (mechanically updated) — `get_apollo_runtime` → `get_enrichment_
+  runtime` import/usage only; every assertion is unchanged and still passes, proving Apollo's behavior is
+  bit-for-bit preserved by the generalization.
+
+**Full backend suite: 788 passed, 1 skipped** (the same pre-existing, unrelated Postgres-DSN-gated skip)
+on SQLite — up from V2-D's 704 passed. **Canonical Demo regression: byte-identical** — `PASS:2
+NEEDS_REVIEW:2 REJECTED:1 DUPLICATE:1 FAILED:1`, Northwind 92 / Riverbend 35 / Cobalt 25 / Ferrous 58 /
+Sable 79 — untouched, since Hunter only wires into the Live enrichment slot and the fixture pack never
+issues more than one enrichment call per prospect per run (so the repository's empty-success guard never
+triggers in Demo). `ruff check` clean on every new/changed backend file.
+
+**Migration verification: zero schema change.** `alembic heads` reports `1ec5eceed8d4 (head)`, unchanged
+from V2-B/V2-C/V2-D — `test_migration_drift.py` stays green with `models/tables.py`/`alembic/` untouched.
+No new table, no new column, no new enum. The Hunter/Apollo runtime distinction lives entirely in
+application-layer config and provider selection, never in the schema — exactly per §Part 19's "STOP
+before creating one" instruction, which never had to fire.
+
+**Zero real provider calls confirmed.** No `HUNTER_API_KEY`, `APOLLO_API_KEY`, or any other live
+credential exists in this session's environment. Every HTTP exchange in every new/modified test is
+scripted through `httpx.MockTransport` (`tests/live_hunter_helpers.py`/`tests/live_enrichment_helpers.py`).
+`scripts/hunter_smoke.py` was written and its CLI surface unit-tested, but its `main()`/`_run_one()` were
+never invoked — no process in this session ever opened a socket to `api.hunter.io` (or `api.apollo.io`,
+or any OpenAI/Tavily/Gmail endpoint).
+
+**Known unresolved wire facts (both explicitly deferred by the frozen plan, not guessed at):**
+1. **The exact HTTP-200 no-email response body shape is UNVERIFIED.** `_issue()` stays lenient (a
+   missing/`null` `data` object, or a `data.email` that's `null`/missing/empty-string, is treated as a
+   legitimate empty result) and fails closed only on an unambiguously wrong field type — this is a
+   deliberate design choice to fail safely without knowing the exact shape, not a confirmation of it.
+   Closing this is the real Hunter smoke's primary purpose (§Part 17), not run this session.
+2. **Whether Hunter's response carries a request-id/correlation header, and its exact name, is
+   UNVERIFIED.** `_request_id_from_headers()` reads a conventional `x-request-id` header, best-effort,
+   `None` if absent — never fabricated. The smoke script additionally prints every response header NAME
+   matching `request-id`/`rate-limit`/`credit` hints, to help close this without a code change once run.
+
+**403/429 semantics, confirmed against Hunter's own documented (not observed) contract:** `403` is treated
+as bounded-retryable `RATE_LIMITED` — deliberately different from Apollo's permanent `401`/`403` →
+`AUTH_ERROR` mapping, per the frozen plan's explicit instruction. `429` is treated as permanent
+`QUOTA_EXHAUSTED`, never retried at either the transport or step level — Hunter's account/billing state,
+not a transient rate limit, per the frozen plan. Neither has been observed against a real Hunter account
+this session; both are implemented exactly as documented.
+
+**BLOCKING pre-send requirement, recorded per §Part 9 (not implemented this session, by explicit
+instruction):** Hunter's `451`/`claimed_email` response is currently handled as a permanent `INVALID_
+RESPONSE` with no retry, no new `contact_enrichments` observation row, and safe/redacted telemetry only —
+no new suppression schema or domain mechanism was added. **Before V2-H/V2-I enables any external
+`EMAIL_SEND`, Groundwork MUST define and enforce suppression semantics so a historical last-known-good
+email cannot remain actionable after Hunter has reported `claimed_email` for that person/recipient.** A
+`451` today simply fails to produce a NEW observation; it does **not** retroactively suppress a PRIOR
+successful email observation already sitting in `contact_channels` from an earlier call (Apollo, Hunter,
+or Demo) — that gap is exactly what the required V2-H/V2-I suppression work must close before any live
+send path can trust `contact_channels.identifier` as safe-to-send. This is required safety work, not
+optional cleanup, and must not be silently dropped by a future session picking up V2-H/V2-I without
+re-reading this note.
+
+**Deviations from the frozen plan:** none identified. Every numbered section of the task brief (Parts
+1–23 as given) was implemented as specified; where the brief left an open question (the two wire
+unknowns), the implementation fails safely rather than guessing, exactly as instructed.
+
+**Next checkpoint: V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`), per
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Not started; no frontend file was touched by V2-D or V2-DH.
+
+---
+
 ## Next task
 
-**Immediate next task: pick and scope an alternate live enrichment provider** — one whose API contract
-the user's current account environment can actually exercise (Apollo's `api/v1/people/match` cannot; see
-"Current checkpoint" and "What V2-D added" above for the full, verbatim account-limitation finding).
-Hunter was named by the user as one candidate but is explicitly **not started** and not yet decided —
-that decision, and any implementation, is deliberately left to a future session/task, not this one.
+**Immediate next task: V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`), per
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13 — surfacing the additive `contact_channels` data (already
+returned by the prospect aggregate API since V2-C) in `apps/web`. Not started; no frontend file has been
+touched by any v2 checkpoint so far.
+
+**Before V2-E, or as part of a future V2-H/V2-I session:** the BLOCKING `claimed_email` suppression
+requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
+enabled — this is a hard prerequisite for that later checkpoint, not optional polish.
+
+**Real Hunter smoke:** `scripts/hunter_smoke.py`/`make hunter-smoke` are ready and unmodified in their
+actual behavior once run — but must NOT be run without the user's explicit approval, per this session's
+instruction. Running it (with a real `HUNTER_API_KEY` and exactly one real `--person`) would close both
+"Known unresolved wire facts" above.
 
 **The V2-D Apollo work itself needs no further action** unless/until the user's Apollo account
-entitlement changes: the adapter, runtime, activation wiring, and 55 scripted tests are complete and
-green; the smoke script is ready and unmodified in its actual behavior (only its `--help` text was
-corrected); the exact HTTP-200 no-match shape and every other "Known unknown" listed above remain
-genuinely open, not resolved by this session.
-
-**Next checkpoint after that (unchanged): V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`),
-per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13.
+entitlement changes: the adapter, runtime, activation wiring, and scripted tests are complete and
+green; the smoke script is ready and unmodified in its actual behavior; the exact HTTP-200 no-match shape
+and every other Apollo "Known unknown" remain genuinely open, not resolved by this or the V2-DH session.
 
 **V1/I2's own leftover backlog** (see below) remains folded into V2-J per the "v2" section above — not
 scheduled before V2-E.
@@ -3972,3 +4210,30 @@ anywhere in this session's implementation or tests.
   imports in both `main.py`'s lifespan and `providers/registry.py` must stay lazy — a run with
   `ENRICHMENT_PROVIDER=none` (the default) must never import that module at all, mirroring the existing
   "public clone with no keys must still run Demo Mode cleanly" invariant for OpenAI/Tavily.
+- **V2-DH's own do-not-touch:** `providers/live/hunter_enrichment.py::_issue()`'s lenient-envelope/
+  strict-field-type parsing (a missing/`null` `data` fails safe as empty; only a wrong field TYPE for
+  `data`/`data.email` is `INVALID_RESPONSE`) must not be tightened into Apollo's strict single-shape
+  envelope check, and must not be loosened into accepting a malformed `data.email` type, without first
+  running the real Hunter smoke and confirming the actual no-email shape — see "Known unresolved wire
+  facts" under "What V2-DH added". `HUNTER_API_ORIGIN`/`HUNTER_EMAIL_FINDER_PATH` in `hunter_runtime.py`
+  must stay pinned module constants — no `HUNTER_BASE_URL` setting. `HunterRuntime.create()` must keep
+  hardcoding `price_usd_per_credit=None` — no `HUNTER_PRICE_USD_PER_CREDIT` setting exists, and none
+  should be added without a confirmed, directly-observed numeric usage field. The `403`→`RATE_LIMITED`
+  (bounded-retryable) / `429`→`QUOTA_EXHAUSTED` (permanent) mapping is deliberately Hunter-specific and
+  different from Apollo's `401`/`403`→`AUTH_ERROR`; do not "harmonize" the two providers' error taxonomies
+  — each mirrors its own provider's real documented semantics. `providers/live/enrichment_runtime.py`'s
+  `LiveEnrichmentRuntime` base must stay narrow (only fields/behavior genuinely common to every live
+  enrichment runtime) — provider-specific wiring (auth header name/case, pinned endpoint constants,
+  which settings feed which bound) belongs in each subclass's own `create()`, never hoisted into the base
+  to "avoid duplication" at the cost of coupling Apollo and Hunter's independent contracts together.
+  `providers/registry.py::build_provider_bundle`'s Apollo-vs-Hunter selection must keep reading
+  `settings.enrichment_provider` (never the runtime's own type) — this is what lets a test hand in an
+  opaque fake runtime without needing to construct a real `ApolloRuntime`/`HunterRuntime`.
+  `repositories/contact_enrichment.py::_upsert_success_channel`'s empty-success guard
+  (`identifier is None and row is not None and row.identifier is not None`) is the ONE approved V2-DH
+  repository behavior change (§Part 7) — it must stay provider-neutral (no provider-name check) and must
+  never be extended to also guard `record_failure`'s existing, separately-correct last-known-good logic.
+  The BLOCKING `claimed_email` suppression requirement recorded under "What V2-DH added" is NOT satisfied
+  by anything in this checkpoint — do not treat the `451` permanent-failure handling as if it also
+  suppressed a prior successful observation; it does not, by design, until a future V2-H/V2-I session
+  implements that separately.

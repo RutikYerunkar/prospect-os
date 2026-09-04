@@ -84,13 +84,13 @@ def build_provider_profile(mode: Mode, settings, run_budget=None) -> dict[str, A
     # provider_profile JSON persisted verbatim on their `runs` row — this
     # function is never called again for an existing run, so those records
     # are untouched and still render correctly.
-    # V2-D: `enrichment_provider`/`enrichment_origin` are additive
+    # V2-D/V2-DH: `enrichment_provider`/`enrichment_origin` are additive
     # provenance only — reading `settings.enrichment_provider` directly here
     # is safe because `api/routers/plays.py::start_run` already 422'd a
-    # misconfigured `ENRICHMENT_PROVIDER=apollo` (missing key/runtime)
-    # before this function is ever called, so "apollo" here always means
-    # truly active for this run.
-    enrichment_active = settings.enrichment_provider == "apollo"
+    # misconfigured `ENRICHMENT_PROVIDER=apollo|hunter` (missing key/
+    # runtime) before this function is ever called, so a non-"none" value
+    # here always means truly active for this run.
+    enrichment_active = settings.enrichment_provider in ("apollo", "hunter")
     return {
         "mode": Mode.LIVE.value,
         "llm_provider": "openai",
@@ -100,7 +100,7 @@ def build_provider_profile(mode: Mode, settings, run_budget=None) -> dict[str, A
         "search_provider": "tavily",
         "synthetic_search": False,
         "evidence_origin": "LIVE_FETCH",
-        "enrichment_provider": "apollo" if enrichment_active else None,
+        "enrichment_provider": settings.enrichment_provider if enrichment_active else None,
         "enrichment_origin": "LIVE_PROVIDER" if enrichment_active else None,
         "query_plan_version": QUERY_PLAN_VERSION,
         "llm_max_output_tokens": settings.llm_max_output_tokens,
