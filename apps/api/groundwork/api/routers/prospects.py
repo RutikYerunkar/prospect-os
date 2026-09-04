@@ -97,6 +97,8 @@ def _draft_dict(row) -> dict[str, Any]:
         "claim_map": row.claim_map,
         "version": row.version,
         "status": row.status,
+        "content_hash": row.content_hash,
+        "hash_version": row.hash_version,
     }
 
 

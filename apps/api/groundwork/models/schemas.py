@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from groundwork.models.enums import (
     ActionExecutionOrigin,
+    Channel,
     ContactVerification,
     DimensionSupport,
     EnrichmentOrigin,
@@ -298,13 +299,22 @@ class ClaimMapEntry(BaseModel):
 
 
 class OutreachDraft(BaseModel):
+    # v2 §V2-F: `channel` is now the closed `Channel` enum (still serializes
+    # to the v1 string value "email" — the column type is unchanged). A
+    # LinkedIn draft has no subject — `subject` dropped its NOT NULL
+    # requirement (Part 5, C5) — `domain/review.py::_no_placeholders`'s
+    # empty-subject clause is channel-conditional to match.
     prospect_id: str
-    channel: str = "email"
+    channel: Channel = Channel.EMAIL
     step_index: int = 0
-    subject: str
+    subject: str | None = None
     body: str
     claim_map: list[ClaimMapEntry] = Field(default_factory=list)
     version: int = 1
+    # v2 §3.9/Part 5: populated once an `ActionProposal` is built from this
+    # draft (V2-H). Deliberately left `None` here — V2-F never computes it.
+    content_hash: str | None = None
+    hash_version: str = "v1"
 
 
 class ReviewCheck(BaseModel):
@@ -430,6 +440,30 @@ class ContactEnrichment(BaseModel):
             if self.linkedin_url.startswith("demo://"):
                 raise ValueError("a LIVE_PROVIDER contact_enrichments row may not carry a demo:// identifier")
         return self
+
+
+class ContactChannelState(BaseModel):
+    """v2 §V2-F — the AUTHORITATIVE post-write state of one (prospect,
+    channel) pair, mirroring the `contact_channels` row grain (Part 5).
+
+    This is what `ContactEnrichmentRepository.record_success`/
+    `record_failure` return, so every downstream consumer — the
+    `EnrichmentCallRecorder`, `engine/enrichment.py::call_enrichment`,
+    `ctx.contact_channels`, and finally `domain/review.py::run_checks` —
+    reads the same already-derived, already-last-known-good state the
+    repository just persisted. Nothing downstream re-derives raw provider
+    state or queries the repository again (the frozen plan's explicit
+    prohibition): this model IS the hand-off.
+    """
+
+    channel: Channel
+    identifier: str | None = None
+    discovery_state: str | None = None
+    verification_state: str | None = None
+    identity_match_state: str | None = None
+    derivation_version: str | None = None
+    derived_from_enrichment_id: str | None = None
+    observed_at: datetime | None = None
 
 
 class ActionProposal(BaseModel):

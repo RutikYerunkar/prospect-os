@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from groundwork.models.enums import EmailVerificationState
+from groundwork.models.schemas import ContactChannelState
 from groundwork.providers.contact_base import EnrichmentAttemptTelemetry, PersonEnrichmentResult
 from groundwork.repositories.contact_enrichment import ContactEnrichmentRepository
 
@@ -40,16 +41,18 @@ class EnrichmentCallRecorder:
         grounded_full_name: str | None,
         grounded_company_name: str | None,
         grounded_company_domain: str | None,
-    ) -> None:
-        await self.repo.record_success(
+    ) -> list[ContactChannelState]:
+        return await self.repo.record_success(
             run_id=self.run_id, prospect_id=self.prospect_id, provider=self.provider,
             call_group_id=call_group_id, telemetry=telemetry, result=result,
             email_status_map=email_status_map, grounded_full_name=grounded_full_name,
             grounded_company_name=grounded_company_name, grounded_company_domain=grounded_company_domain,
         )
 
-    async def record_failure(self, *, call_group_id: str, telemetry: list[EnrichmentAttemptTelemetry]) -> None:
-        await self.repo.record_failure(
+    async def record_failure(
+        self, *, call_group_id: str, telemetry: list[EnrichmentAttemptTelemetry]
+    ) -> list[ContactChannelState]:
+        return await self.repo.record_failure(
             run_id=self.run_id, prospect_id=self.prospect_id, provider=self.provider,
             call_group_id=call_group_id, telemetry=telemetry,
         )

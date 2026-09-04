@@ -10,8 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from groundwork.engine.runner import Repos
-from groundwork.models.enums import EnrichmentAttemptStatus, EnrichmentOperation, EnrichmentOrigin
-from groundwork.models.schemas import CompanySeed, ProviderEmailObservation, ProviderLinkedInObservation
+from groundwork.models.enums import Channel, EnrichmentAttemptStatus, EnrichmentOperation, EnrichmentOrigin
+from groundwork.models.schemas import CompanySeed, ContactChannelState, ProviderEmailObservation, ProviderLinkedInObservation
 from groundwork.providers.contact_base import (
     EnrichmentAttemptKind,
     EnrichmentAttemptTelemetry,
@@ -261,3 +261,55 @@ async def test_success_after_prior_failure_replaces_provider_error_state(session
     assert channels["email"].discovery_state == "FOUND"
     assert channels["email"].verification_state == "VERIFIED"
     assert channels["email"].identifier == "priya@x.com"
+
+
+# --- v2 §V2-F: `record_success`/`record_failure` return the AUTHORITATIVE
+# post-write `ContactChannelState` list — the exact hand-off
+# `EnrichmentCallRecorder` -> `engine/enrichment.py::call_enrichment` ->
+# `ctx.contact_channels` -> `domain/review.py::run_checks` threads through,
+# never re-derived or re-queried downstream.
+
+
+async def test_record_success_returns_authoritative_channel_states(session_factory) -> None:
+    repos = Repos.build(session_factory)
+    run_id, prospect_id = await _new_prospect(session_factory, repos)
+    result = _matched_result()
+
+    states = await repos.contact_enrichment.record_success(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-1",
+        telemetry=result.telemetry, result=result, email_status_map=DEMO_EMAIL_STATUS_MAP,
+        grounded_full_name="Priya X", grounded_company_name="X Corp", grounded_company_domain="x.com",
+    )
+
+    assert {s.channel for s in states} == {Channel.EMAIL, Channel.LINKEDIN}
+    email_state = next(s for s in states if s.channel is Channel.EMAIL)
+    linkedin_state = next(s for s in states if s.channel is Channel.LINKEDIN)
+    assert isinstance(email_state, ContactChannelState)
+    assert email_state.identifier == "priya@x.com"
+    assert email_state.discovery_state == "FOUND"
+    assert email_state.verification_state == "VERIFIED"
+    assert email_state.derived_from_enrichment_id is not None
+    assert linkedin_state.discovery_state == "RESOLVED"
+    assert linkedin_state.identity_match_state == "STRONG_MATCH"
+
+    # The rows this call wrote must match what it handed back — no drift
+    # between "what was persisted" and "what the caller was told".
+    persisted = {c.channel: c for c in await repos.contact_enrichment.get_contact_channels(prospect_id)}
+    assert email_state.identifier == persisted["email"].identifier
+    assert email_state.derived_from_enrichment_id == persisted["email"].derived_from_enrichment_id
+
+
+async def test_record_failure_returns_authoritative_channel_states(session_factory) -> None:
+    repos = Repos.build(session_factory)
+    run_id, prospect_id = await _new_prospect(session_factory, repos)
+
+    states = await repos.contact_enrichment.record_failure(
+        run_id=run_id, prospect_id=prospect_id, provider="demo_fixture", call_group_id="cg-1",
+        telemetry=_telemetry(EnrichmentAttemptStatus.PROVIDER_ERROR, error_type="EnrichmentProviderUnavailable"),
+    )
+
+    assert {s.channel for s in states} == {Channel.EMAIL, Channel.LINKEDIN}
+    email_state = next(s for s in states if s.channel is Channel.EMAIL)
+    assert email_state.discovery_state == "PROVIDER_ERROR"
+    assert email_state.identifier is None
+    assert email_state.derived_from_enrichment_id is None

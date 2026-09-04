@@ -114,7 +114,10 @@ async def _prospect_text_blob(session_factory, prospect_id: str, outcome) -> str
     if outcome.score is not None:
         parts.append(outcome.score.explanation)
     for draft in outcome.drafts:
-        parts += [draft.subject, draft.body]
+        # v2 §V2-F: a LinkedIn draft's `subject` is `None` by design.
+        if draft.subject is not None:
+            parts.append(draft.subject)
+        parts.append(draft.body)
     return " ".join(parts)
 
 

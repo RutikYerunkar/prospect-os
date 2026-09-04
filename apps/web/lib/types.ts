@@ -320,6 +320,10 @@ export interface OutreachDraft {
   claim_map: ClaimMapEntry[];
   version: number;
   status: string;
+  // v2 §V2-F: populated once an approval binds this draft to a content hash
+  // (V2-H). Always `null` at this checkpoint — V2-F never computes it.
+  content_hash: string | null;
+  hash_version: string;
 }
 
 export type ReviewSeverity = "hard" | "soft";

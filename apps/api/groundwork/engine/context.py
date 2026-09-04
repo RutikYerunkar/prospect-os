@@ -17,6 +17,7 @@ from groundwork.models.enums import ProspectStage, ProspectStatus
 from groundwork.models.schemas import (
     CompanySeed,
     Contact,
+    ContactChannelState,
     Evidence,
     ICPScore,
     OutreachDraft,
@@ -75,6 +76,15 @@ class ProspectContext:
     signals: list[Signal] = field(default_factory=list)
     score: ICPScore | None = None
     contact: Contact | None = None
+    # v2 §V2-F — the AUTHORITATIVE post-write channel states handed back by
+    # `repositories/contact_enrichment.py::record_success`/`record_failure`,
+    # threaded through `EnrichmentCallRecorder` -> `engine/enrichment.py::
+    # call_enrichment` -> here. `domain/review.py::run_checks` reads this
+    # directly; nothing re-derives raw provider state or re-queries the
+    # repository. Stays `[]` for NOT_ATTEMPTED (no named person, a
+    # disqualified prospect, or no enrichment provider wired) — the empty
+    # list is itself the correct, unambiguous "nothing to check" state.
+    contact_channels: list[ContactChannelState] = field(default_factory=list)
     drafts: list[OutreachDraft] = field(default_factory=list)
     review: ReviewResult | None = None
 

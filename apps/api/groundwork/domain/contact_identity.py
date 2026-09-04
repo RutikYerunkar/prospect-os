@@ -165,6 +165,30 @@ def validate_linkedin_identifier(raw: str | None, *, origin: EnrichmentOrigin) -
     return IdentifierVerdict.REJECTED
 
 
+def linkedin_identifier_key(raw: str) -> str | None:
+    """v2 §V2-F — canonical comparison key for a token asserted to be a
+    LinkedIn profile identifier, used by `domain/review.py`'s rewritten
+    `no_fabricated_contact` clause 3 to compare a token found in draft text
+    against this prospect's own provider-observed LinkedIn identifier.
+
+    Deliberately reuses `validate_linkedin_identifier`'s LIVE_PROVIDER
+    grammar (never a fresh ad-hoc parse) — a `demo://` identifier, or
+    anything else that fails that grammar, returns `None` and therefore can
+    never equal anything: Demo Mode's synthetic identifiers never appear as
+    real-looking URLs in draft text in the first place, so this path only
+    matters once a real LIVE_PROVIDER identifier exists (V2-D/V2-DH's
+    provider integration). Case-insensitive on both host and path — the
+    same "over-blocking is harmless, under-blocking is the actual harm"
+    posture as `normalize_email_identity`'s casefolded local part.
+    """
+    if validate_linkedin_identifier(raw, origin=EnrichmentOrigin.LIVE_PROVIDER) is not IdentifierVerdict.ACCEPTED:
+        return None
+    parts = urlsplit(raw)
+    host = canonical_domain(parts.hostname or "")
+    path = parts.path.rstrip("/")
+    return f"{host}{path}".casefold()
+
+
 # =====================================================================
 # §3.7 Step 1 — text normalization, applied identically to both sides
 # =====================================================================

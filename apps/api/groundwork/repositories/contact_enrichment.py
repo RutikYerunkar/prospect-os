@@ -60,12 +60,31 @@ from groundwork.models.enums import (
     EnrichmentAttemptStatus,
     LinkedInResolutionState,
 )
-from groundwork.models.schemas import ContactEnrichment
+from groundwork.models.schemas import ContactChannelState, ContactEnrichment
 from groundwork.models.tables import ContactChannelRow, ContactEnrichmentRow, EnrichmentCallRow
 from groundwork.observability.redact import redact
 from groundwork.providers.contact_base import EnrichmentAttemptTelemetry, PersonEnrichmentResult
 
 _NOT_ATTEMPTED_STATES = (None, "NOT_ATTEMPTED")
+
+
+def _state_from_row(channel: Channel, row: ContactChannelRow) -> ContactChannelState:
+    """v2 §V2-F — the authoritative post-write hand-off (Part 6): converts
+    the row this method just created/mutated into the typed state
+    `EnrichmentCallRecorder`/`engine/enrichment.py::call_enrichment` thread
+    onto `ctx.contact_channels`, which `domain/review.py::run_checks` reads
+    directly. Built from the SAME row object already committed in this
+    transaction — never a second read, never re-derived."""
+    return ContactChannelState(
+        channel=channel,
+        identifier=row.identifier,
+        discovery_state=row.discovery_state,
+        verification_state=row.verification_state,
+        identity_match_state=row.identity_match_state,
+        derivation_version=row.derivation_version,
+        derived_from_enrichment_id=row.derived_from_enrichment_id,
+        observed_at=row.observed_at,
+    )
 
 
 class ContactEnrichmentRepository:
@@ -115,7 +134,7 @@ class ContactEnrichmentRepository:
         grounded_full_name: str | None,
         grounded_company_name: str | None,
         grounded_company_domain: str | None,
-    ) -> None:
+    ) -> list[ContactChannelState]:
         async with self._session_factory() as session:
             for row in self._telemetry_rows(
                 telemetry=telemetry, call_group_id=call_group_id, run_id=run_id,
@@ -182,7 +201,7 @@ class ContactEnrichmentRepository:
             now = datetime.now(timezone.utc)
 
             email_discovery, email_verification = derive_email_channel(result.email, status_map=email_status_map)
-            await self._upsert_success_channel(
+            email_row = await self._upsert_success_channel(
                 session, prospect_id=prospect_id, channel=Channel.EMAIL,
                 identifier=result.email.address if result.email else None,
                 discovery_state=email_discovery.value, verification_state=email_verification.value,
@@ -196,7 +215,7 @@ class ContactEnrichmentRepository:
                 grounded_company_name=grounded_company_name,
                 grounded_company_domain=grounded_company_domain,
             )
-            await self._upsert_success_channel(
+            linkedin_row = await self._upsert_success_channel(
                 session, prospect_id=prospect_id, channel=Channel.LINKEDIN,
                 identifier=result.linkedin.profile_url if result.linkedin else None,
                 discovery_state=linkedin_resolution.value, verification_state=None,
@@ -205,6 +224,10 @@ class ContactEnrichmentRepository:
             )
 
             await session.commit()
+            return [
+                _state_from_row(Channel.EMAIL, email_row),
+                _state_from_row(Channel.LINKEDIN, linkedin_row),
+            ]
 
     async def record_failure(
         self,
@@ -214,7 +237,7 @@ class ContactEnrichmentRepository:
         provider: str,
         call_group_id: str,
         telemetry: list[EnrichmentAttemptTelemetry],
-    ) -> None:
+    ) -> list[ContactChannelState]:
         async with self._session_factory() as session:
             for row in self._telemetry_rows(
                 telemetry=telemetry, call_group_id=call_group_id, run_id=run_id,
@@ -228,15 +251,19 @@ class ContactEnrichmentRepository:
             last_status = last.status.value if last else EnrichmentAttemptStatus.PROVIDER_ERROR.value
             last_error_type = last.error_type if last else None
 
-            await self._apply_failure_to_channel(
+            email_row = await self._apply_failure_to_channel(
                 session, prospect_id=prospect_id, channel=Channel.EMAIL,
                 now=now, last_status=last_status, last_error_type=last_error_type,
             )
-            await self._apply_failure_to_channel(
+            linkedin_row = await self._apply_failure_to_channel(
                 session, prospect_id=prospect_id, channel=Channel.LINKEDIN,
                 now=now, last_status=last_status, last_error_type=last_error_type,
             )
             await session.commit()
+            return [
+                _state_from_row(Channel.EMAIL, email_row),
+                _state_from_row(Channel.LINKEDIN, linkedin_row),
+            ]
 
     async def _get_channel_row(self, session, *, prospect_id: str, channel: Channel) -> ContactChannelRow | None:
         result = await session.execute(
@@ -250,7 +277,7 @@ class ContactEnrichmentRepository:
         self, session, *, prospect_id: str, channel: Channel, identifier: str | None,
         discovery_state: str, verification_state: str | None, identity_match_state: str | None,
         derived_from_enrichment_id: str, observed_at: datetime, now: datetime,
-    ) -> None:
+    ) -> ContactChannelRow:
         row = await self._get_channel_row(session, prospect_id=prospect_id, channel=channel)
 
         # §3.6 last-known-good, successful-but-empty fix: THIS call's own
@@ -263,19 +290,18 @@ class ContactEnrichmentRepository:
             row.last_attempt_at = now
             row.last_attempt_status = "OK"
             row.last_attempt_error_type = None
-            return
+            return row
 
         if row is None:
-            session.add(
-                ContactChannelRow(
-                    id=str(uuid.uuid4()), prospect_id=prospect_id, channel=channel.value,
-                    identifier=identifier, discovery_state=discovery_state, verification_state=verification_state,
-                    identity_match_state=identity_match_state, derivation_version=IDENTITY_MATCH_VERSION,
-                    derived_from_enrichment_id=derived_from_enrichment_id, observed_at=observed_at,
-                    last_attempt_at=now, last_attempt_status="OK", last_attempt_error_type=None,
-                )
+            row = ContactChannelRow(
+                id=str(uuid.uuid4()), prospect_id=prospect_id, channel=channel.value,
+                identifier=identifier, discovery_state=discovery_state, verification_state=verification_state,
+                identity_match_state=identity_match_state, derivation_version=IDENTITY_MATCH_VERSION,
+                derived_from_enrichment_id=derived_from_enrichment_id, observed_at=observed_at,
+                last_attempt_at=now, last_attempt_status="OK", last_attempt_error_type=None,
             )
-            return
+            session.add(row)
+            return row
         row.identifier = identifier
         row.discovery_state = discovery_state
         row.verification_state = verification_state
@@ -286,11 +312,12 @@ class ContactEnrichmentRepository:
         row.last_attempt_at = now
         row.last_attempt_status = "OK"
         row.last_attempt_error_type = None
+        return row
 
     async def _apply_failure_to_channel(
         self, session, *, prospect_id: str, channel: Channel, now: datetime,
         last_status: str, last_error_type: str | None,
-    ) -> None:
+    ) -> ContactChannelRow:
         row = await self._get_channel_row(session, prospect_id=prospect_id, channel=channel)
 
         if row is not None and row.discovery_state not in _NOT_ATTEMPTED_STATES:
@@ -300,7 +327,7 @@ class ContactEnrichmentRepository:
             row.last_attempt_at = now
             row.last_attempt_status = last_status
             row.last_attempt_error_type = last_error_type
-            return
+            return row
 
         if channel is Channel.EMAIL:
             existing = EmailDiscoveryState(row.discovery_state) if row and row.discovery_state else None
@@ -310,15 +337,14 @@ class ContactEnrichmentRepository:
             new_state = linkedin_resolution_state_after_failed_call(existing_li).value
 
         if row is None:
-            session.add(
-                ContactChannelRow(
-                    id=str(uuid.uuid4()), prospect_id=prospect_id, channel=channel.value,
-                    identifier=None, discovery_state=new_state, verification_state=None, identity_match_state=None,
-                    derivation_version=IDENTITY_MATCH_VERSION, derived_from_enrichment_id=None, observed_at=None,
-                    last_attempt_at=now, last_attempt_status=last_status, last_attempt_error_type=last_error_type,
-                )
+            row = ContactChannelRow(
+                id=str(uuid.uuid4()), prospect_id=prospect_id, channel=channel.value,
+                identifier=None, discovery_state=new_state, verification_state=None, identity_match_state=None,
+                derivation_version=IDENTITY_MATCH_VERSION, derived_from_enrichment_id=None, observed_at=None,
+                last_attempt_at=now, last_attempt_status=last_status, last_attempt_error_type=last_error_type,
             )
-            return
+            session.add(row)
+            return row
         row.discovery_state = new_state
         row.identifier = None
         row.verification_state = None
@@ -326,6 +352,7 @@ class ContactEnrichmentRepository:
         row.last_attempt_at = now
         row.last_attempt_status = last_status
         row.last_attempt_error_type = last_error_type
+        return row
 
     # --- reads (API aggregate) ---
 
