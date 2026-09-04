@@ -95,7 +95,7 @@ function ProspectHeader({ prospect }: { prospect: ProspectAggregate }) {
           </span>
         </div>
         <div className="flex flex-col gap-0.5">
-          <span className="text-[11px] uppercase tracking-wide text-zinc-500">Contact</span>
+          <span className="text-[11px] uppercase tracking-wide text-zinc-500">Person identity</span>
           <Badge tone={prospect.contact ? VERIFICATION_TONE[prospect.contact.verification] ?? "neutral" : "neutral"}>
             {prospect.contact ? prospect.contact.verification : "not reached"}
           </Badge>

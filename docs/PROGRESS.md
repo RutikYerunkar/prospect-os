@@ -4238,6 +4238,20 @@ verification used only Demo Mode's existing, pre-existing, zero-egress fixture p
 (`DemoLLMProvider`/`DemoSearchProvider`/`DemoEnrichmentProvider`) — no new provider code was written or
 touched by this checkpoint at all.
 
+**Post-visual-validation fix: prospect-detail header label rename.** After the user independently
+re-ran the canonical Demo in a clean production-style local setup and confirmed it byte-identical
+(PASS:2/NEEDS_REVIEW:2/REJECTED:1/DUPLICATE:1/FAILED:1; Northwind 92/Riverbend 35/Cobalt 25/Ferrous 58/
+Sable 79), one presentation-only correction was made: `app/prospects/[id]/page.tsx`'s `ProspectHeader`
+summary row labeled the v1 person-identity axis "Contact", which reads as ambiguous now that V2-E
+separately exposes an "Email verification" axis in the same page (e.g. Sable: person identity `VERIFIED`,
+email verification `RISKY` — two different badges that used to share one label word). Renamed the label
+span's text from `Contact` to `Person identity`; the badge's tone/value
+(`prospect.contact.verification`) is byte-identical, `RunBoard.tsx`'s own `Contact` column header
+(a different file, a different summary of the same underlying v1 verification state) was deliberately
+left untouched, and nothing in `ContactPanel.tsx`, any enum, any fixture, any provider, or any backend
+file was touched. One line changed in one file. `pnpm lint`/`typecheck`/`test` (59 passed,
+unchanged)/`build` all green. Zero external provider calls.
+
 ---
 
 ## Next task
