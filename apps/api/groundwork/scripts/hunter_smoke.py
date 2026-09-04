@@ -1,20 +1,49 @@
-"""`python -m groundwork.scripts.hunter_smoke --i-understand-this-costs-money \\
-    --person "Jane Doe:example.com:VP of Sales"`
+"""Two mutually exclusive ways to run this OPTIONAL, MANUAL, never-CI Hunter
+Email Finder smoke — never automatic, never `make test`:
 
-The OPTIONAL real-live V2-DH smoke test for the Hunter Email Finder adapter.
-Makes ONE real, billed call to `GET /v2/email-finder` for a single real
-person the operator supplies — never the demo fixture pack, never invented
-data. This costs real money and makes a real network call — it must NEVER
-run accidentally:
+**Zero-cost contract probe** (§Part 16 of the frozen plan) — Hunter's own
+documented `test-api-key`, no billing, no `HUNTER_API_KEY` needed:
 
+    python -m groundwork.scripts.hunter_smoke --use-test-api-key \\
+        --person "Jane Doe:example.com:VP of Sales"
+
+**Real Hunter smoke** — ONE real, billed call against a real person:
+
+    python -m groundwork.scripts.hunter_smoke --i-understand-this-costs-money \\
+        --person "Jane Doe:example.com:VP of Sales"
+
+Both paths use the exact same request shape production uses: `GET
+/v2/email-finder`, `X-API-KEY` header, query parameters `domain`+`full_name`
+only, never the demo fixture pack, never invented data.
+
+**`--use-test-api-key` mode** (zero cost, manual, external-network probe):
+- Uses the literal Hunter-documented key `test-api-key` — never
+  `HUNTER_API_KEY` from the environment, and never requires it to be set.
+- Does NOT require `--i-understand-this-costs-money`.
+- Still requires exactly one `--person`.
+- Can verify: `full_name` acceptance, `X-API-KEY` acceptance, the success
+  envelope shape — per §Part 16, it CANNOT prove real-person matching, the
+  exact real no-match body, or real billing behavior.
+- Still never run automatically — this remains a real network call to
+  Hunter, just an uncharged one.
+
+**`--i-understand-this-costs-money` mode** (real cost):
 - Requires the exact `--i-understand-this-costs-money` flag.
 - Requires `HUNTER_API_KEY` to actually be configured.
 - Capped at exactly ONE `--person` (deliberately stricter than Apollo's
   smoke, which allows two).
+
+The two modes are unambiguous and never combine: test-key mode builds its
+runtime from an isolated settings-like object carrying only the literal
+`test-api-key` (`_TestKeySettings`) and never reads `settings.hunter_api_key`
+at all, so it structurally cannot consume or leak the developer's real key.
+
+Shared, mode-independent guarantees:
 - Never runs as part of `make test`, CI, or any other automated path.
-- Never prints the API key — it never even touches this module's own code;
-  `HunterRuntime.create()` puts it straight into the shared `httpx.
-  AsyncClient`'s headers.
+- Never prints an API key (real or test) — it never even touches this
+  module's own printed output; `HunterRuntime.create()` puts it straight
+  into the shared `httpx.AsyncClient`'s headers, and the key is never
+  placed in the request URL/query string.
 - Never prints the raw returned email address — only a masked form.
 
 Like `scripts/enrichment_smoke.py`, this does NOT run the full engine — it
@@ -29,8 +58,9 @@ behavior.
 
 This script does not assert PASS/FAIL on Hunter's own business outcome (a
 real no-match is a legitimate result, not a smoke failure). It FAILS loudly
-(nonzero exit) only on a structural problem: `HUNTER_API_KEY` missing, the
-confirmation flag missing, or an uncaught exception while issuing the call.
+(nonzero exit) only on a structural problem: `HUNTER_API_KEY` missing in
+real-key mode, the mode flag missing entirely, or an uncaught exception
+while issuing the call.
 
 Only SAFE, STRUCTURAL observations are ever printed — never raw PII: HTTP
 status, verification status/date, score value+type, accept_all value+type,
@@ -70,6 +100,44 @@ class _Person:
     title: str | None = None
 
 
+# Hunter's own documented zero-cost contract-probe key (§Part 16). Pinned
+# literal — never read from the environment, never confused with a real
+# HUNTER_API_KEY.
+_HUNTER_DOCUMENTED_TEST_API_KEY = "test-api-key"
+
+
+class _TestKeySettings:
+    """An isolated settings-like object for `--use-test-api-key` mode.
+    Deliberately NEVER reads `settings.hunter_api_key` — the only key value
+    it can ever produce is the pinned `test-api-key` literal above, so this
+    mode is structurally incapable of consuming or leaking the developer's
+    real configured key. Every other bound (deadline/concurrency/retries)
+    is taken from the real `settings`, since those aren't secrets and this
+    mode should still respect the same operational limits."""
+
+    def __init__(self) -> None:
+        self.hunter_api_key = _HUNTER_DOCUMENTED_TEST_API_KEY
+        self.hunter_call_deadline_s = settings.hunter_call_deadline_s
+        self.hunter_max_concurrency = settings.hunter_max_concurrency
+        self.hunter_max_transport_retries = settings.hunter_max_transport_retries
+
+
+def _build_runtime(
+    *, use_test_key: bool, http_client: httpx.AsyncClient | None = None
+) -> HunterRuntime | None:
+    """Returns `None` only for the one structural failure this script can
+    hit before any network call: real-key mode with `HUNTER_API_KEY`
+    unconfigured. Test-key mode never consults `settings.hunter_api_key` at
+    all — it always succeeds here (construction opens no socket; only an
+    actual request does). `http_client` is test-only, mirroring
+    `HunterRuntime.create()`'s own injection seam."""
+    if use_test_key:
+        return HunterRuntime.create(_TestKeySettings(), http_client=http_client)
+    if not settings.hunter_api_key:
+        return None
+    return HunterRuntime.create(settings, http_client=http_client)
+
+
 def _mask_email(address: str) -> str:
     if "@" not in address:
         return "***"
@@ -78,8 +146,13 @@ def _mask_email(address: str) -> str:
     return f"{masked_local}@{domain}"
 
 
-def _print_preamble(person: _Person) -> None:
-    print("=== Groundwork V2-DH Hunter enrichment smoke test — REAL Hunter call, REAL cost ===")
+def _print_preamble(person: _Person, *, use_test_key: bool) -> None:
+    if use_test_key:
+        print("=== Groundwork V2-DH Hunter enrichment smoke test — TEST-API-KEY, ZERO COST ===")
+        print("auth:                    Hunter's documented test-api-key (never HUNTER_API_KEY)")
+    else:
+        print("=== Groundwork V2-DH Hunter enrichment smoke test — REAL Hunter call, REAL cost ===")
+        print("auth:                    a configured HUNTER_API_KEY (value never shown)")
     print(f"endpoint:                {HUNTER_API_ORIGIN}{HUNTER_EMAIL_FINDER_PATH}")
     print(
         f"person to look up:      full_name={person.full_name!r} "
@@ -217,13 +290,13 @@ async def _run_one(runtime: HunterRuntime, person: _Person) -> bool:
     return True
 
 
-async def main(person: _Person) -> int:
-    if not settings.hunter_api_key:
+async def main(person: _Person, *, use_test_key: bool) -> int:
+    runtime = _build_runtime(use_test_key=use_test_key)
+    if runtime is None:
         print("HUNTER_API_KEY is not configured — aborting.", file=sys.stderr)
         return 1
 
-    _print_preamble(person)
-    runtime = HunterRuntime.create(settings)
+    _print_preamble(person, use_test_key=use_test_key)
 
     ok = True
     try:
@@ -242,13 +315,37 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--i-understand-this-costs-money", action="store_true", dest="confirmed",
-        help="required — this makes a real, billed Hunter API call",
+        help="required for REAL-KEY mode — this makes a real, billed Hunter API call. "
+        "Not required (and not used) with --use-test-api-key.",
+    )
+    parser.add_argument(
+        "--use-test-api-key", action="store_true", dest="use_test_api_key",
+        help="zero-cost contract probe: use Hunter's documented literal 'test-api-key' via X-API-KEY "
+        "instead of HUNTER_API_KEY. Never requires --i-understand-this-costs-money or HUNTER_API_KEY "
+        "to be configured. Still a real network call to Hunter, just an uncharged one — never run "
+        "automatically. Cannot prove real-person matching, the real no-match body, or billing behavior.",
     )
     parser.add_argument(
         "--person", default=None, metavar="FULL_NAME:COMPANY_DOMAIN[:TITLE]",
-        help="the ONE real person to look up, e.g. --person \"Jane Doe:example.com:VP of Sales\".",
+        help="the ONE real person to look up, e.g. --person \"Jane Doe:example.com:VP of Sales\". "
+        "Required in both modes.",
     )
     return parser.parse_args()
+
+
+def _require_valid_mode(args: argparse.Namespace) -> None:
+    """Exactly one of the two modes must be selected: `--use-test-api-key`
+    (which needs no cost acknowledgment) or `--i-understand-this-costs-money`
+    (real-key mode). Neither flag at all is refused — there is no implicit
+    default that spends real money or makes an unacknowledged call."""
+    if args.use_test_api_key or args.confirmed:
+        return
+    print(
+        "Refusing to run without --i-understand-this-costs-money "
+        "(or --use-test-api-key for the zero-cost documented test-key probe).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _parse_person(raw: str | None) -> _Person:
@@ -266,8 +363,6 @@ def _parse_person(raw: str | None) -> _Person:
 
 if __name__ == "__main__":
     args = parse_args()
-    if not args.confirmed:
-        print("Refusing to run without --i-understand-this-costs-money.", file=sys.stderr)
-        sys.exit(1)
+    _require_valid_mode(args)
     person = _parse_person(args.person)
-    sys.exit(asyncio.run(main(person)))
+    sys.exit(asyncio.run(main(person, use_test_key=args.use_test_api_key)))

@@ -3845,10 +3845,15 @@ leak into `domain/` without ever being imported.
   state; `ContactEnrichmentRepository` remains the sole persistence owner; last-known-good preserved after
   both a later FAILED call and a later SUCCESSFUL-but-EMPTY call (the new §7 fix, exercised through the
   real repository).
-- `tests/test_hunter_smoke_cli.py` (new) — the smoke script's module docstring documents the real CLI
-  (`--person`/`--i-understand-this-costs-money`, `HUNTER_API_KEY`); the parser accepts exactly those flags;
-  `_parse_person()`'s name/domain/title splitting and its required-arg/malformed-input failure modes;
-  `_mask_email()` never leaks the local part of a real address.
+- `tests/test_hunter_smoke_cli.py` (new, later extended — see "Post-implementation fix" below) — the
+  smoke script's module docstring documents the real CLI (`--person`, `--i-understand-this-costs-money`
+  real-key mode, `--use-test-api-key` zero-cost mode, `HUNTER_API_KEY`); the parser accepts exactly those
+  flags and `--help` lists all three; `_require_valid_mode()`'s mode-gating (test-key mode needs no cost
+  acknowledgment, real mode still does); `_build_runtime()`'s two paths (test-key mode never reads
+  `settings.hunter_api_key`; real mode still requires it); the literal `test-api-key` reaches `X-API-KEY`
+  and never the request URL (via a scripted `MockTransport`, never the real API); `_parse_person()`'s
+  name/domain/title splitting and its required-arg/malformed-input failure modes; `_mask_email()` never
+  leaks the local part of a real address.
 - `tests/test_provider_purity.py` (extended) — the new domain-provider-name-string-literal scan.
 - `tests/test_enrichment_last_known_good.py` (extended) — the three new successful-but-empty scenarios.
 - `tests/test_apollo_activation.py` (mechanically updated) — `get_apollo_runtime` → `get_enrichment_
@@ -3906,9 +3911,29 @@ send path can trust `contact_channels.identifier` as safe-to-send. This is requi
 optional cleanup, and must not be silently dropped by a future session picking up V2-H/V2-I without
 re-reading this note.
 
-**Deviations from the frozen plan:** none identified. Every numbered section of the task brief (Parts
-1–23 as given) was implemented as specified; where the brief left an open question (the two wire
-unknowns), the implementation fails safely rather than guessing, exactly as instructed.
+**Deviations from the frozen plan, as originally implemented:** one — §Part 16's `test-api-key` support
+was omitted from `scripts/hunter_smoke.py`'s CLI in the initial implementation commit. Found during the
+user's own manual `--help` verification and fixed in a follow-up commit on this same checkpoint/branch —
+see "Post-implementation fix: `--use-test-api-key`" immediately below. Every other numbered section of
+the task brief (Parts 1–23 as given) was implemented as specified; where the brief left an open question
+(the two wire unknowns), the implementation fails safely rather than guessing, exactly as instructed.
+
+**Post-implementation fix: `--use-test-api-key` (§Part 16).** `scripts/hunter_smoke.py` now exposes two
+mutually exclusive modes. `--use-test-api-key` (new): uses Hunter's documented literal `test-api-key`
+through the same `X-API-KEY` header production uses, requires neither `HUNTER_API_KEY` nor
+`--i-understand-this-costs-money`, still requires exactly one `--person`, and remains a real (just
+uncharged) network call — never CI, never `make test`, never automatic. `--i-understand-this-costs-money`
+(unchanged): real key, real cost, exactly as before. The two modes are structurally unambiguous:
+test-key mode is built from an isolated `_TestKeySettings` object that carries only the pinned
+`test-api-key` literal and **never reads `settings.hunter_api_key` at all**, so it cannot accidentally
+consume or leak a developer's real configured key even if one is set in the same environment. Files
+touched by this fix: `groundwork/scripts/hunter_smoke.py` (the two-mode CLI, `_TestKeySettings`,
+`_build_runtime()`, `_require_valid_mode()`) and `tests/test_hunter_smoke_cli.py` (extended to 18 tests
+covering both modes, `--help` output, and that the literal test key reaches `X-API-KEY` and never the
+request URL — verified against a scripted `MockTransport`, never the real Hunter API). No other file
+changed; `docs/PROGRESS.md` (this entry) is the only doc update. Full suite re-verified green after the
+fix; canonical Demo unaffected (this fix touches only the smoke script and its own tests). Zero real
+Hunter calls were made while diagnosing or fixing this — neither smoke mode was run.
 
 **Next checkpoint: V2-E — Contact enrichment UI** (`claude/v2-e-enrichment-ui`), per
 `docs/V2_IMPLEMENTATION_PLAN.md` Part 13. Not started; no frontend file was touched by V2-D or V2-DH.
@@ -3926,10 +3951,13 @@ touched by any v2 checkpoint so far.
 requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
 enabled — this is a hard prerequisite for that later checkpoint, not optional polish.
 
-**Real Hunter smoke:** `scripts/hunter_smoke.py`/`make hunter-smoke` are ready and unmodified in their
-actual behavior once run — but must NOT be run without the user's explicit approval, per this session's
-instruction. Running it (with a real `HUNTER_API_KEY` and exactly one real `--person`) would close both
-"Known unresolved wire facts" above.
+**Real Hunter smoke:** `scripts/hunter_smoke.py`/`make hunter-smoke` are ready — but must NOT be run
+without the user's explicit approval, per this session's instruction. Running it in real-key mode (with a
+real `HUNTER_API_KEY` and exactly one real `--person`) would close both "Known unresolved wire facts"
+above. The zero-cost `--use-test-api-key` mode (§Part 16, added in the post-implementation fix above) can
+partially probe the same contract — `full_name`/`X-API-KEY` acceptance and the success envelope shape —
+without spending money or needing a real key, but per the frozen plan it cannot prove real-person
+matching, the real no-match body, or real billing behavior; neither mode was run this session.
 
 **The V2-D Apollo work itself needs no further action** unless/until the user's Apollo account
 entitlement changes: the adapter, runtime, activation wiring, and scripted tests are complete and
