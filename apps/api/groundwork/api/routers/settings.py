@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from groundwork.api.deps import ApolloRuntimeDep, IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep
+from groundwork.api.deps import EnrichmentRuntimeDep, IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep
 from groundwork.api.operator_auth import operator_login_configured
 from groundwork.api.schemas import LiveAvailability, ProviderInfo, ProviderSettingsResponse
 from groundwork.config import settings
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 async def get_provider_settings(
     live_runtime: LiveRuntimeDep,
     search_runtime: LiveSearchRuntimeDep,
-    apollo_runtime: ApolloRuntimeDep,
+    enrichment_runtime: EnrichmentRuntimeDep,
     is_operator: IsOperatorDep,
 ) -> ProviderSettingsResponse:
     # Never returns key values (§21) — only whether a live-mode key is present.
@@ -27,10 +27,15 @@ async def get_provider_settings(
     else:
         llm = ProviderInfo(name="openai", configured=bool(settings.openai_api_key))
         search = ProviderInfo(name="tavily", configured=bool(settings.tavily_api_key))
-        # V2-D: "none" is a valid, fully-"configured" state (nothing is
-        # needed for it) — only "apollo" cares whether a key is present.
+        # V2-D/V2-DH: "none" is a valid, fully-"configured" state (nothing is
+        # needed for it) — only "apollo"/"hunter" care whether their own key
+        # is present. Pinned by `test_hunter_activation.py`'s
+        # `test_provider_info_configured_semantics_pinned` (§Part 14's
+        # "audit and pin the existing behavior" note).
         if settings.enrichment_provider == "apollo":
             enrichment = ProviderInfo(name="apollo", configured=bool(settings.apollo_api_key))
+        elif settings.enrichment_provider == "hunter":
+            enrichment = ProviderInfo(name="hunter", configured=bool(settings.hunter_api_key))
         else:
             enrichment = ProviderInfo(name="none", configured=True)
 
@@ -41,10 +46,11 @@ async def get_provider_settings(
     # fixture-search fallback when only OpenAI is configured.
     llm_available = live_runtime is not None and bool(settings.openai_api_key)
     search_available = search_runtime is not None and bool(settings.tavily_api_key)
-    # V2-D: never part of `available`'s AND — enrichment is optional even in
-    # Live Mode, so `apollo_runtime` being unset (ENRICHMENT_PROVIDER=none,
-    # by far the common case) must never disable Live Mode itself.
-    enrichment_available = apollo_runtime is not None
+    # V2-D/V2-DH: never part of `available`'s AND — enrichment is optional
+    # even in Live Mode, so `enrichment_runtime` being unset
+    # (ENRICHMENT_PROVIDER=none, by far the common case) must never disable
+    # Live Mode itself.
+    enrichment_available = enrichment_runtime is not None
     live = LiveAvailability(
         available=llm_available and search_available,
         llm_available=llm_available,
