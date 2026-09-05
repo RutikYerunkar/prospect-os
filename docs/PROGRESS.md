@@ -28,7 +28,7 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-DH — Live Hunter enrichment** | `claude/v2-dh-live-hunter` | Hunter as a SECOND live `EnrichmentProvider` behind the identical Protocol, coexisting with (never replacing) Apollo. `providers/live/hunter_enrichment.py` (`HunterEnrichmentProvider`) — no Hunter SDK, raw `httpx` `GET /v2/email-finder` (query params `domain`/`full_name` only, `X-API-KEY` header auth, no JSON body); `providers/live/hunter_runtime.py` (`HunterRuntime`); `providers/live/enrichment_runtime.py` generalized with a shared `LiveEnrichmentRuntime` base both `ApolloRuntime` and `HunterRuntime` extend; `ENRICHMENT_PROVIDER=none|apollo|hunter`; all V2-D Apollo-named activation plumbing (`app.state.apollo_runtime`, `get_apollo_runtime`, `ApolloRuntimeDep`, `_require_apollo_runtime`) generalized to provider-neutral names; the real Hunter email-status map (`valid`→`VERIFIED`, `accept_all`→`RISKY`, `unknown`/anything else→`UNVERIFIED`); one approved repository behavior fix — a later SUCCESSFUL-but-EMPTY enrichment call can no longer overwrite a previously observed real email/LinkedIn identifier (provider-neutral, in `ContactEnrichmentRepository`); a follow-up fix adding `--use-test-api-key` (§Part 16) to `scripts/hunter_smoke.py`. Canonical Demo byte-identical. Zero real Hunter calls in this session's own implementation/tests; **the real Hunter smoke was subsequently run by the user, with explicit approval, outside this session's automated work** — real authentication, real-person matching, the `data`+`meta` success envelope, and the `x-request-id` header are now confirmed live; the exact HTTP-200 no-email body shape remains the one open wire unknown. See "What V2-DH added" and "Real Hunter smoke — validated" below. |
 | **V2-E — Contact enrichment UI** | (branch `claude/v2-e-contact-enrichment-ui`, merged via PR #18) | `ContactPanel` extended in place into one "Contact & Enrichment" surface showing all five contact axes (person identity, email discovery, email verification, LinkedIn resolution, LinkedIn identity match) independently, each with a label/badge/provider-neutral explanation; a null channel axis renders `NOT OBSERVED`, never silently omitted. Backend: additive-only `contact_channels` fields (`origin`, `provider`, `stale`, `stale_after_days`, `preserved_state`, `provider_confidence`, `is_catch_all`) on the existing `GET /api/prospects/{id}` aggregate — no new endpoint, no new table, no migration; two new pure `domain/action_policy.py` helpers (`is_enrichment_stale`, `derive_preserved_enrichment_state`) compute staleness/preservation server-side, never re-derived in TypeScript. Frontend: `lib/linkedinSafety.ts` mirrors the backend's LIVE_PROVIDER LinkedIn URL grammar independently (defense-in-depth) — only `channel=linkedin` + `origin=LIVE_PROVIDER` + `discovery_state=RESOLVED` + a validated canonical `https://[www.]linkedin.com/in/<id>` URL may become an `href`; `demo://` identifiers render as a synthetic/simulated-profile line, never a link. Fixed a real type bug: `ProspectContact.persona` was typed `string \| null` in `lib/types.ts` but is `boolean` end to end on the backend (`ContactRow.persona`/`Contact.persona_match`) — audited (only consumer was `ContactPanel`) and corrected. Canonical Demo byte-identical. Zero external provider calls. See "What V2-E added" below. |
 | **V2-F — Channel-specific outreach + guardrails** | *this commit* (branch `claude/v2-f-channel-outreach`) | `personalize` now drafts one ADDITIONAL LinkedIn message (via a separate `LLMOperation.LINKEDIN_PERSONALIZATION` call, distinct ctx_key `personalize:linkedin`, distinct `LinkedInOutreachOutput` schema with no subject) whenever `contact_channels[LINKEDIN].discovery_state == RESOLVED` — the v1 email branch is byte-for-byte untouched. `OutreachDraft.channel` is now the `Channel` enum (still the string `"email"` on the wire), `subject` is nullable, `content_hash`/`hash_version` are exposed (both null — V2-H's job). New `ContactChannelState` model carries the AUTHORITATIVE post-write channel state from `ContactEnrichmentRepository.record_success`/`record_failure` through `EnrichmentCallRecorder` → `engine/enrichment.py::call_enrichment` → `ctx.contact_channels` → `domain/review.py::run_checks` — nothing downstream re-derives raw provider state or re-queries the repository. `no_fabricated_contact` rewritten as three provenance-based clauses (unbacked identifier, LinkedIn MISMATCH, unbacked identifier-shaped token in draft text — normalized via the existing `domain/contact_identity.py` helpers, plus one new pure helper `linkedin_identifier_key`) and no longer reads `contact.verification` at all; `no_placeholders` is channel-aware (empty-subject only applies to EMAIL); `cross_prospect_leak`'s nullable-subject bug (`f"{draft.subject}\n..."` interpolating the literal text `"None"`) is fixed. Still exactly seven checks. `OutreachViewer` groups drafts by channel (EMAIL first, deterministic order, `step_index` order within a group) — no href of any kind is rendered there (unchanged). Canonical Demo byte-identical (email drafts byte-identical; Northwind and Sable — both RESOLVED+STRONG_MATCH — additionally get a LinkedIn draft; statuses/scores/verdicts/evidence counts unchanged). No migration, no table change, no fixture change, zero external provider calls. See "What V2-F added" below. |
-| **V2-G — Gmail OAuth (connection only, no sending)** | *this commit* (branch `claude/v2-g-gmail-oauth`) | Operator-owned, encrypted, revocable Gmail connection — sends nothing. No migration: `gmail_connections`/`oauth_states` already existed from V2-B, untouched. Exact scope set `gmail.send` + `gmail.metadata` only (no `readonly`/`openid`/`email`/`profile`, never Google's userinfo endpoint). New pure `api/gmail_state_binding.py` binds OAuth `state` to the exact initiating operator-session cookie value via `HMAC-SHA256(SESSION_SIGNING_KEY, STATE_BINDING_VERSION|state_id|cookie_value)` — only `state_id`/`pkce_verifier`/timestamps persist, never the binding tag or the cookie itself; verification tries current then `SESSION_SIGNING_KEY_OLD`, mirroring `operator_auth.verify_session_cookie`'s own rotation order (no change to `operator_auth.py` itself). Callback implements the exact security-critical order: parse state (malformed→400, no DB touch) → require+verify operator session (missing/invalid→401, no DB touch) → verify state/session binding (mismatch→403, state NOT consumed, callback-failure limiter incremented) → consume `state_id` via ONE guarded `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now` (`rowcount != 1`→409) → only now inspect Google's `error` param (an allow-listed `access_denied` passes through, everything else sanitizes to `unknown`, never the raw Google error text) → exchange code (PKCE S256) → `users.getProfile` for `emailAddress` (missing→fail closed, no persistence) → Fernet-encrypt the refresh token (new `token_crypto.py`, `TOKEN_ENCRYPTION_KEY`/`_OLD` mirroring `SESSION_SIGNING_KEY`'s rotation) → persist → redirect `/settings?gmail=connected`. New `providers/live/google_oauth_runtime.py::GoogleOAuthRuntime` — deployment-scoped (never in `ProviderBundle`), process-scoped `httpx.AsyncClient`, one flat transport-retry loop bounded at 1, never retries a definitive 4xx. New `providers/send_base.py::EmailSendProvider` Protocol (frozen shape: `name`, `supports_message_id_lookup`, `connected_account_identifier()`, `send()`, `find_sent_message()`) with `DemoEmailSendProvider` implementing ONLY the identity method (`demo-sender@groundwork.invalid`, zero network); `send()`/`find_sent_message()` raise `NotImplementedError` — V2-H/V2-I scope, never called here. `GmailConnectionRepository.connected_account_identifier()` returns `normalize_email_identity(google_account_email)` for the real connection — an identifier, never a credential; `None` before first connect and again after disconnect. Four operator-gated routes under `/api/gmail` (`GET connection`, `POST connect`, `GET callback`, `DELETE connection` — disconnect always deletes the local row regardless of whether Google's revoke call succeeds). `GET /api/settings/providers` additively exposes a `gmail` block, fully populated only for an operator. New `/settings` page (four states: non-operator / operator+not-configured / operator+not-connected / operator+connected) plus a `Settings` nav link; a presentational `GmailSettingsPanel` component carries the render logic, tested via `renderToStaticMarkup`. **Hard gate (§3.3) recorded as PENDING** — the real-account half was not run by this session (never to be run automatically); `scripts/gmail_scope_probe.py` + `make gmail-scope-probe` exist for the user to run manually. Canonical Demo byte-identical (verified via `make demo`: PASS 2/NEEDS_REVIEW 2/REJECTED 1/DUPLICATE 1/FAILED 1, Northwind 92/Sable 79/Riverbend 35/Ferrous 58, `demo_pack.yaml` untouched). Zero real Google/OpenAI/Tavily/Apollo/Hunter calls anywhere in this session. See "What V2-G added" below. |
+| **V2-G — Gmail OAuth (connection only, no sending)** | *this commit* (branch `claude/v2-g-gmail-oauth`) | Operator-owned, encrypted, revocable Gmail connection — sends nothing. No migration: `gmail_connections`/`oauth_states` already existed from V2-B, untouched. Exact scope set `gmail.send` + `gmail.metadata` only (no `readonly`/`openid`/`email`/`profile`, never Google's userinfo endpoint). New pure `api/gmail_state_binding.py` binds OAuth `state` to the exact initiating operator-session cookie value via `HMAC-SHA256(SESSION_SIGNING_KEY, STATE_BINDING_VERSION|state_id|cookie_value)` — only `state_id`/`pkce_verifier`/timestamps persist, never the binding tag or the cookie itself; verification tries current then `SESSION_SIGNING_KEY_OLD`, mirroring `operator_auth.verify_session_cookie`'s own rotation order (no change to `operator_auth.py` itself). Callback implements the exact security-critical order: parse state (malformed→400, no DB touch) → require+verify operator session (missing/invalid→401, no DB touch) → verify state/session binding (mismatch→403, state NOT consumed, callback-failure limiter incremented) → consume `state_id` via ONE guarded `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now` (`rowcount != 1`→409) → only now inspect Google's `error` param (an allow-listed `access_denied` passes through, everything else sanitizes to `unknown`, never the raw Google error text) → exchange code (PKCE S256) → `users.getProfile` for `emailAddress` (missing→fail closed, no persistence) → Fernet-encrypt the refresh token (new `token_crypto.py`, `TOKEN_ENCRYPTION_KEY`/`_OLD` mirroring `SESSION_SIGNING_KEY`'s rotation) → persist → redirect `/settings?gmail=connected`. New `providers/live/google_oauth_runtime.py::GoogleOAuthRuntime` — deployment-scoped (never in `ProviderBundle`), process-scoped `httpx.AsyncClient`, one flat transport-retry loop bounded at 1, never retries a definitive 4xx. New `providers/send_base.py::EmailSendProvider` Protocol (frozen shape: `name`, `supports_message_id_lookup`, `connected_account_identifier()`, `send()`, `find_sent_message()`) with `DemoEmailSendProvider` implementing ONLY the identity method (`demo-sender@groundwork.invalid`, zero network); `send()`/`find_sent_message()` raise `NotImplementedError` — V2-H/V2-I scope, never called here. `GmailConnectionRepository.connected_account_identifier()` returns `normalize_email_identity(google_account_email)` for the real connection — an identifier, never a credential; `None` before first connect and again after disconnect. Four operator-gated routes under `/api/gmail` (`GET connection`, `POST connect`, `GET callback`, `DELETE connection` — disconnect always deletes the local row regardless of whether Google's revoke call succeeds). `GET /api/settings/providers` additively exposes a `gmail` block, fully populated only for an operator. New `/settings` page (four states: non-operator / operator+not-configured / operator+not-connected / operator+connected) plus a `Settings` nav link; a presentational `GmailSettingsPanel` component carries the render logic, tested via `renderToStaticMarkup`. **Hard gate (§3.3): SATISFIED / VERIFIED** — the real-account half was run by the user themselves, manually, against their own real consented Gmail test account (never by an automated session); all three findings (`users.getProfile`, `messages.list(labelIds=["SENT"])`, `messages.get(format="metadata", metadataHeaders=[...])`) came back PERMITTED under `gmail.metadata` alone — see "Current checkpoint" above for the exact reported observations. `scripts/gmail_scope_probe.py` + `make gmail-scope-probe` remain manual-only, never run automatically. A real frontend hydration bug in `/settings` (found during the user's own manual OAuth validation) was fixed in a follow-up commit (`f297142`) and manually revalidated — see "Current checkpoint" above. Canonical Demo byte-identical (verified via `make demo`: PASS 2/NEEDS_REVIEW 2/REJECTED 1/DUPLICATE 1/FAILED 1, Northwind 92/Sable 79/Riverbend 35/Ferrous 58, `demo_pack.yaml` untouched). Zero real Google/OpenAI/Tavily/Apollo/Hunter calls anywhere in this session. See "What V2-G added" below. |
 
 ---
 
@@ -61,16 +61,32 @@ change; `apps/api/groundwork/api/operator_auth.py` was not modified (its `SameSi
 load-bearing for the OAuth callback's cross-site top-level GET — recorded in `docs/RUNBOOK.md`, not
 worked around); the canonical Demo fixture pack and its byte-identical distribution are unchanged.
 
-**Hard gate is PENDING, not satisfied — recorded honestly, not inferred from documentation.** Per the
-task's explicit instruction, this session did NOT run `scripts/gmail_scope_probe.py` against a real
-consented Gmail account (the script exists, is manual-only, requires
-`--i-understand-this-reads-a-real-mailbox`, is never invoked by `make test`/CI, and was not run
-automatically or by this session). Until the user personally runs
-`make gmail-scope-probe` against an account already connected through the real UI and reports the three
-independent findings (whether `users.getProfile`, `messages.list(labelIds=["SENT"])`, and
-`messages.get(format="metadata", metadataHeaders=[...])` are each permitted under `gmail.metadata` alone),
-§3.3's bounded-reconciliation design for V2-I remains an assumption from Google's public documentation,
-not a verified fact about this specific scope grant.
+**Hard gate: SATISFIED / VERIFIED — the user has personally run the real-account probe.** Per the
+task's explicit instruction, no automated session ever ran `scripts/gmail_scope_probe.py` itself
+(the script exists, is manual-only, requires `--i-understand-this-reads-a-real-mailbox`, and is never
+invoked by `make test`/CI). The user ran `make gmail-scope-probe` themselves, manually, against their own
+real, consented Gmail test account, and reported the three findings back verbatim. Recorded here exactly
+as reported — no email was sent, and this session did not itself make any provider/network call to
+produce or verify these results:
+
+| # | Call | Under `gmail.metadata` alone | Result |
+|---|---|---|---|
+| 1 | `users.getProfile` | permitted | `HTTP 200`; `emailAddress` present: `True` |
+| 2 | `messages.list(userId="me", labelIds=["SENT"])` (no `q` parameter) | permitted | `HTTP 200`; `messages returned: 1` |
+| 3 | `messages.get(format="metadata", metadataHeaders=["Message-ID","Date"])` | permitted | `HTTP 200`; header NAMES present: `["Date", "Message-ID"]` |
+
+**What this does and does not establish, stated precisely — no inference beyond the three observations
+above:** all three calls the §3.3 bounded-reconciliation design depends on are confirmed permitted under
+`gmail.metadata` alone against one real, consented account — the `gmail.readonly` escalation §Part 9/§3.3
+worried might be necessary is NOT needed for V2-I's reconciliation loop, as far as this one account/one
+message shows. This is one account, one SENT message, one point in time — it does not by itself prove
+every edge case of §3.3's bounded scan (pagination past one page, an empty SENT label, a message whose
+`Message-ID` header is absent) will behave identically; those remain V2-I's own implementation-time
+concerns, to be handled by the bounded/defensive design §3.3 already specifies, not re-litigated here.
+**No PII from the probe was recorded anywhere in this repository**: the connected account's email
+address was never printed by the probe (only `emailAddress present: True/False`) and is not written
+here; no message id, no `Message-ID`/`Date` header VALUE (only the two header NAMES, which are
+structurally necessary to report and carry no personal content) is recorded anywhere in this codebase.
 
 **Carried-forward BLOCKING `claimed_email` suppression requirement — still unresolved, restated again.**
 Hunter `451`/`claimed_email` does not retroactively suppress a prior successful email observation in
@@ -83,6 +99,30 @@ left in Testing status may issue refresh tokens with a limited lifetime (Google'
 names 7 days). Not a V2-G blocker (nothing sends yet); it is a V2-I operational precondition — see
 `docs/RUNBOOK.md`'s new "Google OAuth client 'Testing' publishing status" note. No scope was silently
 broadened and no client-side refresh workaround was invented to route around this.
+
+**A real frontend hydration bug was found and fixed during the user's own manual OAuth connection
+validation, after the checkpoint above had already been implemented and tested.** `app/settings/page.tsx`
+originally computed the post-OAuth-redirect result banner (`?gmail=connected` / `?gmail=error&reason=...`)
+inside a `useState` lazy initializer that read `window.location` — on the server (`window` undefined) this
+produced `null`; on the client's first render (`window` defined) it produced the real banner, so the
+server-rendered and client-hydrated trees diverged and React reported "Hydration failed because the
+server rendered HTML didn't match the client." **Fix (commit `f297142`):** `page.tsx` is now a thin
+`async` Server Component that reads Next's own `searchParams` prop and derives the initial banner via a
+new pure function, `lib/gmailBanner.ts::deriveGmailBanner` (validates `gmail` against
+`{connected, error}` and `reason` against the same finite allow-list the backend already sanitizes to —
+never reflects arbitrary query text); the interactive state moved to a new client component,
+`app/settings/SettingsClient.tsx`, which receives that banner as a prop and initializes its own state
+directly from it, with no re-derivation from a browser global on the render path. Query-string cleanup
+still happens, but only in a `useEffect` after hydration, and never feeds back into the rendered banner.
+`components/GmailSettingsPanel.tsx` was not touched — it already only ever rendered the `banner` prop it
+was given; the bug was entirely in how that prop's initial value was computed upstream. 13 new frontend
+tests (`lib/gmailBanner.test.ts`, `app/settings/page.test.tsx`) cover the connected/sanitized-error/no-
+banner/unrecognized-value cases and run under vitest's `environment: "node"` (no `window`/`document` at
+all), so a regression that reintroduced a browser-global read on the render path would fail immediately
+with a `ReferenceError` rather than a silent hydration warning. **The user manually revalidated this fix
+after pulling/restarting**: `/settings` renders correctly, the connected Gmail state remains intact, and
+no hydration warning is emitted. This fix touched frontend rendering only — no OAuth/backend/security
+behavior, no change to the Gmail connection record, no same-origin-proxy change, no Demo fixture change.
 
 Full detail, exact test counts, and file-by-file changes: "What V2-G added" below.
 
@@ -4496,6 +4536,34 @@ yaml` is empty. `git diff --stat` against every protected path named in the task
 real Google/OpenAI/Tavily/Apollo/Hunter calls were made anywhere in this session's implementation or
 tests.
 
+**Post-implementation close-out — hard gate SATISFIED, hydration fix, real probe results.** Two follow-up
+sessions closed out V2-G after the implementation above:
+
+1. **Hydration fix (commit `f297142`).** During the user's own manual OAuth connection validation,
+   React reported "Hydration failed because the server rendered HTML didn't match the client" on
+   `/settings`. Root cause and fix are recorded in full under "Current checkpoint" above (`app/settings/
+   page.tsx` computed the result banner from `window.location` inside a `useState` lazy initializer,
+   which differs between server and client renders; fixed by deriving it server-side from Next's own
+   `searchParams` prop via a new pure `lib/gmailBanner.ts::deriveGmailBanner`, passed as a prop into a new
+   `app/settings/SettingsClient.tsx`). 13 new frontend tests added (`lib/gmailBanner.test.ts`,
+   `app/settings/page.test.tsx`); `components/GmailSettingsPanel.tsx` untouched. **Frontend after this
+   fix: 91 passed** (78 + 13) across 8 files; `pnpm lint`/`typecheck`/`build` clean. The user manually
+   revalidated after pulling/restarting: `/settings` renders correctly, the connected Gmail state remains
+   intact, and no hydration warning is emitted.
+2. **Real Gmail scope probe — hard gate now SATISFIED / VERIFIED.** The user ran `make gmail-scope-probe`
+   themselves, manually, against their own real, consented Gmail test account — never by an automated
+   session, exactly as this checkpoint's own instructions require. All three findings came back PERMITTED
+   under `gmail.metadata` alone; the exact reported observations are recorded verbatim under "Current
+   checkpoint" above (a table: `users.getProfile` → `HTTP 200`, `emailAddress present: True`;
+   `messages.list(labelIds=["SENT"])`, no `q` param → `HTTP 200`, `messages returned: 1`;
+   `messages.get(format="metadata", metadataHeaders=["Message-ID","Date"])` → `HTTP 200`, header NAMES
+   present `["Date","Message-ID"]`). No email was sent by the probe. **No PII from the probe is recorded
+   anywhere in this repository** — not the connected account's email address (the probe never prints it,
+   only a boolean presence check), not any message id, not any header VALUE (only the two header names,
+   which are structurally necessary to report and carry no personal content themselves). This close-out
+   pass itself made zero provider/network calls — it only updated documentation and re-ran the existing
+   test suites.
+
 **Known deviations/judgment calls, recorded rather than silently made:**
 - The task brief names `connected_account_identifier()` as part of the `EmailSendProvider` Protocol
   (satisfied by `DemoEmailSendProvider` for the demo identity) but also separately describes it for the
@@ -4524,10 +4592,14 @@ connection only) is now COMPLETE — see "Current checkpoint"/"What V2-G added" 
 begin any V2-H work in the same session unless the user explicitly authorizes rolling into the next
 checkpoint.
 
-**Before the real Gmail scope probe is run by the user, `docs/PROGRESS.md` must keep saying the
-real-account half of the §3.3 hard gate is PENDING** — do not claim it satisfied from documentation alone,
-and do not run `scripts/gmail_scope_probe.py`/`make gmail-scope-probe` automatically in any future
-session either; it requires the user's own consented test Gmail account and explicit confirmation flag.
+**The §3.3 hard gate is now SATISFIED / VERIFIED** — the user personally ran `make gmail-scope-probe`
+against their own real, consented Gmail test account and all three findings (`users.getProfile`,
+`messages.list(labelIds=["SENT"])`, `messages.get(format="metadata", metadataHeaders=[...])`) came back
+PERMITTED under `gmail.metadata` alone; see "Current checkpoint"/"What V2-G added" above for the exact
+observations. `scripts/gmail_scope_probe.py`/`make gmail-scope-probe` remain manual-only and must never
+be run automatically by any future session regardless — this status came from the user's own hands, not
+from documentation or inference, and any *future* re-verification (e.g. after a scope change) must be
+run the same way.
 
 **Before V2-G/V2-F reaches V2-H/V2-I, the BLOCKING `claimed_email` suppression
 requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
@@ -4925,5 +4997,14 @@ anywhere in this session's implementation or tests.
   `connected_at` ONLY when `is_operator` is true — a non-operator must always see the empty default, never
   a partial reveal keyed on `configured` or `connected` alone. `scripts/gmail_scope_probe.py` must never
   be run automatically by anything (`make test`, CI, a future session's own initiative) — it is manual,
-  operator-account-reading, explicit-confirmation-gated, and its absence of a completed run is exactly
-  what keeps the §3.3 hard gate honestly `PENDING` rather than falsely claimed.
+  operator-account-reading, explicit-confirmation-gated, EVEN NOW THAT THE HARD GATE IS SATISFIED: the
+  gate's SATISFIED status is a fact recorded from one specific real run the user performed by hand, not a
+  standing permission for any future session to re-run it on its own initiative. `app/settings/page.tsx`
+  must stay a Server Component that derives the initial Gmail banner from its own `searchParams` prop via
+  `lib/gmailBanner.ts::deriveGmailBanner` — moving that computation back into a client-side `useEffect`/
+  lazy `useState` initializer that reads `window.location` would reintroduce the exact hydration mismatch
+  fixed in commit `f297142` (server `window` undefined vs. client `window` defined, producing two
+  different initial trees). `deriveGmailBanner` must keep validating `reason` against its own finite
+  allow-list rather than ever reflecting the raw query string — that allow-list is intentionally
+  independent of (though currently identical to) the backend's own `_ALLOWED_GOOGLE_ERROR_REASONS`, so a
+  future change to either one is a deliberate, visible diff rather than a silent divergence.
