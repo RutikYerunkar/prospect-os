@@ -42,7 +42,14 @@ async def call_enrichment(ctx: ProspectContext, query: PersonEnrichmentQuery) ->
     try:
         result = await provider.enrich_person(query, ctx_key=ctx_key)
     except EnrichmentProviderError as exc:
-        await ctx.enrichment_calls.record_failure(call_group_id=call_group_id, telemetry=exc.telemetry)
+        # v2 §V2-F — the authoritative post-last-known-good states, even on
+        # failure (e.g. `PROVIDER_ERROR`), flow onto `ctx.contact_channels`
+        # so `domain/review.py::run_checks` sees the real state rather than
+        # nothing at all. Retried by `Step` (ENRICHMENT_STEP_RETRYABLE); each
+        # attempt simply overwrites this with its own latest result.
+        ctx.contact_channels = await ctx.enrichment_calls.record_failure(
+            call_group_id=call_group_id, telemetry=exc.telemetry
+        )
         logger.warning(
             "enrichment call failed step=contact_enrichment attempts=%d",
             len(exc.telemetry),
@@ -53,7 +60,7 @@ async def call_enrichment(ctx: ProspectContext, query: PersonEnrichmentQuery) ->
         )
         raise
 
-    await ctx.enrichment_calls.record_success(
+    ctx.contact_channels = await ctx.enrichment_calls.record_success(
         call_group_id=call_group_id,
         telemetry=result.telemetry,
         result=result,

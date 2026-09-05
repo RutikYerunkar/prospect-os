@@ -16,6 +16,7 @@ from groundwork.domain.contact_identity import (
     combine_identity,
     derive_email_channel,
     email_discovery_state_after_failed_call,
+    linkedin_identifier_key,
     linkedin_resolution_state_after_failed_call,
     match_company,
     match_person,
@@ -262,3 +263,44 @@ class TestProviderErrorVsNotFound:
 )
 def test_full_combination_matrix(person, company, expected):
     assert combine_identity(person, company) is expected
+
+
+class TestLinkedInIdentifierKey:
+    """v2 §V2-F — canonical comparison key used by `domain/review.py`'s
+    rewritten `no_fabricated_contact` clause 3. Reuses the LIVE_PROVIDER
+    grammar `validate_linkedin_identifier` already enforces — never a fresh
+    ad-hoc parse."""
+
+    def test_accepted_url_returns_a_key(self):
+        key = linkedin_identifier_key("https://www.linkedin.com/in/jane-doe")
+        assert key is not None
+
+    def test_www_and_bare_host_produce_the_same_key(self):
+        assert linkedin_identifier_key("https://www.linkedin.com/in/jane-doe") == linkedin_identifier_key(
+            "https://linkedin.com/in/jane-doe"
+        )
+
+    def test_case_insensitive(self):
+        assert linkedin_identifier_key("https://www.linkedin.com/in/Jane-Doe") == linkedin_identifier_key(
+            "https://www.linkedin.com/IN/jane-doe".replace("IN", "in")
+        )
+        assert linkedin_identifier_key("https://WWW.LINKEDIN.COM/in/jane-doe") == linkedin_identifier_key(
+            "https://www.linkedin.com/in/jane-doe"
+        )
+
+    def test_trailing_slash_does_not_change_the_key(self):
+        assert linkedin_identifier_key("https://www.linkedin.com/in/jane-doe/") == linkedin_identifier_key(
+            "https://www.linkedin.com/in/jane-doe"
+        )
+
+    def test_different_profile_produces_a_different_key(self):
+        assert linkedin_identifier_key("https://www.linkedin.com/in/jane-doe") != linkedin_identifier_key(
+            "https://www.linkedin.com/in/john-smith"
+        )
+
+    def test_demo_identifier_returns_none(self):
+        assert linkedin_identifier_key("demo://linkedin/jane-doe") is None
+
+    def test_malformed_url_returns_none(self):
+        assert linkedin_identifier_key("https://not-linkedin.com/in/jane-doe") is None
+        assert linkedin_identifier_key("http://www.linkedin.com/in/jane-doe") is None

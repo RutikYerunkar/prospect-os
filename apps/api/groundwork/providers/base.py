@@ -116,6 +116,10 @@ class LLMOperation(StrEnum):
     RESEARCH_EXTRACTION = "research_extraction"
     SCORE_EXPLANATION = "score_explanation"
     PERSONALIZATION = "personalization"
+    # v2 §V2-F — a SEPARATE operation from PERSONALIZATION: LinkedIn drafting
+    # is its own LLM call with its own prompt/output schema and ctx_key
+    # (`personalize:linkedin`). The email branch above is untouched by this.
+    LINKEDIN_PERSONALIZATION = "linkedin_personalization"
     OBJECTIVE_PARSE = "objective_parse"
     # H2 Stage B: bounded search-result excerpts -> candidate company names.
     # Run-scoped (no prospect exists yet) — see `engine/discovery.py`.

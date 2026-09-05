@@ -25,7 +25,12 @@ async def test_demo_run_persists_one_llm_calls_row_per_logical_call(client, monk
     assert usage["provider_attempts"] > 0
     assert usage["logical_calls"] > 0
     assert usage["by_status"] == {"OK": usage["provider_attempts"]}  # every demo attempt is INITIAL/OK
-    assert set(usage["by_operation"].keys()) <= {"research_extraction", "score_explanation", "personalization"}
+    # v2 §V2-F: `linkedin_personalization` is a new, additive operation —
+    # RESOLVED LinkedIn prospects (Northwind, Sable) now also draft a
+    # LinkedIn message via a separate LLM call.
+    assert set(usage["by_operation"].keys()) <= {
+        "research_extraction", "score_explanation", "personalization", "linkedin_personalization",
+    }
     # No pricing is configured for Demo Mode's provider — cost stays null,
     # never a fabricated dollar figure.
     assert usage["estimated_cost_usd"] is None
