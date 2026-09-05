@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from groundwork.api.deps import EnrichmentRuntimeDep, IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep
+from groundwork.api.deps import EnrichmentRuntimeDep, GmailRepoDep, IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep
 from groundwork.api.operator_auth import operator_login_configured
-from groundwork.api.schemas import LiveAvailability, ProviderInfo, ProviderSettingsResponse
+from groundwork.api.schemas import GmailAvailability, LiveAvailability, ProviderInfo, ProviderSettingsResponse
 from groundwork.config import settings
 from groundwork.domain.query_plan import QUERY_PLAN_VERSION
+from groundwork.providers.live.google_oauth_runtime import google_oauth_configured
 from groundwork.providers.profile import prompt_versions, search_hard_bounds
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -17,6 +18,7 @@ async def get_provider_settings(
     live_runtime: LiveRuntimeDep,
     search_runtime: LiveSearchRuntimeDep,
     enrichment_runtime: EnrichmentRuntimeDep,
+    gmail_repo: GmailRepoDep,
     is_operator: IsOperatorDep,
 ) -> ProviderSettingsResponse:
     # Never returns key values (§21) — only whether a live-mode key is present.
@@ -78,7 +80,23 @@ async def get_provider_settings(
         operator_login_configured=operator_login_configured(),
         is_operator=is_operator,
     )
+
+    # V2-G: `google_account_email`/`scopes`/`connected_at` are the connected
+    # account's own identity — only ever populated for an operator, exactly
+    # like the operator-only fields already established on `live` above.
+    # Non-operators (and Demo) always see the empty default, never a
+    # partial reveal.
+    gmail = GmailAvailability()
+    if is_operator:
+        gmail.configured = google_oauth_configured()
+        connection = await gmail_repo.get_connection()
+        if connection is not None and connection.google_account_email:
+            gmail.connected = True
+            gmail.google_account_email = connection.google_account_email
+            gmail.scopes = connection.scopes
+            gmail.connected_at = connection.connected_at
+
     return ProviderSettingsResponse(
-        mode=settings.mode, llm=llm, search=search, enrichment=enrichment, live=live,
+        mode=settings.mode, llm=llm, search=search, enrichment=enrichment, live=live, gmail=gmail,
         max_concurrent_prospects=settings.max_concurrent_prospects,
     )

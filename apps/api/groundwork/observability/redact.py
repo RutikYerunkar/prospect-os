@@ -31,6 +31,14 @@ def _configured_secrets() -> list[str]:
         secrets.append(settings.apollo_api_key)
     if settings.hunter_api_key:
         secrets.append(settings.hunter_api_key)
+    # V2-G: Gmail OAuth confidential-client secret and both token-encryption
+    # keys (current + old) — mirrors the rest of this choke point exactly.
+    if settings.google_client_secret:
+        secrets.append(settings.google_client_secret)
+    if settings.token_encryption_key:
+        secrets.append(settings.token_encryption_key)
+    if settings.token_encryption_key_old:
+        secrets.append(settings.token_encryption_key_old)
     return [s for s in secrets if s]
 
 

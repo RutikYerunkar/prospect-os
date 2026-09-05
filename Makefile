@@ -1,4 +1,4 @@
-.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke enrichment-smoke hunter-smoke db-upgrade db-downgrade db-current db-history docker-build prod-smoke
+.PHONY: dev api web test seed demo-reset demo live-smoke search-spike search-smoke enrichment-smoke hunter-smoke gmail-scope-probe db-upgrade db-downgrade db-current db-history docker-build prod-smoke
 
 # Runs the API (:8000) and the web app (:3000) together. Ctrl-C stops both.
 dev:
@@ -59,6 +59,14 @@ enrichment-smoke:
 #   make hunter-smoke PERSON="Jane Doe:example.com:VP of Sales"
 hunter-smoke:
 	cd apps/api && uv run python -m groundwork.scripts.hunter_smoke --i-understand-this-costs-money --person "$(PERSON)"
+
+# V2-G hard gate: manual, READ-ONLY probe of whether gmail.metadata actually
+# permits the bounded SENT-reconciliation reads §3.3 depends on. Requires a
+# Gmail account already connected via the real API, and explicit
+# confirmation — see scripts/gmail_scope_probe.py. Never run automatically
+# by `make test`/CI. Zero send/write calls of any kind.
+gmail-scope-probe:
+	cd apps/api && uv run python -m groundwork.scripts.gmail_scope_probe --i-understand-this-reads-a-real-mailbox
 
 # Alembic migrations (Checkpoint I1 Phase 5) — explicit schema management
 # against whatever DATABASE_URL is currently set. SQLite local dev normally

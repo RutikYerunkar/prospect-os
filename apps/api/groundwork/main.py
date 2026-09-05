@@ -14,7 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from groundwork.api import run_service
 from groundwork.api.errors import register_error_handlers
 from groundwork.api.middleware import MaxBodySizeMiddleware, RequestIdMiddleware
-from groundwork.api.routers import evaluation, operator, plays, prospects, runs, settings as settings_router
+from groundwork.api.routers import evaluation, gmail, operator, plays, prospects, runs, settings as settings_router
 from groundwork.config import settings
 from groundwork.db import SessionLocal, create_all_if_sqlite, engine, schema_upgrade_problems
 from groundwork.logging_config import configure_logging
@@ -137,6 +137,18 @@ async def lifespan(app: FastAPI):
 
         app.state.enrichment_runtime = HunterRuntime.create(settings)
 
+    # V2-G: process-scoped Google OAuth runtime — DEPLOYMENT-scoped, not
+    # run-scoped (never part of a `ProviderBundle`; see `providers/live/
+    # google_oauth_runtime.py`'s module docstring). Only constructed when
+    # Google OAuth is fully configured — a deployment with no Google
+    # client id/secret/redirect_uri runs with Gmail connect/disconnect
+    # cleanly unavailable (`422`), never a half-configured runtime.
+    app.state.google_oauth_runtime = None
+    if settings.google_client_id and settings.google_client_secret and settings.google_oauth_redirect_uri:
+        from groundwork.providers.live.google_oauth_runtime import GoogleOAuthRuntime
+
+        app.state.google_oauth_runtime = GoogleOAuthRuntime.create(settings)
+
     yield
 
     # --- Shutdown (Checkpoint I1 Phase 4) ---
@@ -179,6 +191,8 @@ async def lifespan(app: FastAPI):
         await app.state.live_search_runtime.close()
     if app.state.enrichment_runtime is not None:
         await app.state.enrichment_runtime.close()
+    if app.state.google_oauth_runtime is not None:
+        await app.state.google_oauth_runtime.close()
     await engine.dispose()
 
     logger.info("groundwork api shutdown complete", extra={"executor_id": app.state.executor_id})
@@ -209,6 +223,7 @@ app.include_router(evaluation.router)
 app.include_router(prospects.router)
 app.include_router(settings_router.router)
 app.include_router(operator.router)
+app.include_router(gmail.router)
 
 
 @app.get("/api/health")

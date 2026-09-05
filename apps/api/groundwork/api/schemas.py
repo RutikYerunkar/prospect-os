@@ -212,6 +212,20 @@ class LiveAvailability(BaseModel):
     soft_budget_enforceable: bool
 
 
+class GmailAvailability(BaseModel):
+    """V2-G: additive on `ProviderSettingsResponse`. `configured` and
+    `connected` are safe for anyone to see; `google_account_email`/`scopes`/
+    `connected_at` are the connected account's own identity, so
+    `routers/settings.py` only ever populates them for an operator —
+    identically `False`/empty/`None` otherwise, never a partial reveal."""
+
+    configured: bool = False
+    connected: bool = False
+    google_account_email: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    connected_at: datetime | None = None
+
+
 class ProviderSettingsResponse(BaseModel):
     mode: str
     llm: ProviderInfo
@@ -221,7 +235,34 @@ class ProviderSettingsResponse(BaseModel):
     # the key, only whether one is present when a live provider is selected.
     enrichment: ProviderInfo
     live: LiveAvailability
+    # V2-G: additive — see `GmailAvailability` above.
+    gmail: GmailAvailability = Field(default_factory=GmailAvailability)
     # Checkpoint I1 Phase 9: sourced from the API rather than a duplicated
     # frontend constant — see apps/web/lib/constants.ts's old
     # MAX_CONCURRENT_PROSPECTS.
     max_concurrent_prospects: int
+
+
+class GmailConnectionResponse(BaseModel):
+    """`GET /api/gmail/connection` (V2-G, operator-only). Never the token/
+    ciphertext/key/PKCE-verifier — only safe metadata."""
+
+    connected: bool
+    google_account_email: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    connected_at: datetime | None = None
+    connected_by_actor: str | None = None
+    last_refreshed_at: datetime | None = None
+
+
+class GmailConnectResponse(BaseModel):
+    """`POST /api/gmail/connect` — never a server-side redirect (§Backend
+    routes); the frontend performs `window.location.assign(authorization_url)`
+    itself."""
+
+    authorization_url: str
+
+
+class GmailDisconnectResponse(BaseModel):
+    status: str
+    deleted: bool
