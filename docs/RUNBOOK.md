@@ -100,6 +100,34 @@ limit; the effective limit across the fleet is `N × configured limit`, not the 
 is a known, documented gap, not a bug to chase — closing it means moving that state somewhere shared,
 which is I2 scope.
 
+## Rotating `TOKEN_ENCRYPTION_KEY` (V2-G — Gmail refresh token at rest)
+
+1. Move the current `TOKEN_ENCRYPTION_KEY` value into `TOKEN_ENCRYPTION_KEY_OLD`.
+2. Set `TOKEN_ENCRYPTION_KEY` to a new Fernet key:
+   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+3. Deploy. The one `gmail_connections` row's already-encrypted refresh token still decrypts (current
+   key tried first, then `TOKEN_ENCRYPTION_KEY_OLD` — mirrors `SESSION_SIGNING_KEY`'s rotation exactly,
+   see above); any *new* connect always encrypts with the new current key.
+4. `TOKEN_ENCRYPTION_KEY_OLD` can be cleared once the operator has reconnected Gmail at least once
+   since the rotation (a fresh connect re-encrypts under the new key) — there is no TTL to wait out
+   here, unlike session cookies, since there's only ever one connection row.
+
+**Load-bearing dependency, recorded rather than silently relied on:** the OAuth callback (`GET
+/api/gmail/callback`) is a cross-site top-level GET — Google redirects the browser back to this app's
+own origin, and the operator session cookie must still be sent on that request for the state/session
+binding check (§ CLAUDE.md's v2 invariants) to succeed. This only works because the operator cookie is
+`SameSite=Lax` (`api/operator_auth.py`, unchanged by V2-G) — `SameSite=Lax` allows a cookie on a
+top-level cross-site navigation; `SameSite=Strict` would not, and would break every real Gmail connect
+attempt. Do not tighten the operator cookie to `SameSite=Strict` without redesigning this flow.
+
+**Google OAuth client "Testing" publishing status.** A Google OAuth client left in Testing status may
+issue refresh tokens with a limited lifetime (Google's documented behavior names 7 days). This is not a
+V2-G blocker — no sending exists yet — but it is a V2-I (live Gmail execution) operational
+precondition: the connected refresh token could silently stop working after 7 days on a Testing-status
+client, which would surface as a live send failing with an auth error rather than anything V2-G's own
+connect/disconnect flow would catch. Move the OAuth consent screen to "In production" (or add the
+operator as a test user with awareness of the 7-day limit) before relying on a long-lived connection.
+
 ## Live Mode cost/abuse controls, at a glance
 
 - `LIVE_MAX_ACTIVE_RUNS` (default 1) and `LIVE_DAILY_RUN_ALLOWANCE` (default 10) are enforced against

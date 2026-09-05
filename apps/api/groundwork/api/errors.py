@@ -35,6 +35,15 @@ class ApiError(Exception):
         super().__init__(detail)
 
 
+class BadRequestError(ApiError):
+    """A request that's malformed before any business logic even runs —
+    e.g. an unparseable OAuth `state` parameter (V2-G). Never carries detail
+    derived from a secret or credential."""
+
+    status_code = 400
+    title = "Bad Request"
+
+
 class NotFoundError(ApiError):
     status_code = 404
     title = "Not Found"

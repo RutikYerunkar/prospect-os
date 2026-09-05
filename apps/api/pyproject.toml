@@ -18,6 +18,10 @@ dependencies = [
     "alembic>=1.19.1",
     "itsdangerous>=2.2.0",
     "idna>=3.7",
+    # V2-G: Fernet symmetric encryption for the Gmail refresh token at rest
+    # (`groundwork/token_crypto.py`) — same posture as `SESSION_SIGNING_KEY`,
+    # an env-held key rather than an external KMS (Part 11).
+    "cryptography>=43.0.0",
     # V2-D: `providers/live/tavily_search.py`/`search_runtime.py` already
     # used httpx directly in production code, reaching it only transitively
     # via `tavily-python`'s own dependency — `providers/live/

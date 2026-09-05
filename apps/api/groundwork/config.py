@@ -191,6 +191,40 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
 
+    # --- V2-G: Gmail OAuth (connection only, no sending) ---
+    # A server-side confidential OAuth client. All three required together —
+    # `google_oauth_configured()` (providers/live/google_oauth_runtime.py)
+    # checks the AND, mirroring `operator_login_configured()`'s "both or
+    # neither" discipline. Never logged, never returned by any endpoint.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    # `redirect_uri` is CONFIGURED, never derived from a request header
+    # (Host/Origin/X-Forwarded-Host) — the exact-match value Google's
+    # authorization request and token exchange both send. Production value
+    # is the frontend origin's own `/api/gmail/callback` path (the existing
+    # I2 same-origin Next.js proxy forwards it server-to-server to this
+    # API's real `GET /api/gmail/callback`).
+    google_oauth_redirect_uri: str | None = None
+    # Fernet key(s) encrypting `gmail_connections.encrypted_refresh_token`
+    # at rest — same rotation posture as `SESSION_SIGNING_KEY`/
+    # `SESSION_SIGNING_KEY_OLD` (RUNBOOK.md documents the rotation
+    # procedure): `_OLD` is accepted for decryption only, never for new
+    # writes. Missing key(s) fail closed (`groundwork/token_crypto.py`),
+    # never a silent plaintext fallback.
+    token_encryption_key: str | None = None
+    token_encryption_key_old: str | None = None
+    gmail_oauth_state_ttl_s: float = 600.0
+    gmail_oauth_call_deadline_s: float = 15.0
+    # Bounded at 1 (§ "Retries/concurrency/idempotency") — never retried on
+    # a definitive OAuth-code-exchange 4xx, only on a transport failure that
+    # never reached Google at all.
+    gmail_oauth_max_transport_retries: int = 1
+    # Per-client-IP sliding window on OAuth-callback failures (a state/
+    # session binding mismatch) — process-local, same posture as the
+    # operator-login limiter (`api/rate_limit.py`).
+    gmail_callback_failure_rate_limit_attempts: int = 10
+    gmail_callback_failure_rate_limit_window_s: float = 300.0
+
     # --- Live Mode cost/safety bounds (Checkpoint G §7) ---
     # Model selection is config-only — no application code branches on this
     # string. gpt-5.6-luna is the named lower-cost alternative profile.

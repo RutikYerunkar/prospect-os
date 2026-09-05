@@ -532,12 +532,39 @@ export interface LiveAvailability {
   is_operator: boolean;
 }
 
+// --- V2-G: Gmail OAuth (connection only, no sending) ---
+
+export interface GmailAvailability {
+  configured: boolean;
+  connected: boolean;
+  // Only ever populated for an operator (see `routers/settings.py`) — a
+  // non-operator always sees `false`/empty/`null` here, never a partial
+  // reveal of the connected account's identity.
+  google_account_email: string | null;
+  scopes: string[];
+  connected_at: string | null;
+}
+
 export interface ProviderSettingsResponse {
   mode: Mode;
   llm: ProviderInfo;
   search: ProviderInfo;
   live: LiveAvailability;
+  gmail: GmailAvailability;
   max_concurrent_prospects: number;
+}
+
+export interface GmailConnectionResponse {
+  connected: boolean;
+  google_account_email: string | null;
+  scopes: string[];
+  connected_at: string | null;
+  connected_by_actor: string | null;
+  last_refreshed_at: string | null;
+}
+
+export interface GmailConnectResponse {
+  authorization_url: string;
 }
 
 // --- operator session (Checkpoint I1 Phase 8) ---

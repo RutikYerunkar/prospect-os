@@ -1,4 +1,6 @@
 import type {
+  GmailConnectionResponse,
+  GmailConnectResponse,
   OperatorLoginRequest,
   PlayCreateRequest,
   PlayPreviewRequest,
@@ -177,4 +179,18 @@ export function loginOperator(body: OperatorLoginRequest): Promise<{ status: str
 
 export function logoutOperator(): Promise<{ status: string }> {
   return apiDelete<{ status: string }>("/api/operator/session");
+}
+
+// V2-G — Gmail OAuth (connection only, no sending). All three routes are
+// operator-gated server-side; the frontend never decides that on its own.
+export function getGmailConnection(): Promise<GmailConnectionResponse> {
+  return apiGet<GmailConnectionResponse>("/api/gmail/connection");
+}
+
+export function connectGmail(): Promise<GmailConnectResponse> {
+  return apiPost<GmailConnectResponse>("/api/gmail/connect", {});
+}
+
+export function disconnectGmail(): Promise<{ status: string; deleted: boolean }> {
+  return apiDelete<{ status: string; deleted: boolean }>("/api/gmail/connection");
 }

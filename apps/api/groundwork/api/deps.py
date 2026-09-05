@@ -18,6 +18,7 @@ from groundwork.api.operator_auth import COOKIE_NAME, verify_session_cookie
 from groundwork.db import SessionLocal
 from groundwork.engine.runner import Repos
 from groundwork.repositories.approvals import ApprovalRepository
+from groundwork.repositories.gmail_connection import GmailConnectionRepository
 from groundwork.repositories.plays import PlayRepository
 
 
@@ -77,6 +78,27 @@ def get_enrichment_runtime(request: Request):
 
 
 EnrichmentRuntimeDep = Annotated[object, Depends(get_enrichment_runtime)]
+
+
+def get_google_oauth_runtime(request: Request):
+    """The process-scoped `GoogleOAuthRuntime` created once in `main.py`'s
+    lifespan, or `None` if Google OAuth isn't configured (V2-G) — the
+    Gmail-side analogue of `get_live_runtime`, except this runtime is
+    deployment-scoped, not run-scoped (it's never part of a
+    `ProviderBundle`). Tests override this the same way they override
+    `get_live_runtime` — via `app.dependency_overrides` — to inject a
+    runtime backed by `httpx.MockTransport`."""
+    return getattr(request.app.state, "google_oauth_runtime", None)
+
+
+GoogleOAuthRuntimeDep = Annotated[object, Depends(get_google_oauth_runtime)]
+
+
+def get_gmail_repo(session_factory: SessionFactory) -> GmailConnectionRepository:
+    return GmailConnectionRepository(session_factory)
+
+
+GmailRepoDep = Annotated[GmailConnectionRepository, Depends(get_gmail_repo)]
 
 
 def get_operator_session(request: Request) -> bool:
