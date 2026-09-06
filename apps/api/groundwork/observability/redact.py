@@ -20,6 +20,29 @@ _MAX_LEN = 2000
 # request header dumped into a 401 body).
 _GENERIC_SECRET_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9._-]{10,})\b")
 
+# V2-H, Part 9: "never log a full recipient email, a full sender email" —
+# a LOGGING-only rule, distinct from persisting the identifier itself (the
+# DB legitimately needs the real address to send/dedupe against; this is
+# about structured log lines and any text that flows through `redact()`).
+# Local part is dropped entirely (not merely masked) — the domain alone is
+# enough for an operator to recognize a recurring recipient without any
+# part of a real mailbox name leaking into logs.
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
+
+
+def mask_email_for_log(address: str | None) -> str | None:
+    """Never returns the local part. Use this at every log call site that
+    would otherwise print a `sender_identifier`/`recipient_identifier` —
+    never as a substitute for `redact()` on persisted telemetry text (that
+    still goes through `redact()` below, which also masks any email shape
+    found inside free-form provider error text)."""
+    if address is None:
+        return None
+    match = _EMAIL_RE.search(address)
+    if match is None:
+        return "[REDACTED]"
+    return f"***@{match.group(1)}"
+
 
 def _configured_secrets() -> list[str]:
     secrets = []
@@ -53,6 +76,7 @@ def redact(text: str | None) -> str | None:
         if secret in redacted:
             redacted = redacted.replace(secret, "[REDACTED]")
     redacted = _GENERIC_SECRET_RE.sub("[REDACTED]", redacted)
+    redacted = _EMAIL_RE.sub(lambda m: f"***@{m.group(1)}", redacted)
     if len(redacted) > _MAX_LEN:
         redacted = redacted[:_MAX_LEN] + "...[truncated]"
     return redacted

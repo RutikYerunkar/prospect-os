@@ -4584,13 +4584,255 @@ PR was created this session, per the task's explicit instruction to stop before 
 
 ---
 
+## What V2-H added
+
+**Backend — new files:**
+- `groundwork/providers/send_registry.py` — `resolve_send_provider(mode)`: `Mode.DEMO` -> a fresh
+  `DemoEmailSendProvider`; `Mode.LIVE` -> unconditionally raises `LiveExternalEmailSendDisabled` (D1/D4,
+  below). Deliberately NOT a `ProviderBundle` field (D2) — see "Divergence 1" below.
+- `groundwork/repositories/actions.py` — `ActionRepository`: draft lookup/content-hash write-back,
+  idempotent `create_proposal` (UNIQUE(draft_id, content_hash), with prior-proposal `superseded_by`
+  bookkeeping), `recipient_conflict()` (§3.5B, LIVE_EXTERNAL-only), `insert_claimed_execution`/
+  `settle_execution_succeeded` (write-ahead CLAIMED-before-provider-call, §3.5A), `insert_send_call`,
+  `record_event`. Every proposal/execution write is re-validated through `models/schemas.py`'s
+  `ActionProposal`/`ActionExecution` Pydantic models before persistence — the same "scrubbed twice, not
+  once" discipline `ContactEnrichmentRepository` already established for the LinkedIn identifier grammar.
+- `groundwork/api/routers/actions.py` — `POST /api/actions/propose`, `POST .../proposals/{id}/{approve,
+  reject,execute}`, `GET .../proposals/{id}`, `GET /api/actions/prospects/{id}/proposals`. `execute_action`
+  implements the full §3.9 ordering: capability gate → approval exists → `hash_version` equality (409
+  `APPROVAL_SUPERSEDED`) → sender re-resolution (Sender Resolution Matrix) → **explicit sender-match gate**
+  (409 `SENDER_CHANGED`/`SENDER_NOT_CONNECTED` — added ahead of the hash check specifically so a sender
+  swap is never masked as a generic `CONTENT_CHANGED`, since the hash also covers the sender; see "Five
+  Live gates" below) → fresh content-hash recompute/compare (409 `CONTENT_CHANGED`) → fresh full
+  `action_policy.evaluate()` (409 with the first blocked reason, uppercased, as `code`) → request-
+  idempotency claim → dispatch (`LINKEDIN_COPY_AND_OPEN` never touches a send provider; `EMAIL_SEND`
+  dispatches via `resolve_send_provider(mode)`, which structurally refuses Live).
+- `groundwork/repositories/actions.py`/`api/routers/actions.py`'s new tests: `tests/action_helpers.py`
+  (shared play-to-completion/propose/approve/reject/execute helpers), and eight new mandatory test files —
+  `test_action_proposal_sender_binding.py`, `test_send_provider_mode_binding.py`,
+  `test_action_authorization.py`, `test_content_hash_invalidation.py`, `test_execution_origin_binding.py`,
+  `test_action_policy_integration.py`, `test_request_idempotency.py`, `test_recipient_send_policy.py`.
+
+**Backend — extended files:**
+- `providers/send_base.py` — `DemoEmailSendProvider.send()` implemented (was `NotImplementedError` in
+  V2-G): zero network, deterministic `demo://sent/<uuid5(idempotency_key)>` message id,
+  `SendOutcome.ACCEPTED`, `dispatched=True`. Added `LiveExternalEmailSendDisabled` — see D1 below.
+- `repositories/approvals.py` — **fixed the V2-H-introduced scope leak BEFORE any `ACTION`-scope row was
+  ever written** (task-mandated ordering): `latest_for_prospect`/`latest_for_prospects` now filter to
+  `scope == PROSPECT` explicitly. Added `create_action_approval`/`latest_for_proposal` for the new
+  `ACTION`-scope rows. Verified by `test_migration_drift.py`'s existing `ACTION`-scope tests plus new
+  regression coverage in the V2-H suite (§12 in the frozen test matrix).
+- `api/errors.py` — additive `code: str | None` field on `ApiError`/the problem-JSON body (e.g.
+  `CONTENT_CHANGED`, `APPROVAL_SUPERSEDED`, `LIVE_EXTERNAL_EMAIL_SEND_DISABLED`), plus a new
+  `ActionDisabledError` (403) for the D1/D4 structural refusal.
+- `api/live_gate.py` — new `enforce_action_gate(request, mode, is_operator)`: Demo requires only the
+  Origin check (D8's public path, no operator session ever); Live requires both operator + Origin,
+  matching `enforce_live_gate`. This is the one deliberate deviation from `enforce_live_gate`'s shape the
+  frozen Part 9 names explicitly.
+- `api/schemas.py` — `ActionProposeRequest` (`extra="forbid"`, no `origin` field — origin is always
+  derived server-side from run mode), `ActionApproveRequest`/`ActionRejectRequest`/`ActionExecuteRequest`,
+  `ActionProposalResponse`/`ActionApprovalInfo`/`ActionExecutionInfo`.
+- `api/deps.py` — `ActionsRepoDep`, mirroring `ApprovalsRepoDep`'s standalone (not `Repos`-bundled)
+  pattern.
+- `config.py` — `demo_max_actions_per_run` (default 10, §Part 9), `action_write_rate_limit_attempts`/
+  `_window_s` (mirrors `public_write_rate_limit_*`).
+- `observability/redact.py` — `mask_email_for_log()` (drops the local part entirely, e.g.
+  `***@northwindlabs.com`) plus an email-shape rule folded into `redact()` itself, so any free-form
+  telemetry/error text routed through the existing choke point is scrubbed the same way secrets already
+  are. Never applied to the identifier COLUMNS themselves (`action_proposals.recipient_identifier` etc.
+  legitimately need the real address to function) — only to logging/telemetry text.
+- `main.py` — `actions.router` included.
+- `tests/conftest.py` — new autouse fixture resetting `actions.py`'s and `plays.py`'s module-level
+  `_write_limiter` singletons between tests (see "Known issues/deviations" below for why this was needed).
+- `tests/test_redaction.py` — extended with `mask_email_for_log`/email-masking-in-`redact()` coverage.
+
+**Frontend — new files:** `components/ActionApprovalPanel.tsx` (propose/approve/reject/execute per draft;
+shows content hash, sending identity, policy/eligibility, approval state, execution state; a BLOCKED
+proposal shows its reasons with no override control anywhere — enforced server-side regardless; Demo
+LinkedIn "Copy" does a real `navigator.clipboard.writeText`, "Open" reveals an inline simulated-profile
+panel built from the prospect's own already-loaded `contact`/`company` fields, never an external
+navigation and never a `demo://` href), `components/OutreachTab.tsx` (the third run-page tab — lists
+every decidable prospect, lazily loads its full aggregate on expand, renders `ActionApprovalPanel`
+inline), `components/ActionApprovalPanel.test.tsx` (4 new tests, `renderToStaticMarkup`-based like
+`OutreachViewer.test.tsx`: empty state, propose-only state before a proposal exists, no `<a href>`
+anywhere even when a draft body contains a `demo://` string, both action types render their own label).
+
+**Frontend — extended files:** `lib/types.ts` (`ActionProposal`/`ActionApprovalInfo`/
+`ActionExecutionInfo`, additive), `lib/api.ts` (`proposeAction`/`approveAction`/`rejectAction`/
+`executeAction`/`listProspectActionProposals`), `app/runs/[id]/page.tsx` (third "Outreach" tab),
+`app/prospects/[id]/page.tsx` (an "Outreach Actions" panel hosting `ActionApprovalPanel`, alongside the
+existing read-only `OutreachViewer` panel — both kept; neither replaces the other).
+
+**D1 — CLAIMED_EMAIL blocker disposition (structural safety boundary, not the full suppression model).**
+V2-H does NOT implement `claimed_email` retroactive suppression (still an open, unresolved hard
+prerequisite, carried forward unchanged from V2-DH). Instead, `LiveExternalEmailSendDisabled`
+(`providers/send_base.py`) is a dedicated, typed refusal — stable `code = "LIVE_EXTERNAL_EMAIL_SEND_
+DISABLED"` — that `resolve_send_provider(Mode.LIVE)` raises **unconditionally**, independent of whether
+any provider is registered or any credential is configured. Its message names both (1) real Gmail sending
+is V2-I scope and (2) `claimed_email` suppression remains unresolved. This is deliberately NOT
+`ProviderNotConfigured`: registering a future `GmailSendProvider` in V2-I must never silently make Live
+sending executable — V2-I must remove/replace this refusal deliberately, and only after implementing
+`claimed_email` suppression semantics. Verified by `test_send_provider_mode_binding.py` (message content,
+stable code, never `ProviderNotConfigured`, unconditional across repeated calls) and by criterion 4B's
+live-server manual walkthrough (below).
+
+**D2 — send provider boundary.** `ProviderBundle` (`providers/base.py`) is untouched — still exactly
+`llm`/`search`/`enrichment`. `resolve_send_provider(mode)` is a separate module
+(`providers/send_registry.py`), called only at proposal creation (sender capture) and execute time
+(dispatch) — never part of pipeline provider wiring. `LINKEDIN_COPY_AND_OPEN` never calls it (asserted by
+`test_action_proposal_sender_binding.py`'s resolver-patched-to-raise regression). Documented as a
+deliberate divergence from the frozen Part 9 sketch in `docs/ARCHITECTURE.md`'s new "V2-H" subsection.
+
+**D3 — proposal creation.** `ActionProposal` rows are created ONLY via `POST /api/actions/propose`, naming
+an explicit `draft_id`. No engine/pipeline change (`engine/steps/*`, `engine/{context,step,pipeline,
+runner}.py` are all byte-identical to V2-G — verified by `git diff --stat` below), no 8th step, no
+proposal-only SSE event, no proposal creation from any GET. Idempotent on `UNIQUE(draft_id, content_hash)`
+— re-proposing an unchanged draft returns the same row (`created: false` in the response); a genuinely
+edited draft produces a new proposal and marks the prior one's `superseded_by`.
+
+**D4 — Live refusal is structural, reached deliberately, never inferred from policy.** `execute_action`
+performs ALL FIVE server-side gates (operator session, `ACTION`-scope `APPROVED` approval, sender match,
+content-hash match, fresh policy `ELIGIBLE`) — including a fully passing fresh policy evaluation — BEFORE
+ever calling `resolve_send_provider(Mode.LIVE)`. `domain/action_policy.py`'s clause 13
+(`send_provider_unavailable`) is deliberately never the reason Live blocks in V2-H: `send_provider_
+configured=True` is passed unconditionally for `EMAIL_SEND` in both modes (documented inline in
+`api/routers/actions.py::_evaluate_policy` and in `docs/ARCHITECTURE.md`), so a Live proposal reaches
+ELIGIBLE on its policy merits and the `LiveExternalEmailSendDisabled` boundary is what actually stops
+it — proven by `test_action_authorization.py::TestCriterion4BLiveStructuralRefusal` (fresh policy
+ELIGIBLE, five gates all pass, 403 `LIVE_EXTERNAL_EMAIL_SEND_DISABLED`, zero `action_executions` rows ever
+created) and re-verified against a real running `uvicorn` server (not just the pytest ASGI client) in this
+session's manual walkthrough.
+
+**Sender Resolution Matrix — verified exactly as specified.** `EMAIL_SEND` + `DEMO_SIMULATED`:
+`GmailConnectionRepository` is NEVER consulted, at proposal creation, approval, or execution — regression-
+tested by patching `connected_account_identifier` to raise `AssertionError` unconditionally and confirming
+Demo proposal creation still succeeds with `sender_identifier == "demo-sender@groundwork.invalid"`
+(`test_action_proposal_sender_binding.py`). `EMAIL_SEND` + `LIVE_EXTERNAL`: may read the connected Gmail
+identity at proposal creation; no connection degrades to `sender_not_connected` (never an exception —
+verified directly against a real, connection-free `gmail_connections` table). `LINKEDIN_COPY_AND_OPEN`:
+`sender_identifier` stays `None`; neither Gmail nor `resolve_send_provider` is ever called, verified by
+patching BOTH to raise and confirming an otherwise-eligible LinkedIn proposal still succeeds.
+
+**Five Live authorization gates — each independently verified to reject.** `test_action_authorization.py::
+TestFiveLiveGatesIndependently` violates exactly one gate at a time (no operator session -> 401; no
+approval -> 409 `NOT_APPROVED`; sender reconnected to a different account after approval -> 409
+`SENDER_CHANGED`; draft body edited after approval -> 409 `CONTENT_CHANGED`; review verdict regressed to
+`FAIL` after approval -> 409 `REVIEW_NOT_PASSED`) while leaving the other four intact. Setup technique: a
+real Demo run is executed to completion (genuine engine-produced review/contact_channels/drafts), then the
+run's `mode` column is flipped to `"live"` directly via the DB and a `gmail_connections` row is written
+through the real `GmailConnectionRepository` — "sufficient fabricated/test-only authorization state" per
+the task brief, since starting a genuine Live run needs real OpenAI/Tavily credentials this suite must
+never use. **Discovered and fixed during implementation:** the sender-match gate was originally folded
+only into the final policy evaluation, which meant a real sender swap (which also changes the recomputed
+hash, since sender is a hash input) was always masked as `CONTENT_CHANGED` before policy ever ran — moved
+to an explicit, earlier check so all five gates are independently distinguishable, per the frozen test
+matrix's own requirement.
+
+**Frozen acceptance criteria — all four verified, criterion 4 as two independent cases.**
+1. An approved Demo proposal executes and writes a `demo://` execution with the synthetic sender — `test_
+   action_authorization.py::TestCriterion4ADemoNoOperatorNoGmail` and the live-server manual walkthrough.
+2. Editing the draft after approval yields `409 CONTENT_CHANGED` — `test_content_hash_invalidation.py`.
+3. A MISMATCH LinkedIn profile (set via direct `contact_channels` DB manipulation on a real Demo-run
+   prospect — `demo_pack.yaml` itself was never touched) is BLOCKED with a visible reason
+   (`linkedin_identity_not_strong`) and no override affordance — `test_content_hash_invalidation.py::
+   TestMismatchLinkedInBlockedNoOverride` plus the live-server manual walkthrough.
+4. **4A (Demo):** no operator session, no Gmail connection, propose->approve->execute succeeds,
+   `DemoEmailSendProvider` used, result contains a `demo://` message id, zero network (Demo Mode wires no
+   live runtime at all). **4B (Live):** valid operator session, a Gmail connection matching the proposal's
+   sender, an `APPROVED` approval with a matching hash — execution reaches
+   `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` (HTTP 403), and zero `action_executions` rows are ever created for
+   that proposal (no send()/network dispatch path is even reachable). Both re-verified against a real
+   running `uvicorn` server in this session (not only the pytest ASGI test client).
+   Separately: a Live execute request with NO operator session at all is a plain 401, unconditionally.
+
+**Known issues/deviations, recorded rather than silently made:**
+- **Test-suite cross-contamination fix, unrelated to product behavior.** `api/routers/actions.py`'s new
+  `_write_limiter` and the pre-existing `plays.py::_write_limiter` are process-local module singletons
+  (Checkpoint I1 Phase 8B's own established pattern — `test_live_cost_abuse_controls.py` already resets
+  them locally for its own tests). The V2-H suite's heavy use of full Demo-play-to-completion helpers
+  (dozens of `POST /api/plays` + propose/approve/execute calls across many new test files, all sharing one
+  fake `request.client.host` key under `ASGITransport`) was enough to trip `TooManyRequestsError` in
+  SEVERAL alphabetically-later, otherwise-unrelated pre-existing test files (`test_api_prospects.py`,
+  `test_api_sse.py`, `test_apollo_activation.py`, `test_demo_llm_calls_additive.py`) the first time the
+  full suite ran together. Fixed with one new autouse fixture in `tests/conftest.py` that clears both
+  limiters' `._hits` before every test — this only makes each test start from a clean slate; it never
+  weakens `test_live_cost_abuse_controls.py`'s own local fixture (which layers on top harmlessly) or any
+  test that deliberately drives a limiter to 429 within its own body. Full suite re-verified green after
+  the fix (966 passed, 1 skipped — the same pre-existing Postgres-DSN-gated skip).
+- **Recipient identifier is not re-resolved at execute time** — only the sender is (per the Sender
+  Resolution Matrix). The immutable proposal's own `recipient_identifier`/`recipient_identity_key`,
+  captured once at proposal creation, is what content-hash recomputation and the recipient-level send-
+  safety check both use at execute time. A draft body/subject edit is still caught by `CONTENT_CHANGED`;
+  a genuinely different resolved recipient (e.g. a hypothetical re-enrichment between propose and execute)
+  is out of scope for V2-H, since nothing in this checkpoint re-runs enrichment mid-review.
+- **`send_provider_configured` is unconditionally `True` for `EMAIL_SEND`, both modes** — see D4 above.
+  This is intentional per the task brief's explicit instruction not to rely on policy clause 13 as the
+  Live-refusal proof; recorded here so a future session doesn't "fix" it into a conditional check that
+  would then race with — or substitute for — the real `LiveExternalEmailSendDisabled` boundary.
+- **No Postgres verification this session** — no disposable local/test Postgres instance was available in
+  this environment; `test_migration_drift.py`'s Postgres-DSN-gated test skipped exactly as it has every
+  checkpoint since V2-B when `GROUNDWORK_TEST_POSTGRES_DSN` is unset. No schema changed in this checkpoint
+  (`models/tables.py`/`alembic/versions/*` are both byte-identical to V2-G — the schema V2-B already
+  built out is exactly what V2-H writes to), so there is nothing new for a migration to drift on.
+- **No V2-I logic implemented, deliberately.** No `GmailSendProvider`, no claim/lease/dispatch loop beyond
+  the single synchronous Demo call, no reconciliation, no `ABANDONED` handling, no stale-claim sweep, no
+  resend/follow-up. `action_executions.reconcile_attempts`/`messages_scanned`/`reconciled_at`/
+  `last_error_type`/`last_error_message` all stay at their schema defaults — never written by anything in
+  this checkpoint.
+
+**Verification.** Full backend suite: **966 passed, 1 skipped** (908 pre-existing + 58 new V2-H tests; the
+1 skip is the pre-existing Postgres-DSN-gated test). `ruff check` clean on every new/changed backend file.
+Frontend: **`pnpm test`: 95 passed** (91 pre-existing + 4 new) across 9 files; `pnpm lint`/`typecheck`/
+`build` all clean, the `/runs/[id]` and `/prospects/[id]` routes build correctly with the new panels.
+`make demo` (headless engine): canonical distribution byte-identical — PASS 2 (Northwind 92, Sable 79) /
+NEEDS_REVIEW 2 (Riverbend 35, Ferrous 58) / REJECTED 1 (Cobalt 25) / DUPLICATE 1 / FAILED 1, run status
+`PARTIAL`, 3 retries recorded. `git diff --stat` against every protected path named in the task brief
+(`models/tables.py`, `alembic/versions/*`, `fixtures/demo_pack.yaml`, `engine/**`, `api/routers/gmail.py`,
+`api/gmail_state_binding.py`, `token_crypto.py`, `providers/live/google_oauth_runtime.py`,
+`api/operator_auth.py`, `CLAUDE.md`, both `IMPLEMENTATION_PLAN.md`/`V2_IMPLEMENTATION_PLAN.md`, `alembic/`)
+is empty — zero lines changed in any of them. **Manual walkthrough performed against a real running
+`uvicorn` server** (not only the pytest ASGI test client), on a fresh SQLite DB, with NO
+`OPERATOR_PASSPHRASE`/`SESSION_SIGNING_KEY` set for the Demo half: Northwind propose->approve->execute
+succeeded with `sender_identifier="demo-sender@groundwork.invalid"` and a visible content hash, execution
+`SUCCEEDED` with a `demo://sent/...` message id; a double-click execute returned the identical execution
+id; Sable's risky email proposal came back `BLOCKED` with `email_not_verified` and a 409 `PROPOSAL_BLOCKED`
+on approve-attempt; a DB-flipped LinkedIn `MISMATCH` fixture came back `BLOCKED` with
+`linkedin_identity_not_strong`. Then, restarting the server WITH `OPERATOR_PASSPHRASE`/
+`SESSION_SIGNING_KEY` configured: operator login succeeded, a Live-flipped run's proposal captured
+`sender_identifier="operator@example.com"` from a directly-written `gmail_connections` row, approval
+succeeded, and execute returned `403 LIVE_EXTERNAL_EMAIL_SEND_DISABLED` with zero `action_executions` rows
+ever created for that proposal. Zero real Gmail/OpenAI/Tavily/Apollo/Hunter calls were made anywhere in
+this session's implementation, tests, or manual walkthrough — no smoke script was run.
+
+`master`/production/Render/Neon `production` are untouched — this checkpoint lives entirely on
+`claude/v2-h-action-approval`, targeting a future PR into `feature/v2-contact-enrichment` (never `master`).
+No PR was created this session, per the task's explicit instruction to stop before PR creation/merge/V2-I.
+
+---
+
 ## Next task
 
-**Immediate next task: V2-H — Action proposal + human approval (Demo executor only)**
-(`claude/v2-h-action-approval`), per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-H. V2-G (Gmail OAuth,
-connection only) is now COMPLETE — see "Current checkpoint"/"What V2-G added" above; do not re-open it or
-begin any V2-H work in the same session unless the user explicitly authorizes rolling into the next
+**Immediate next task: V2-I — Live Gmail execution + reconciliation + audit** (`claude/v2-i-gmail-
+execution`), per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-I. V2-H (action proposal + human approval,
+Demo executor only) is now COMPLETE — see "Current checkpoint"/"What V2-H added" above; do not re-open it
+or begin any V2-I work in the same session unless the user explicitly authorizes rolling into the next
 checkpoint.
+
+**The BLOCKING `claimed_email` suppression requirement is STILL UNRESOLVED** — V2-H deliberately did NOT
+implement it (see D1 above); it remains the hard prerequisite V2-I must design and implement BEFORE
+`LiveExternalEmailSendDisabled` may be removed/replaced and any `GmailSendProvider` may be wired up for
+real sending. Do not treat V2-H's structural refusal as a substitute for that suppression design — it is
+a safety backstop, not the fix.
+
+**V2-H's own two documented Part 4/9 divergences (D1's dedicated refusal in place of `ProviderNotConfigured`,
+and D2's separate `resolve_send_provider` resolver in place of a `ProviderBundle.send` field) should be
+treated as the load-bearing design for V2-I to extend, not re-litigate** — see `docs/ARCHITECTURE.md`'s
+"V2-H" subsection for the full rationale.
+
+**Historical note (superseded by the above — kept for continuity):** the paragraphs below this point were
+written at the end of V2-G, when the immediate next task was still V2-H. V2-H is now complete (see "What
+V2-H added" above); the still-open items they name (the `claimed_email` blocker, the completed Hunter/
+Apollo smokes, the I2/v1 backlog folded into V2-J) remain accurately open and are not restated above.
 
 **The §3.3 hard gate is now SATISFIED / VERIFIED** — the user personally ran `make gmail-scope-probe`
 against their own real, consented Gmail test account and all three findings (`users.getProfile`,

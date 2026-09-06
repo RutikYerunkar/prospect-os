@@ -14,7 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from groundwork.api import run_service
 from groundwork.api.errors import register_error_handlers
 from groundwork.api.middleware import MaxBodySizeMiddleware, RequestIdMiddleware
-from groundwork.api.routers import evaluation, gmail, operator, plays, prospects, runs, settings as settings_router
+from groundwork.api.routers import actions, evaluation, gmail, operator, plays, prospects, runs, settings as settings_router
 from groundwork.config import settings
 from groundwork.db import SessionLocal, create_all_if_sqlite, engine, schema_upgrade_problems
 from groundwork.logging_config import configure_logging
@@ -224,6 +224,7 @@ app.include_router(prospects.router)
 app.include_router(settings_router.router)
 app.include_router(operator.router)
 app.include_router(gmail.router)
+app.include_router(actions.router)
 
 
 @app.get("/api/health")

@@ -140,3 +140,22 @@ operator as a test user with awareness of the 7-day limit) before relying on a l
 - If Live Mode needs to be disabled entirely without a redeploy: unset `OPERATOR_PASSPHRASE` or
   `SESSION_SIGNING_KEY` (either alone hard-disables it) via whatever mechanism your host uses to change
   environment variables, then restart the process.
+
+## Live `EMAIL_SEND` returns `403 LIVE_EXTERNAL_EMAIL_SEND_DISABLED` (V2-H — expected, not a bug)
+
+Every Live `POST /api/actions/proposals/{id}/execute` for an `EMAIL_SEND` proposal returns this
+structural refusal, by design, regardless of configuration — see `providers/send_base.py::
+LiveExternalEmailSendDisabled` and `docs/PROGRESS.md`'s "What V2-H added"/D1 for the full rationale. Two
+things this is **not**:
+- **Not a missing-credential problem.** Setting `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (Gmail OAuth
+  connection, V2-G) does not affect this at all — connecting Gmail only lets a Live proposal capture and
+  verify a sender identity; it does not enable sending.
+- **Not something a future config flag will lift.** The refusal is unconditional in code
+  (`providers/send_registry.py::resolve_send_provider(Mode.LIVE)` always raises) specifically so that
+  wiring up a `GmailSendProvider` in V2-I can't accidentally make Live sending reachable before the
+  `claimed_email` suppression prerequisite (§ CLAUDE.md's v2 invariants, D1 above) is actually
+  implemented. If you're building V2-I and need this refusal removed, that removal must be a deliberate,
+  reviewed code change in `providers/send_registry.py` — not a config toggle.
+- `DEMO_MAX_ACTIONS_PER_RUN` (default 10, V2-H) caps how many `action_executions` rows one Demo run may
+  accumulate — a public-abuse control, independent of the per-client-IP `action_write_rate_limit_*`
+  settings (mirrors `public_write_rate_limit_*`'s shape, same per-process caveat as above).

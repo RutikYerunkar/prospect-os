@@ -5,9 +5,36 @@ provider error must appear nowhere observable — `llm_calls.error_message`,
 
 from __future__ import annotations
 
-from groundwork.observability.redact import redact
+from groundwork.observability.redact import mask_email_for_log, redact
 
 SENTINEL = "sk-THIS-IS-A-CANARY-SECRET-1234567890abcdef"
+
+
+class TestEmailMasking:
+    """V2-H, Part 9: never log a full recipient/sender email address."""
+
+    def test_mask_email_for_log_drops_local_part(self):
+        assert mask_email_for_log("priya.natarajan@northwindlabs.com") == "***@northwindlabs.com"
+
+    def test_mask_email_for_log_none_passthrough(self):
+        assert mask_email_for_log(None) is None
+
+    def test_mask_email_for_log_non_email_input_fully_redacted(self):
+        assert mask_email_for_log("demo-sender") == "[REDACTED]"
+
+    def test_redact_masks_email_shapes_found_in_free_text(self):
+        text = "send failed for priya.natarajan@northwindlabs.com: connection reset"
+        out = redact(text)
+        assert "priya.natarajan" not in out
+        assert "***@northwindlabs.com" in out
+
+    def test_redact_masks_sender_and_recipient_together(self):
+        text = "sender=demo-sender@groundwork.invalid recipient=priya@northwindlabs.com"
+        out = redact(text)
+        assert "demo-sender@groundwork.invalid" not in out
+        assert "priya@northwindlabs.com" not in out
+        assert "***@groundwork.invalid" in out
+        assert "***@northwindlabs.com" in out
 
 
 def test_redact_strips_configured_secret(monkeypatch):
