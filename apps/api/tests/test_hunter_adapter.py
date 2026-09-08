@@ -15,6 +15,7 @@ from groundwork.providers.contact_base import (
     EnrichmentAuthError,
     EnrichmentBudgetExceeded,
     EnrichmentInvalidResponse,
+    EnrichmentLegalRestriction,
     EnrichmentProviderUnavailable,
     EnrichmentQuotaExceeded,
     EnrichmentRateLimited,
@@ -379,13 +380,18 @@ async def test_429_is_permanent_quota_exhausted_never_retried() -> None:
     assert excinfo.value.telemetry[0].status == EnrichmentAttemptStatus.QUOTA_EXHAUSTED
 
 
-async def test_451_is_permanent_invalid_response_never_retried() -> None:
+async def test_451_is_permanent_legal_restriction_never_retried() -> None:
+    """V2-I-a — 451 is now its own dedicated status/exception, distinct from
+    404/422's `EnrichmentInvalidResponse` (see `test_legal_restriction_
+    signal.py` for the full V2-I-a coverage of this branch)."""
     provider, transport = make_hunter_provider(
         [(451, {"errors": [{"id": "claimed_email"}]})], settings_overrides={"hunter_max_transport_retries": 2}
     )
-    with pytest.raises(EnrichmentInvalidResponse):
+    with pytest.raises(EnrichmentLegalRestriction) as excinfo:
         await provider.enrich_person(_query(), ctx_key="r1:p1:contact_enrichment")
     assert transport.calls == 1
+    assert excinfo.value.telemetry[0].status == EnrichmentAttemptStatus.LEGAL_RESTRICTION
+    assert excinfo.value.provider_code == "claimed_email"
 
 
 async def test_5xx_is_retryable_then_raises_provider_unavailable() -> None:

@@ -48,10 +48,12 @@ from sqlalchemy import select
 
 from groundwork.domain.contact_identity import (
     IDENTITY_MATCH_VERSION,
+    InvalidEmailIdentity,
     derive_email_channel,
     derive_linkedin_channel,
     email_discovery_state_after_failed_call,
     linkedin_resolution_state_after_failed_call,
+    normalize_email_identity,
 )
 from groundwork.models.enums import (
     Channel,
@@ -59,9 +61,10 @@ from groundwork.models.enums import (
     EmailVerificationState,
     EnrichmentAttemptStatus,
     LinkedInResolutionState,
+    SendSuppressionReason,
 )
 from groundwork.models.schemas import ContactChannelState, ContactEnrichment
-from groundwork.models.tables import ContactChannelRow, ContactEnrichmentRow, EnrichmentCallRow
+from groundwork.models.tables import ContactChannelRow, ContactEnrichmentRow, EmailSuppressionRow, EnrichmentCallRow
 from groundwork.observability.redact import redact
 from groundwork.providers.contact_base import EnrichmentAttemptTelemetry, PersonEnrichmentResult
 
@@ -264,6 +267,149 @@ class ContactEnrichmentRepository:
                 _state_from_row(Channel.EMAIL, email_row),
                 _state_from_row(Channel.LINKEDIN, linkedin_row),
             ]
+
+    async def record_legal_restriction(
+        self,
+        *,
+        run_id: str,
+        prospect_id: str,
+        provider: str,
+        call_group_id: str,
+        telemetry: list[EnrichmentAttemptTelemetry],
+        provider_code: str | None,
+    ) -> list[ContactChannelState]:
+        """V2-I-a — the dedicated repository path for a provider-reported
+        legal/privacy restriction (`EnrichmentLegalRestriction`, e.g. Hunter's
+        HTTP 451). Distinct from `record_failure` in two ways for the EMAIL
+        channel: (1) it writes local suppression metadata, and (2) if a real
+        identifier was already on record for this prospect (from ANY prior
+        successful observation — Apollo, Hunter, or Demo), it upserts the
+        GLOBAL `email_suppressions` row keyed by `normalize_email_identity`
+        so the same address stays suppressed for every prospect/run, not just
+        this one. Never writes a `contact_enrichments` observation row (there
+        is no new observation — 451 carries no email address). LINKEDIN gets
+        attempt-telemetry treatment only, mirroring `record_failure` exactly
+        — Hunter's email-finder failure says nothing about LinkedIn, and no
+        suppression concept exists for that channel.
+        """
+        async with self._session_factory() as session:
+            for row in self._telemetry_rows(
+                telemetry=telemetry, call_group_id=call_group_id, run_id=run_id,
+                prospect_id=prospect_id, provider=provider,
+            ):
+                session.add(row)
+            await session.flush()
+
+            now = datetime.now(timezone.utc)
+            last = telemetry[-1] if telemetry else None
+            last_status = last.status.value if last else EnrichmentAttemptStatus.LEGAL_RESTRICTION.value
+            last_error_type = last.error_type if last else None
+
+            email_row = await self._apply_legal_restriction_to_email_channel(
+                session, prospect_id=prospect_id, now=now, last_status=last_status,
+                last_error_type=last_error_type, provider=provider, provider_code=provider_code,
+            )
+            linkedin_row = await self._apply_failure_to_channel(
+                session, prospect_id=prospect_id, channel=Channel.LINKEDIN,
+                now=now, last_status=last_status, last_error_type=last_error_type,
+            )
+
+            if email_row.identifier:
+                try:
+                    identity_key = normalize_email_identity(email_row.identifier)
+                except InvalidEmailIdentity:
+                    identity_key = None
+                if identity_key is not None:
+                    await self._upsert_global_suppression(
+                        session, identity_key=identity_key,
+                        reason=SendSuppressionReason.LEGAL_OR_PRIVACY_RESTRICTION.value,
+                        source=provider, provider_code=provider_code, now=now, prospect_id=prospect_id,
+                    )
+
+            await session.commit()
+            return [
+                _state_from_row(Channel.EMAIL, email_row),
+                _state_from_row(Channel.LINKEDIN, linkedin_row),
+            ]
+
+    async def _apply_legal_restriction_to_email_channel(
+        self, session, *, prospect_id: str, now: datetime, last_status: str, last_error_type: str | None,
+        provider: str, provider_code: str | None,
+    ) -> ContactChannelRow:
+        """§V2-I-a — the EMAIL-channel-only suppression write. Deliberately
+        NEVER derives a new `discovery_state`/`verification_state` the way
+        `_apply_failure_to_channel` does for a generic failure: a legal/
+        privacy restriction is not "we don't know," it is "this identity must
+        not be sent to" — the identifier/state/observed_at/derived_from_
+        enrichment_id are preserved byte-for-byte (or stay `None` if no prior
+        observation exists at all), and only `last_attempt_*` plus the four
+        suppression columns move. Sticky: called again on a repeated
+        restriction, this always re-sets the suppression columns (never
+        clears them) and never restores the row's other columns."""
+        row = await self._get_channel_row(session, prospect_id=prospect_id, channel=Channel.EMAIL)
+        if row is None:
+            row = ContactChannelRow(
+                id=str(uuid.uuid4()), prospect_id=prospect_id, channel=Channel.EMAIL.value,
+                identifier=None, discovery_state=None, verification_state=None, identity_match_state=None,
+                derivation_version=IDENTITY_MATCH_VERSION, derived_from_enrichment_id=None, observed_at=None,
+                last_attempt_at=now, last_attempt_status=last_status, last_attempt_error_type=last_error_type,
+            )
+            session.add(row)
+        else:
+            row.last_attempt_at = now
+            row.last_attempt_status = last_status
+            row.last_attempt_error_type = last_error_type
+            # identifier / discovery_state / verification_state /
+            # identity_match_state / derivation_version /
+            # derived_from_enrichment_id / observed_at: deliberately
+            # untouched — preserved exactly as they were.
+
+        row.send_suppressed_at = now
+        row.send_suppression_reason = SendSuppressionReason.LEGAL_OR_PRIVACY_RESTRICTION.value
+        row.send_suppression_source = provider
+        row.send_suppression_provider_code = provider_code
+        return row
+
+    async def _upsert_global_suppression(
+        self, session, *, identity_key: str, reason: str, source: str, provider_code: str | None,
+        now: datetime, prospect_id: str,
+    ) -> None:
+        """§V2-I-a — sticky, never cleared, never downgraded. A repeated
+        restriction (same or a different prospect/run observing the same
+        normalized identity) only moves `last_observed_at`/the audit
+        metadata forward; a later SUCCESSFUL enrichment observation for this
+        identity is never routed here at all (§ record_success), so it can
+        never clear this row either — there is no clear/override path
+        anywhere in this method or its caller."""
+        result = await session.execute(
+            select(EmailSuppressionRow).where(EmailSuppressionRow.identity_key == identity_key)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            session.add(
+                EmailSuppressionRow(
+                    identity_key=identity_key, reason=reason, source=source, provider_code=provider_code,
+                    first_observed_at=now, last_observed_at=now, observed_prospect_id=prospect_id,
+                )
+            )
+            return
+        row.last_observed_at = now
+        row.source = source
+        row.provider_code = provider_code
+        row.observed_prospect_id = prospect_id
+
+    async def get_email_suppression(self, identity_key: str | None) -> EmailSuppressionRow | None:
+        """§V2-I-a — global suppression read support, keyed by the SAME
+        `normalize_email_identity` output the caller already computes for
+        the recipient-level duplicate-send rule (§3.5B). `None` in, `None`
+        out — never a query for an un-normalizable/absent identity."""
+        if not identity_key:
+            return None
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EmailSuppressionRow).where(EmailSuppressionRow.identity_key == identity_key)
+            )
+            return result.scalar_one_or_none()
 
     async def _get_channel_row(self, session, *, prospect_id: str, channel: Channel) -> ContactChannelRow | None:
         result = await session.execute(

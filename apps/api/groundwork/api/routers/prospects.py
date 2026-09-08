@@ -148,6 +148,14 @@ def _contact_channel_dict(
         "preserved_state": preserved_state.value if preserved_state else None,
         "provider_confidence": enrichment.email_provider_confidence if enrichment and is_email else None,
         "is_catch_all": enrichment.email_is_catch_all if enrichment and is_email else None,
+        # V2-I-a — local send-suppression metadata (EMAIL channel only;
+        # always None for LINKEDIN, which never carries suppression). No raw
+        # provider payload is ever exposed here — only the already-derived
+        # audit fields the repository itself persisted.
+        "send_suppressed_at": row.send_suppressed_at.isoformat() if row.send_suppressed_at else None,
+        "send_suppression_reason": row.send_suppression_reason,
+        "send_suppression_source": row.send_suppression_source,
+        "send_suppression_provider_code": row.send_suppression_provider_code,
     }
 
 

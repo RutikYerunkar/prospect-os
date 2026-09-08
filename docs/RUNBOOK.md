@@ -152,10 +152,21 @@ things this is **not**:
   verify a sender identity; it does not enable sending.
 - **Not something a future config flag will lift.** The refusal is unconditional in code
   (`providers/send_registry.py::resolve_send_provider(Mode.LIVE)` always raises) specifically so that
-  wiring up a `GmailSendProvider` in V2-I can't accidentally make Live sending reachable before the
-  `claimed_email` suppression prerequisite (§ CLAUDE.md's v2 invariants, D1 above) is actually
-  implemented. If you're building V2-I and need this refusal removed, that removal must be a deliberate,
-  reviewed code change in `providers/send_registry.py` — not a config toggle.
+  wiring up a `GmailSendProvider` in V2-I-b can't accidentally make Live sending reachable before a real
+  send provider actually exists. If you're building V2-I-b and need this refusal removed, that removal
+  must be a deliberate, reviewed code change in `providers/send_registry.py` — not a config toggle.
 - `DEMO_MAX_ACTIONS_PER_RUN` (default 10, V2-H) caps how many `action_executions` rows one Demo run may
   accumulate — a public-abuse control, independent of the per-client-IP `action_write_rate_limit_*`
   settings (mirrors `public_write_rate_limit_*`'s shape, same per-process caveat as above).
+
+## Recipient send-suppression (V2-I-a) — what `recipient_suppressed` means
+
+A blocked `EMAIL_SEND` proposal with `recipient_suppressed` in `blocked_reasons` means a provider
+(currently Hunter, via HTTP 451) reported a legal/privacy restriction on that email identity — see
+`docs/PROGRESS.md`'s V2-I-a entry for the authoritative semantics. Two things worth knowing operationally:
+- It is **global and sticky** — once `email_suppressions` carries a normalized identity, every proposal
+  targeting that address is blocked, in every prospect and run, forever. There is no clear/override
+  endpoint anywhere in this codebase (by design, D7 extended to this axis); the only way to change it is
+  a deliberate, reviewed data migration, never a runtime toggle.
+- It applies to **both** Demo and Live `EMAIL_SEND` — a Demo walkthrough exercises the real policy, not a
+  relaxed one. It does **not** apply to `LINKEDIN_COPY_AND_OPEN`, which has no suppression concept.

@@ -43,6 +43,7 @@ from groundwork.providers.contact_base import (
     EnrichmentAuthError,
     EnrichmentBudgetExceeded,
     EnrichmentInvalidResponse,
+    EnrichmentLegalRestriction,
     EnrichmentProviderError,
     EnrichmentProviderUnavailable,
     EnrichmentQuotaExceeded,
@@ -79,6 +80,7 @@ _ERROR_CLASS_BY_STATUS: dict[EnrichmentAttemptStatus, type[EnrichmentProviderErr
     EnrichmentAttemptStatus.AUTH_ERROR: EnrichmentAuthError,
     EnrichmentAttemptStatus.INVALID_RESPONSE: EnrichmentInvalidResponse,
     EnrichmentAttemptStatus.QUOTA_EXHAUSTED: EnrichmentQuotaExceeded,
+    EnrichmentAttemptStatus.LEGAL_RESTRICTION: EnrichmentLegalRestriction,
 }
 
 
@@ -282,6 +284,17 @@ class HunterEnrichmentProvider:
                 return raw, attempts  # type: ignore[return-value]
 
             if status not in _TRANSPORT_RETRYABLE:
+                if status == EnrichmentAttemptStatus.LEGAL_RESTRICTION:
+                    # `provider_code` is `errors[0].id`, re-extracted here
+                    # from the same raw body `_issue()` already parsed —
+                    # audit/telemetry only (§Part 8), never load-bearing for
+                    # classification, which is already decided by HTTP status
+                    # above.
+                    raise EnrichmentLegalRestriction(
+                        f"{status.value}: {error_text or 'permanent enrichment provider failure'}",
+                        telemetry=attempts,
+                        provider_code=_best_effort_error_id(raw),
+                    )
                 raise _ERROR_CLASS_BY_STATUS.get(status, EnrichmentInvalidResponse)(
                     f"{status.value}: {error_text or 'permanent enrichment provider failure'}", telemetry=attempts
                 )
@@ -336,7 +349,13 @@ class HunterEnrichmentProvider:
             return EnrichmentAttemptStatus.AUTH_ERROR, raw_body, status_code, request_id, error_text
         if status_code == 403:
             return EnrichmentAttemptStatus.RATE_LIMITED, raw_body, status_code, request_id, error_text
-        if status_code in (404, 422, 451):
+        if status_code == 451:
+            # V2-I-a — a dedicated status, distinct from 404/422's
+            # INVALID_RESPONSE: a legal/privacy restriction on this identity,
+            # never retried, routed by `engine/enrichment.py` to a dedicated
+            # suppression-aware repository path.
+            return EnrichmentAttemptStatus.LEGAL_RESTRICTION, raw_body, status_code, request_id, error_text
+        if status_code in (404, 422):
             return EnrichmentAttemptStatus.INVALID_RESPONSE, raw_body, status_code, request_id, error_text
         if status_code == 429:
             return EnrichmentAttemptStatus.QUOTA_EXHAUSTED, raw_body, status_code, request_id, error_text

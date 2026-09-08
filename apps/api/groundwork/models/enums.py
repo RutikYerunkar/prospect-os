@@ -194,6 +194,22 @@ class EnrichmentAttemptStatus(StrEnum):
     INVALID_RESPONSE = "INVALID_RESPONSE"
     QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
     NOT_ATTEMPTED_BUDGET = "NOT_ATTEMPTED_BUDGET"
+    # V2-I-a — a provider-reported legal/privacy restriction on this identity
+    # (e.g. Hunter's HTTP 451). Permanent, never retried, never produces a new
+    # `contact_enrichments` observation row. Provider-neutral name deliberately
+    # avoids any human-intent wording ("withdrew consent", "claimed by its
+    # owner") — see `docs/PROGRESS.md`'s V2-I-a entry.
+    LEGAL_RESTRICTION = "LEGAL_RESTRICTION"
+
+
+class SendSuppressionReason(StrEnum):
+    """V2-I-a — the closed, provider-neutral vocabulary for why a recipient
+    identity is suppressed from sending. Exactly one member for now: a
+    provider-reported legal/privacy restriction (Hunter 451 today). Never a
+    human-intent assertion ("withdrew consent", "claimed by its owner") —
+    Groundwork observes a provider signal, not a person's intent."""
+
+    LEGAL_OR_PRIVACY_RESTRICTION = "LEGAL_OR_PRIVACY_RESTRICTION"
 
 
 class ActionType(StrEnum):

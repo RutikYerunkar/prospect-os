@@ -42,6 +42,10 @@ _APPROVED_CHANNEL_FIELDS = {
     "derivation_version", "observed_at", "last_attempt_at", "last_attempt_status",
     "last_attempt_error_type", "origin", "provider", "stale", "stale_after_days", "preserved_state",
     "provider_confidence", "is_catch_all",
+    # V2-I-a — local send-suppression metadata (EMAIL channel only; always
+    # None for LINKEDIN).
+    "send_suppressed_at", "send_suppression_reason", "send_suppression_source",
+    "send_suppression_provider_code",
 }
 _FORBIDDEN_SUBSTRINGS = ("email_provider_status", "raw_digest", "provider_person_id", "api_key", "apikey")
 

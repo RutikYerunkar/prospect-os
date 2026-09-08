@@ -63,9 +63,12 @@ const BLOCKED_REASON_COPY: Record<string, string> = {
   demo_action_cap_reached: "this run's demo action cap has been reached",
   linkedin_not_resolved: "no LinkedIn profile has been resolved for this contact",
   linkedin_identity_not_strong: "the LinkedIn identity match is not STRONG — a MISMATCH or weak match is never actionable",
+  // V2-I-a — provider-neutral, no human-intent wording ("withdrew",
+  // "consent", "claimed by its owner").
+  recipient_suppressed: "this recipient was suppressed after a provider privacy/legal restriction signal — retained for audit, not sendable",
 };
 
-function reasonCopy(reason: string): string {
+export function reasonCopy(reason: string): string {
   return BLOCKED_REASON_COPY[reason] ?? reason;
 }
 

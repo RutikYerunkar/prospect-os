@@ -29,10 +29,221 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-E — Contact enrichment UI** | (branch `claude/v2-e-contact-enrichment-ui`, merged via PR #18) | `ContactPanel` extended in place into one "Contact & Enrichment" surface showing all five contact axes (person identity, email discovery, email verification, LinkedIn resolution, LinkedIn identity match) independently, each with a label/badge/provider-neutral explanation; a null channel axis renders `NOT OBSERVED`, never silently omitted. Backend: additive-only `contact_channels` fields (`origin`, `provider`, `stale`, `stale_after_days`, `preserved_state`, `provider_confidence`, `is_catch_all`) on the existing `GET /api/prospects/{id}` aggregate — no new endpoint, no new table, no migration; two new pure `domain/action_policy.py` helpers (`is_enrichment_stale`, `derive_preserved_enrichment_state`) compute staleness/preservation server-side, never re-derived in TypeScript. Frontend: `lib/linkedinSafety.ts` mirrors the backend's LIVE_PROVIDER LinkedIn URL grammar independently (defense-in-depth) — only `channel=linkedin` + `origin=LIVE_PROVIDER` + `discovery_state=RESOLVED` + a validated canonical `https://[www.]linkedin.com/in/<id>` URL may become an `href`; `demo://` identifiers render as a synthetic/simulated-profile line, never a link. Fixed a real type bug: `ProspectContact.persona` was typed `string \| null` in `lib/types.ts` but is `boolean` end to end on the backend (`ContactRow.persona`/`Contact.persona_match`) — audited (only consumer was `ContactPanel`) and corrected. Canonical Demo byte-identical. Zero external provider calls. See "What V2-E added" below. |
 | **V2-F — Channel-specific outreach + guardrails** | *this commit* (branch `claude/v2-f-channel-outreach`) | `personalize` now drafts one ADDITIONAL LinkedIn message (via a separate `LLMOperation.LINKEDIN_PERSONALIZATION` call, distinct ctx_key `personalize:linkedin`, distinct `LinkedInOutreachOutput` schema with no subject) whenever `contact_channels[LINKEDIN].discovery_state == RESOLVED` — the v1 email branch is byte-for-byte untouched. `OutreachDraft.channel` is now the `Channel` enum (still the string `"email"` on the wire), `subject` is nullable, `content_hash`/`hash_version` are exposed (both null — V2-H's job). New `ContactChannelState` model carries the AUTHORITATIVE post-write channel state from `ContactEnrichmentRepository.record_success`/`record_failure` through `EnrichmentCallRecorder` → `engine/enrichment.py::call_enrichment` → `ctx.contact_channels` → `domain/review.py::run_checks` — nothing downstream re-derives raw provider state or re-queries the repository. `no_fabricated_contact` rewritten as three provenance-based clauses (unbacked identifier, LinkedIn MISMATCH, unbacked identifier-shaped token in draft text — normalized via the existing `domain/contact_identity.py` helpers, plus one new pure helper `linkedin_identifier_key`) and no longer reads `contact.verification` at all; `no_placeholders` is channel-aware (empty-subject only applies to EMAIL); `cross_prospect_leak`'s nullable-subject bug (`f"{draft.subject}\n..."` interpolating the literal text `"None"`) is fixed. Still exactly seven checks. `OutreachViewer` groups drafts by channel (EMAIL first, deterministic order, `step_index` order within a group) — no href of any kind is rendered there (unchanged). Canonical Demo byte-identical (email drafts byte-identical; Northwind and Sable — both RESOLVED+STRONG_MATCH — additionally get a LinkedIn draft; statuses/scores/verdicts/evidence counts unchanged). No migration, no table change, no fixture change, zero external provider calls. See "What V2-F added" below. |
 | **V2-G — Gmail OAuth (connection only, no sending)** | *this commit* (branch `claude/v2-g-gmail-oauth`) | Operator-owned, encrypted, revocable Gmail connection — sends nothing. No migration: `gmail_connections`/`oauth_states` already existed from V2-B, untouched. Exact scope set `gmail.send` + `gmail.metadata` only (no `readonly`/`openid`/`email`/`profile`, never Google's userinfo endpoint). New pure `api/gmail_state_binding.py` binds OAuth `state` to the exact initiating operator-session cookie value via `HMAC-SHA256(SESSION_SIGNING_KEY, STATE_BINDING_VERSION|state_id|cookie_value)` — only `state_id`/`pkce_verifier`/timestamps persist, never the binding tag or the cookie itself; verification tries current then `SESSION_SIGNING_KEY_OLD`, mirroring `operator_auth.verify_session_cookie`'s own rotation order (no change to `operator_auth.py` itself). Callback implements the exact security-critical order: parse state (malformed→400, no DB touch) → require+verify operator session (missing/invalid→401, no DB touch) → verify state/session binding (mismatch→403, state NOT consumed, callback-failure limiter incremented) → consume `state_id` via ONE guarded `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now` (`rowcount != 1`→409) → only now inspect Google's `error` param (an allow-listed `access_denied` passes through, everything else sanitizes to `unknown`, never the raw Google error text) → exchange code (PKCE S256) → `users.getProfile` for `emailAddress` (missing→fail closed, no persistence) → Fernet-encrypt the refresh token (new `token_crypto.py`, `TOKEN_ENCRYPTION_KEY`/`_OLD` mirroring `SESSION_SIGNING_KEY`'s rotation) → persist → redirect `/settings?gmail=connected`. New `providers/live/google_oauth_runtime.py::GoogleOAuthRuntime` — deployment-scoped (never in `ProviderBundle`), process-scoped `httpx.AsyncClient`, one flat transport-retry loop bounded at 1, never retries a definitive 4xx. New `providers/send_base.py::EmailSendProvider` Protocol (frozen shape: `name`, `supports_message_id_lookup`, `connected_account_identifier()`, `send()`, `find_sent_message()`) with `DemoEmailSendProvider` implementing ONLY the identity method (`demo-sender@groundwork.invalid`, zero network); `send()`/`find_sent_message()` raise `NotImplementedError` — V2-H/V2-I scope, never called here. `GmailConnectionRepository.connected_account_identifier()` returns `normalize_email_identity(google_account_email)` for the real connection — an identifier, never a credential; `None` before first connect and again after disconnect. Four operator-gated routes under `/api/gmail` (`GET connection`, `POST connect`, `GET callback`, `DELETE connection` — disconnect always deletes the local row regardless of whether Google's revoke call succeeds). `GET /api/settings/providers` additively exposes a `gmail` block, fully populated only for an operator. New `/settings` page (four states: non-operator / operator+not-configured / operator+not-connected / operator+connected) plus a `Settings` nav link; a presentational `GmailSettingsPanel` component carries the render logic, tested via `renderToStaticMarkup`. **Hard gate (§3.3): SATISFIED / VERIFIED** — the real-account half was run by the user themselves, manually, against their own real consented Gmail test account (never by an automated session); all three findings (`users.getProfile`, `messages.list(labelIds=["SENT"])`, `messages.get(format="metadata", metadataHeaders=[...])`) came back PERMITTED under `gmail.metadata` alone — see "Current checkpoint" above for the exact reported observations. `scripts/gmail_scope_probe.py` + `make gmail-scope-probe` remain manual-only, never run automatically. A real frontend hydration bug in `/settings` (found during the user's own manual OAuth validation) was fixed in a follow-up commit (`f297142`) and manually revalidated — see "Current checkpoint" above. Canonical Demo byte-identical (verified via `make demo`: PASS 2/NEEDS_REVIEW 2/REJECTED 1/DUPLICATE 1/FAILED 1, Northwind 92/Sable 79/Riverbend 35/Ferrous 58, `demo_pack.yaml` untouched). Zero real Google/OpenAI/Tavily/Apollo/Hunter calls anywhere in this session. See "What V2-G added" below. |
+| **V2-H — Action proposal + human approval (Demo executor only)** | branch `claude/v2-h-action-approval`, merged via PR #21 | `ActionProposal`/`ActionExecution`/`ActionEvent` governance path: `draft -> explicit action proposal -> immutable hash/sender binding -> human approval/rejection -> Demo execution -> immutable action audit trail`. Real Gmail sending stays entirely out of scope: Live `EMAIL_SEND` structurally terminates at a dedicated, unconditional `LiveExternalEmailSendDisabled` refusal (D1), reached only AFTER all other Live gates and a fully passing fresh policy evaluation (D4) — proving the refusal is structural, not a policy verdict. `domain/action_policy.py::evaluate()` (14 clauses at this point) is pure and DB-free; `api/routers/actions.py` wires the five write endpoints (`propose`/`approve`/`reject`/`execute`) plus reads. **This checkpoint deliberately did NOT implement the `claimed_email`/legal-restriction suppression semantics carried forward from V2-DH** — see its own D1 disposition below and "Immediate next task" at the foot of this section (as it stood before V2-I-a). See full narrative under "What V2-H added" below (this doc's table row was not updated at the time V2-H merged — recorded now, at V2-I-a, filling that gap explicitly rather than leaving the table silently one checkpoint behind the narrative). |
+| **V2-I-a — Legal/privacy send-suppression prerequisite** | *this commit* (branch `claude/v2-i-a-send-suppression`) | Closes the BLOCKING `claimed_email` suppression requirement carried forward from V2-DH through V2-H, under the provider-neutral name `LEGAL_OR_PRIVACY_RESTRICTION`. Hunter's HTTP 451 is now `EnrichmentAttemptStatus.LEGAL_RESTRICTION` / a dedicated `EnrichmentLegalRestriction` exception (was `INVALID_RESPONSE`, indistinguishable from 404/422, until this checkpoint) — routed by `engine/enrichment.py::call_enrichment` to a new `ContactEnrichmentRepository.record_legal_restriction`, which preserves the EMAIL channel's prior identifier/state/observed_at byte-for-byte, writes LOCAL suppression metadata onto `contact_channels`, and — when a real identifier was already on record — upserts a GLOBAL `email_suppressions` row keyed by the existing `normalize_email_identity`. One additive Alembic revision (`94f688f37818`). New `domain/action_policy.py` clause 15 (`recipient_suppressed`) blocks `EMAIL_SEND` in BOTH `DEMO_SIMULATED` and `LIVE_EXTERNAL` origins (unlike clause 12), with no override, evaluated fresh at both proposal-creation and execute time. `LiveExternalEmailSendDisabled`'s message was narrowed to stop claiming the suppression prerequisite is unresolved (it no longer is) while remaining exactly as unconditional and load-bearing as before — Live `EMAIL_SEND` remains structurally impossible; only the *reason stated* changed, not the refusal itself. Frontend: `ContactPanel` renders a provider-neutral suppression note under Email verification; `ActionApprovalPanel` gained `recipient_suppressed` blocked-reason copy. No Gmail send provider, no reconciliation, no live-send allowance, and no suppression-clear/override endpoint were added — all explicitly out of scope, deferred to V2-I-b. Canonical Demo byte-identical. Zero provider/network calls anywhere in this session. See "What V2-I-a added" below. |
 
 ---
 
 ## Current checkpoint
+
+**V2-I-a — Legal/privacy send-suppression prerequisite — COMPLETE.** Supersedes the section below, which
+describes V2-G and was never updated when V2-H (merged via PR #21) or this checkpoint began — recorded
+here explicitly, per `CLAUDE.md`'s instruction to flag rather than silently paper over a doc gap, instead
+of quietly rewriting the V2-G narrative that follows. The V2-G text below (through "What V2-G added") is
+**historical** and remains accurate for V2-G itself; V2-H's own narrative lives under "What V2-H added"
+further down this file, and this checkpoint's own narrative is under "What V2-I-a added" below that.
+
+### What V2-I-a added
+
+**Branch ancestry, verified before any edit.** `claude/v2-i-a-send-suppression` HEAD was exactly
+`origin/feature/v2-contact-enrichment`'s HEAD (`56d23d2`, the PR #21 merge commit for V2-H) — zero
+divergence, zero missing commits. `git merge-base --is-ancestor 56d23d2 HEAD` confirmed V2-H is in
+ancestry before any file was touched.
+
+**Documentation decision (Part 1 of the task brief) — the authoritative Hunter 451/`claimed_email`
+semantics, recorded once, here.** Hunter's HTTP 451 response to `GET /v2/email-finder` signals a
+provider-side legal/privacy restriction on the specific email address the lookup would otherwise have
+returned — Hunter's own vocabulary for this is `claimed_email` (an `errors[0].id` value observed at
+V2-DH). Groundwork's own vocabulary is deliberately different and provider-neutral:
+**`LEGAL_OR_PRIVACY_RESTRICTION`** (`SendSuppressionReason.LEGAL_OR_PRIVACY_RESTRICTION`,
+`EnrichmentAttemptStatus.LEGAL_RESTRICTION`). Two provenance points, stated precisely so a future session
+never over-claims: (1) this implementation session did not itself perform or observe a real Hunter 451 —
+every test in this checkpoint uses a scripted `httpx.MockTransport` (`tests/live_hunter_helpers.py`),
+exactly like every other Hunter adapter test since V2-DH; the 451 handling is built from the documented
+contract recorded in V2-DH's own notes (`docs/V2_IMPLEMENTATION_PLAN.md` §Part 8/§Part 9), not from a
+fresh real observation. (2) Groundwork's copy, logs, and audit fields NEVER assert human intent — never
+"withdrew consent," "consent withdrawn," or "claimed by its owner" — because Groundwork has observed only
+a provider's HTTP status code, not a person's actual decision or its legal basis; asserting intent beyond
+what was actually observed would be a fabrication indistinguishable in kind from the fabricated-evidence
+problem `Evidence._no_fake_sources` already exists to prevent. `errors[0].id` (Hunter's own `claimed_email`
+string) is captured on `EnrichmentLegalRestriction.provider_code` and persisted to
+`contact_channels.send_suppression_provider_code` for audit/provenance ONLY — it is never read anywhere to
+decide classification (verified by `test_legal_restriction_signal.py::
+test_451_without_errors_id_classifies_identically`, which strips it entirely and gets an identical result).
+Both `test_send_suppression_persistence.py` and the frontend `ContactPanel.test.tsx`/
+`ActionApprovalPanel.test.tsx` assert the forbidden wording is absent from every rendered/persisted surface
+this checkpoint touches.
+
+**Provider signal.** `EnrichmentLegalRestriction` (new, permanent `EnrichmentProviderError` subtype,
+`providers/contact_base.py`) and `EnrichmentAttemptStatus.LEGAL_RESTRICTION` (new, `models/enums.py`).
+`providers/live/hunter_enrichment.py::_issue()`: `451` now maps to `LEGAL_RESTRICTION` (was folded into
+`404`/`422`'s `INVALID_RESPONSE` tuple before this checkpoint — split out); `404`/`422` are completely
+unchanged. `_call_hunter()` raises `EnrichmentLegalRestriction` directly for this status (never retried —
+`LEGAL_RESTRICTION` was never added to `_TRANSPORT_RETRYABLE` or `ENRICHMENT_STEP_RETRYABLE`), carrying
+`provider_code` re-extracted from the same parsed body `_issue()` already had. Apollo is completely
+untouched — it has no 451 branch at all, by the frozen plan's own original design; nothing needed changing
+there. Provider purity preserved: no repository/SQLAlchemy import was added to any `providers/` module.
+
+**Schema/persistence.** One additive Alembic revision, `94f688f37818` (`down_revision=1ec5eceed8d4`,
+generated via real autogenerate against a scratch SQLite DB at head, hand-adjusted to wrap the
+`contact_channels` column adds in `batch_alter_table` mirroring the V2-B migration's own SQLite-safety
+precedent — `drop_column` in `downgrade()` has no direct SQLite equivalent). `contact_channels` gained four
+nullable columns: `send_suppressed_at`, `send_suppression_reason`, `send_suppression_source`,
+`send_suppression_provider_code`. New table `email_suppressions`: `identity_key` (PK, the OUTPUT of the
+EXISTING `domain/contact_identity.py::normalize_email_identity` — no second/parallel normalization was
+written), `reason`, `source`, `provider_code` (nullable), `first_observed_at`, `last_observed_at`,
+`observed_prospect_id` (nullable FK to `prospects.id`). Verified: `alembic upgrade head` clean on a fresh
+scratch SQLite DB; `alembic check` reports "No new upgrade operations detected" (zero drift against
+`Base.metadata`) after upgrading. `live_send_allowance_lock`/`live_send_reservations` were deliberately
+NOT created — V2-I-b scope only, per the task brief.
+
+**Repository behavior.** `ContactEnrichmentRepository.record_legal_restriction(...)` (new). For EMAIL: a
+dedicated `_apply_legal_restriction_to_email_channel` helper preserves `identifier`/`discovery_state`/
+`verification_state`/`identity_match_state`/`derivation_version`/`derived_from_enrichment_id`/`observed_at`
+UNCONDITIONALLY (never derives a new state the way a generic failure does — a legal restriction means "do
+not send to this," not "we don't know"), moves only `last_attempt_*`, and always re-sets the four
+suppression columns (sticky — never cleared). If the row's own (preserved) `identifier` is a real address,
+`_upsert_global_suppression` upserts `email_suppressions` keyed by `normalize_email_identity(identifier)` —
+first-time insert or, on a repeat, advances `last_observed_at`/`source`/`provider_code`/
+`observed_prospect_id` while leaving `first_observed_at` untouched and NEVER clearing the row. No
+`contact_enrichments` row is ever written by this method (451 carries no new observation). For LINKEDIN:
+routed through the EXISTING `_apply_failure_to_channel` (identical to a generic failure's telemetry-only
+treatment) — no suppression concept exists for that channel. `get_email_suppression(identity_key)` (new)
+is the global read path. `record_success`'s existing code was NOT modified — it never touches the four
+suppression columns or `email_suppressions`, which is exactly why a later successful observation can never
+clear either local or global suppression (proven by
+`test_send_suppression_persistence.py::test_later_successful_observation_never_clears_suppression` and the
+cross-prospect variant in `test_suppression_policy.py`).
+
+**Engine seam.** `engine/enrichment.py::call_enrichment` catches `EnrichmentLegalRestriction` in its own
+`except` clause, ordered BEFORE the existing generic `except EnrichmentProviderError`, and calls
+`EnrichmentCallRecorder.record_legal_restriction` (new passthrough) instead of `record_failure`. Since
+`EnrichmentLegalRestriction` is never in `ENRICHMENT_STEP_RETRYABLE`, `Step`'s own retry wrapper never
+retries it either. Logging stays structured; no email identifier is ever interpolated into a log message
+in this codepath (only counts/attempt numbers, mirroring the existing failure-path log line).
+
+**Action policy — clause 15.** `domain/action_policy.py::evaluate()` gained one new optional kwarg,
+`recipient_suppressed: bool = False`, and one new clause evaluated inside the existing `EMAIL_SEND` branch
+(so it structurally can never affect `LINKEDIN_COPY_AND_OPEN` — no kwarg threading exists on that branch at
+all): if true, appends `"recipient_suppressed"` to `blocked_reasons`. Deliberately NOT origin-gated the way
+clause 12 is — it fires identically for `DEMO_SIMULATED` and `LIVE_EXTERNAL`, per the task brief's explicit
+instruction that a Demo walkthrough must exercise the real policy. `api/routers/actions.py::_evaluate_policy`
+computes it fresh on every call (both `propose_action` and `execute_action` invoke this same function) as
+`local OR global`: the current EMAIL `contact_channels` row's `send_suppressed_at is not None`, OR — only
+when there's no local hit — `repos.contact_enrichment.get_email_suppression(recipient_identity_key)` is not
+`None`. Because `execute_action` always re-evaluates policy fresh at step 7 of its documented order, BEFORE
+the write-ahead `insert_claimed_execution` call at step 8, a suppression discovered strictly between
+approve and execute (the realistic "approve → suppress → execute" ordering the task brief names) blocks
+before any execution row of any status — not even `CLAIMED` — is ever created; proven directly by
+`test_suppression_execute_time.py`. Suppression is deliberately NOT folded into the content hash
+(`domain/content_hash.py` was not touched) — an existing human approval remains historically valid
+(`GET .../proposals/{id}` still reports `approval.state == "APPROVED"`), only execution is blocked. No
+override kwarg, field, or code path exists anywhere in this clause or its caller.
+
+**Structural refusal, narrowed not removed.** `providers/send_base.py::LiveExternalEmailSendDisabled`'s
+default message no longer claims the suppression prerequisite is unresolved (it isn't, as of this
+checkpoint) — it now states plainly that no `GmailSendProvider` exists yet (V2-I-b scope). The class itself,
+its stable `code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"`, and `resolve_send_provider(Mode.LIVE)`'s
+unconditional raise are ALL untouched — Live `EMAIL_SEND` remains exactly as structurally impossible as it
+was after V2-H, verified by the (updated) `test_send_provider_mode_binding.py` and the pre-existing
+`test_action_authorization.py`'s Criterion 4B suite, both still green. `test_suppression_execute_time.py`'s
+own Live-origin test additionally proves clause 15 blocks a suppressed Live proposal BEFORE
+`resolve_send_provider(Mode.LIVE)` is ever reached at all (step 7 precedes step 9) — suppression and the
+structural send refusal are independent, mutually reinforcing gates, not one standing in for the other.
+
+**API/aggregate wiring.** `api/routers/prospects.py::_contact_channel_dict` additively exposes
+`send_suppressed_at`/`send_suppression_reason`/`send_suppression_source`/`send_suppression_provider_code`
+— already-derived audit fields only, never a raw provider payload; always `None` for the LINKEDIN row (it
+never receives suppression writes). No new endpoint, no suppression-clear endpoint, no unrelated route
+change. `tests/test_prospect_aggregate_v2e.py::_APPROVED_CHANNEL_FIELDS` (the existing exhaustive-allowlist
+guard test) was updated to include exactly these four new fields — the one pre-existing test this
+checkpoint's additions required changing, and the change is additive-only (nothing removed from the
+allowlist).
+
+**Frontend.** `ContactPanel.tsx` gained one new presentational component, `EmailSuppressionNote`, rendered
+inside the existing "Email verification" axis row (no sixth axis was created) — shows the exact required
+copy ("Suppressed for sending after a provider privacy/legal restriction signal. Retained for audit; not
+sendable.") plus source/timestamp/provider-code as separate metadata, never woven into the sentence itself.
+`ActionApprovalPanel.tsx` gained a `recipient_suppressed` entry in its `BLOCKED_REASON_COPY` map and now
+exports `reasonCopy` so it's directly unit-testable without simulating the component's internal fetch
+lifecycle. `lib/types.ts::ContactChannel` gained the four matching nullable fields. New/updated tests in
+both `ContactPanel.test.tsx` and `ActionApprovalPanel.test.tsx` assert none of `"withdrew"`, `"consent"`,
+`"claimed by its owner"` appear anywhere in the rendered output for every reason code/channel state this
+checkpoint touches (and, for the panel, every OTHER pre-existing reason code too — a regression net for
+future additions, not just this one).
+
+**Deviations from the task brief:** none identified. Every numbered section (1–14) was implemented as
+specified; the two items explicitly named as V2-I-b/out-of-scope
+(`live_send_allowance_lock`/`live_send_reservations`, a `GmailSendProvider`, reconciliation, send allowance,
+`ABANDONED` semantics) were not started, touched, or stubbed.
+
+**Tests written and verified** (30 new across four new files — 6+9+9+6 — plus 3 modified for the reasons named above;
+full suite green): `tests/test_legal_restriction_signal.py` (6 — dedicated exception, one call/no retry,
+`errors[0].id` absent-vs-present classifies identically, provider_code audit-only, 404/422 unchanged);
+`tests/test_send_suppression_persistence.py` (9 — preservation, local suppression write, no new
+`contact_enrichments` row, global upsert + case-insensitive key, no-prior-identifier no-op, sticky/repeated
+restriction, later success never clears, LinkedIn never suppressed even with a prior RESOLVED profile);
+`tests/test_suppression_policy.py` (9 — clause 15 pure-function coverage in both origins, independence from
+every other clause, no override, LinkedIn unaffected, default-False, PLUS two full API-integration tests
+proving the SAME normalized address observed as a legal restriction against a totally different synthetic
+prospect blocks the real canonical Demo's Northwind Labs email globally, and that a later successful
+re-observation on that other prospect cannot clear it); `tests/test_suppression_execute_time.py` (6 —
+approve→suppress→execute yields `RECIPIENT_SUPPRESSED`, no execution row ever created, content hash
+unchanged and the approval stays historically APPROVED, repeated execute/idempotency-replay attempts all
+fail identically with no row created, reproposing the unchanged draft doesn't bypass it, and a full
+Live-mode setup — operator session + a fabricated Gmail connection, the closest analogue to "Gmail
+reconnect" available without real OAuth — is blocked by suppression strictly before reaching the
+`LiveExternalEmailSendDisabled` structural refusal). Two existing tests were updated because their OWN
+asserted behavior deliberately changed this checkpoint (not because anything regressed):
+`test_hunter_adapter.py::test_451_is_permanent_legal_restriction_never_retried` (was `..._invalid_response...`
+— 451 is no longer `EnrichmentInvalidResponse`) and `test_send_provider_mode_binding.py`'s message-content
+test (was asserting `"claimed_email"` IS present; now asserts it is ABSENT and `"GmailSendProvider"` is
+present, per the narrowed message). `test_prospect_aggregate_v2e.py`'s allowlist was extended as described
+above. **Full backend suite: 996 passed, 1 skipped (the pre-existing Postgres-only drift test, skipped for
+the same reason it always is when no Postgres service is reachable — unrelated to this checkpoint).**
+Frontend: `pnpm test` 102 passed across 9 files (includes 7 new assertions added this checkpoint —
+`ContactPanel.test.tsx` now 20 tests, `ActionApprovalPanel.test.tsx` now 7 tests), `pnpm lint` clean,
+`pnpm typecheck` clean, `pnpm build` clean.
+
+**Migration status.** `alembic upgrade head` verified clean against a fresh scratch SQLite DB (both from
+genuinely empty and from the pre-V2-I-a head `1ec5eceed8d4`); `alembic check` reports zero drift against
+`Base.metadata` after upgrading. **Postgres verification was NOT performed in this session — no Docker
+daemon/Postgres service was reachable in this environment** (`docker ps` failed to connect to the Docker
+API at all). This mirrors a limitation prior checkpoints have hit and disclosed rather than worked around
+(e.g. V2-D's blocked paid smoke) — a future session with Postgres access should run
+`alembic -x database_url=<postgres-url> upgrade head` followed by `test_migration_drift.py`'s Postgres test
+before this migration is trusted against the real Neon `v2-development` branch. Neon `production`/`master`
+were not touched, per standing instruction.
+
+**Canonical Demo — verified unchanged.** `make demo-reset && make demo` reproduced, byte-for-byte:
+`PASS 2 / NEEDS_REVIEW 2 / REJECTED 1 / DUPLICATE 1 / FAILED 1`; Northwind Labs 92 (PASS), Sable Compute 79
+(PASS), Riverbend Analytics 35 (NEEDS_REVIEW), Ferrous Grid 58 (NEEDS_REVIEW), Cobalt Retail Systems 25
+(REJECTED, disqualified); `target_count=7`; the duplicate row is Northwind Labs Inc.; run status `PARTIAL`.
+`demo_pack.yaml` has zero diff. Zero provider/network calls were made anywhere in this session's tests or
+manual verification (every Hunter exchange in every test uses `tests/live_hunter_helpers.py`'s scripted
+`httpx.MockTransport`).
+
+**Confirmed: Live `EMAIL_SEND` remains structurally impossible.** `resolve_send_provider(Mode.LIVE)` still
+unconditionally raises `LiveExternalEmailSendDisabled` — no `GmailSendProvider` was created, no send call
+was made or attempted anywhere, and the refusal's code/class/unconditional-raise behavior is byte-identical
+to V2-H's; only its human-readable message text changed.
+
+**Immediate next task: V2-I-b — Live Gmail execution + reconciliation + audit**, per
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-I (the frozen plan does not itself split V2-I into an a/b pair
+— that split was introduced by this checkpoint's own task brief specifically to isolate the legal/privacy
+prerequisite from the "real send" tier; a future session should treat "V2-I-b" as shorthand for "the
+remainder of the frozen plan's V2-I section, now that the suppression prerequisite is closed"). Do not
+begin any V2-I-b work (`GmailSendProvider`, the claim/lease/dispatch path, the §3.4 classifier, the §3.3
+bounded reconciliation loop, the stale-claim sweep, `ABANDONED`, the audit read endpoint, execute-time
+sender re-verification, `live_send_allowance_lock`/`live_send_reservations`) in the same session unless the
+user explicitly authorizes rolling into it. **The BLOCKING `claimed_email`/legal-restriction suppression
+requirement, carried forward unchanged from V2-DH through V2-H, is NOW RESOLVED as of this checkpoint** —
+a future V2-I-b session may proceed to remove/replace `LiveExternalEmailSendDisabled` once a real
+`GmailSendProvider` exists, without re-deriving or re-litigating this checkpoint's suppression design.
+
+---
+
+## What V2-G added (historical — see "Current checkpoint" above for the real current state)
 
 **V2-G — Gmail OAuth (connection only, no sending) — COMPLETE.** Implements
 `docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-G plus the task brief's own approved Rev 2 construction for

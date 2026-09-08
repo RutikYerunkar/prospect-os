@@ -89,6 +89,13 @@ any fresh session picking up v2 work must preserve them without re-deriving or r
   level rule is `LIVE_EXTERNAL`-only — it does not apply to, and is never checked against, Demo rows.
 - `DEMO_SIMULATED` executions never reserve or consume the live recipient identity, and a prior Demo
   execution never blocks a later Live send to the same address.
+- **A provider-reported legal/privacy restriction on an email identity (V2-I-a, e.g. Hunter's HTTP 451)
+  permanently suppresses that identity from `EMAIL_SEND`, in both Demo and Live, across every prospect and
+  run, with no clear/override path anywhere.** The suppression reason is the provider-neutral
+  `LEGAL_OR_PRIVACY_RESTRICTION` — UI/log/audit copy must never assert human intent ("withdrew consent",
+  "consent withdrawn", "claimed by its owner," or equivalent): Groundwork observes a provider's HTTP status,
+  never a person's actual decision. A later successful enrichment observation for the same identity must
+  never clear the suppression, locally or globally.
 - `sender_identifier` is canonicalized (via `normalize_email_identity`) before it is persisted on a
   proposal — computed once, at proposal creation, never re-derived downstream.
 - Live execution remains operator-gated — a valid operator session is one of five required server-side
