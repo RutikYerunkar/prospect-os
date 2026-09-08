@@ -17,11 +17,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from groundwork.domain.action_policy import RecipientConflict
-from groundwork.models.enums import ActionExecutionOrigin, ActionExecutionStatus, ActionType
+from groundwork.models.enums import ActionExecutionOrigin, ActionExecutionStatus, ActionType, SendOutcome
 from groundwork.models.schemas import ActionExecution, ActionProposal
 from groundwork.models.tables import (
     ActionEventRow,
@@ -228,21 +228,33 @@ class ActionRepository:
             )
             return int(result.scalar_one())
 
-    async def recipient_conflict(self, recipient_identity_key: str | None) -> RecipientConflict:
+    async def recipient_conflict(
+        self, recipient_identity_key: str | None, *, exclude_proposal_id: str | None = None
+    ) -> RecipientConflict:
         """§3.5B / policy clause 12 — LIVE_EXTERNAL EMAIL_SEND rows ONLY.
         Never inspects a `DEMO_SIMULATED` row (a demo execution neither
-        consumes nor is blocked by this rule — rev 4)."""
+        consumes nor is blocked by this rule — rev 4).
+
+        `exclude_proposal_id` excludes rows belonging to THIS SAME proposal
+        — clause 12 blocks a DIFFERENT proposal from sending a second
+        initial email to an already-contacted recipient; it must never
+        block an idempotent re-execute of the very proposal/approval that
+        produced the existing row (§3.5A's own "loses the insert race and
+        returns the existing execution" guarantee would otherwise be
+        unreachable for `SUCCEEDED`/`UNCERTAIN` rows — clause 12 would fire
+        first, before the idempotency-key check ever runs)."""
         if not recipient_identity_key:
             return RecipientConflict.NONE
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(ActionExecutionRow.status).where(
-                    ActionExecutionRow.action_type == ActionType.EMAIL_SEND.value,
-                    ActionExecutionRow.origin == ActionExecutionOrigin.LIVE_EXTERNAL.value,
-                    ActionExecutionRow.recipient_identity_key == recipient_identity_key,
-                    ActionExecutionRow.status.in_(_BLOCKING_LIVE_STATUSES),
-                )
-            )
+            conditions = [
+                ActionExecutionRow.action_type == ActionType.EMAIL_SEND.value,
+                ActionExecutionRow.origin == ActionExecutionOrigin.LIVE_EXTERNAL.value,
+                ActionExecutionRow.recipient_identity_key == recipient_identity_key,
+                ActionExecutionRow.status.in_(_BLOCKING_LIVE_STATUSES),
+            ]
+            if exclude_proposal_id is not None:
+                conditions.append(ActionExecutionRow.action_proposal_id != exclude_proposal_id)
+            result = await session.execute(select(ActionExecutionRow.status).where(*conditions))
             statuses = {row[0] for row in result.all()}
         for status_value, conflict in _STATUS_PRIORITY:
             if status_value in statuses:
@@ -378,6 +390,243 @@ class ActionRepository:
             await session.refresh(row)
             return row
 
+    async def get_execution(self, execution_id: str) -> ActionExecutionRow | None:
+        async with self._session_factory() as session:
+            result = await session.execute(select(ActionExecutionRow).where(ActionExecutionRow.id == execution_id))
+            return result.scalar_one_or_none()
+
+    async def transition_to_in_flight(
+        self, execution_id: str, *, dispatched_at: datetime
+    ) -> ActionExecutionRow | None:
+        """Phase 7 — the guarded `CLAIMED -> IN_FLIGHT` update (§3.2), the
+        LAST write before the external Gmail HTTP call. `rowcount != 1`
+        (already transitioned, or the row doesn't exist) means the caller
+        MUST NOT dispatch — this is the load-bearing crash-recovery
+        ordering: only a row that genuinely won this guarded update may ever
+        reach the network."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(ActionExecutionRow.id == execution_id, ActionExecutionRow.status == ActionExecutionStatus.CLAIMED.value)
+                .values(status=ActionExecutionStatus.IN_FLIGHT.value, dispatched_at=dispatched_at)
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
+    async def _settle(
+        self,
+        execution_id: str,
+        *,
+        new_status: ActionExecutionStatus,
+        provider: str | None,
+        dispatched: bool,
+        outcome_class: str | None,
+        provider_message_id: str | None,
+        provider_thread_id: str | None,
+        settled_at: datetime,
+        last_error_type: str | None,
+        last_error_message: str | None,
+    ) -> ActionExecutionRow:
+        async with self._session_factory() as session:
+            result = await session.execute(select(ActionExecutionRow).where(ActionExecutionRow.id == execution_id))
+            row = result.scalar_one()
+
+            ActionExecution(
+                action_proposal_id=row.action_proposal_id,
+                approval_id=row.approval_id,
+                prospect_id=row.prospect_id,
+                run_id=row.run_id,
+                action_type=row.action_type,
+                provider=provider,
+                status=new_status.value,
+                idempotency_key=row.idempotency_key,
+                recipient_identity_key=row.recipient_identity_key,
+                sender_identifier=row.sender_identifier,
+                origin=ActionExecutionOrigin(row.origin),
+                message_id_header=row.message_id_header,
+                provider_message_id=provider_message_id,
+                provider_thread_id=provider_thread_id,
+                dispatched=dispatched,
+                outcome_class=outcome_class,
+                claimed_at=row.claimed_at,
+                dispatched_at=row.dispatched_at,
+                settled_at=settled_at,
+            )
+
+            row.status = new_status.value
+            row.provider = provider
+            row.dispatched = dispatched
+            row.outcome_class = outcome_class
+            row.provider_message_id = provider_message_id
+            row.provider_thread_id = provider_thread_id
+            row.attempt_count = row.attempt_count + 1
+            row.settled_at = settled_at
+            row.last_error_type = redact(last_error_type) if last_error_type else None
+            row.last_error_message = redact(last_error_message) if last_error_message else None
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def settle_execution_failed(
+        self,
+        execution_id: str,
+        *,
+        provider: str | None,
+        dispatched: bool,
+        outcome_class: str | None,
+        provider_message_id: str | None = None,
+        settled_at: datetime,
+        last_error_type: str | None = None,
+        last_error_message: str | None = None,
+    ) -> ActionExecutionRow:
+        """§3.4 — `PROVEN_NOT_DISPATCHED`/`DEFINITIVE_REJECTION` -> `FAILED`,
+        the ONLY status that frees a recipient identity (§3.5B)."""
+        return await self._settle(
+            execution_id,
+            new_status=ActionExecutionStatus.FAILED,
+            provider=provider,
+            dispatched=dispatched,
+            outcome_class=outcome_class,
+            provider_message_id=provider_message_id,
+            provider_thread_id=None,
+            settled_at=settled_at,
+            last_error_type=last_error_type,
+            last_error_message=last_error_message,
+        )
+
+    async def settle_execution_uncertain(
+        self,
+        execution_id: str,
+        *,
+        provider: str | None,
+        dispatched: bool,
+        outcome_class: str | None,
+        provider_message_id: str | None = None,
+        provider_thread_id: str | None = None,
+        settled_at: datetime,
+        last_error_type: str | None = None,
+        last_error_message: str | None = None,
+    ) -> ActionExecutionRow:
+        """§3.4 — `ACCEPTANCE_UNKNOWN` -> `UNCERTAIN`. Never resent
+        automatically; reconciled (§3.3) or, after the window closes,
+        explicitly marked `ABANDONED` by an operator (Phase 8/9) — never
+        `FAILED`."""
+        return await self._settle(
+            execution_id,
+            new_status=ActionExecutionStatus.UNCERTAIN,
+            provider=provider,
+            dispatched=dispatched,
+            outcome_class=outcome_class,
+            provider_message_id=provider_message_id,
+            provider_thread_id=provider_thread_id,
+            settled_at=settled_at,
+            last_error_type=last_error_type,
+            last_error_message=last_error_message,
+        )
+
+    async def mark_execution_abandoned(self, execution_id: str, *, settled_at: datetime) -> ActionExecutionRow | None:
+        """Guarded `UNCERTAIN -> ABANDONED` (Phase 8, zero-egress
+        terminalization). Terminal: the recipient identity STAYS blocked
+        (`ABANDONED` remains in `_BLOCKING_LIVE_STATUSES`); allowance stays
+        consumed; no resend anywhere. `rowcount != 1` (not currently
+        `UNCERTAIN`) returns `None` — the caller must not claim success."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(
+                    ActionExecutionRow.id == execution_id,
+                    ActionExecutionRow.status == ActionExecutionStatus.UNCERTAIN.value,
+                )
+                .values(status=ActionExecutionStatus.ABANDONED.value, settled_at=settled_at)
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
+    async def record_reconcile_attempt(
+        self, execution_id: str, *, messages_scanned_delta: int, reconciled_at: datetime
+    ) -> ActionExecutionRow | None:
+        """Guarded — only advances a currently-`UNCERTAIN` row's bookkeeping
+        (`reconcile_attempts`/`messages_scanned`/`reconciled_at`); never
+        itself changes `status`."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(
+                    ActionExecutionRow.id == execution_id,
+                    ActionExecutionRow.status == ActionExecutionStatus.UNCERTAIN.value,
+                )
+                .values(
+                    reconcile_attempts=ActionExecutionRow.reconcile_attempts + 1,
+                    messages_scanned=ActionExecutionRow.messages_scanned + messages_scanned_delta,
+                    reconciled_at=reconciled_at,
+                )
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
+    async def settle_execution_found_via_reconciliation(
+        self, execution_id: str, *, provider_message_id: str, reconciled_at: datetime
+    ) -> ActionExecutionRow | None:
+        """Guarded `UNCERTAIN -> SUCCEEDED` once reconciliation FOUND the
+        message in `SENT`. `NOT_FOUND_WITHIN_BOUNDS`/`LOOKUP_FAILED` must
+        NEVER call this — they stay `UNCERTAIN` (see `record_reconcile_
+        attempt` above) — this method exists ONLY for the `FOUND` case."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(
+                    ActionExecutionRow.id == execution_id,
+                    ActionExecutionRow.status == ActionExecutionStatus.UNCERTAIN.value,
+                )
+                .values(
+                    status=ActionExecutionStatus.SUCCEEDED.value,
+                    provider_message_id=provider_message_id,
+                    outcome_class=SendOutcome.ACCEPTED.value,
+                    reconciled_at=reconciled_at,
+                    settled_at=reconciled_at,
+                )
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
+    async def force_settle_stale(
+        self,
+        execution_id: str,
+        *,
+        expected_status: ActionExecutionStatus,
+        new_status: ActionExecutionStatus,
+        outcome_class: str,
+        settled_at: datetime,
+    ) -> ActionExecutionRow | None:
+        """Phase 9 — the ONE guarded stale-recovery transition. Never
+        dispatches, never releases allowance, never resends. `rowcount != 1`
+        means the row was not in `expected_status` any more (already
+        recovered/settled by someone else, or genuinely still live) — the
+        caller must treat that as a no-op, never retry a dispatch."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(ActionExecutionRow.id == execution_id, ActionExecutionRow.status == expected_status.value)
+                .values(status=new_status.value, outcome_class=outcome_class, settled_at=settled_at)
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
     async def insert_send_call(
         self,
         *,
@@ -390,6 +639,10 @@ class ActionRepository:
         latency_ms: float = 0.0,
         operation: str = "send",
         attempt: int = 1,
+        http_status: int | None = None,
+        provider_request_id: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             session.add(
@@ -405,9 +658,93 @@ class ActionRepository:
                     started_at=started_at,
                     finished_at=finished_at,
                     latency_ms=latency_ms,
+                    http_status=http_status,
+                    provider_request_id=provider_request_id,
+                    error_type=error_type,
+                    error_message=redact(error_message) if error_message else None,
                 )
             )
             await session.commit()
+
+    async def insert_send_calls_from_telemetry(self, action_execution_id: str, telemetry: list) -> None:
+        """Convenience bulk wrapper — one `action_send_calls` row per
+        `SendAttemptTelemetry` entry, all sharing one `call_group_id` (this
+        one send-or-reconcile logical operation)."""
+        if not telemetry:
+            return
+        call_group_id = str(uuid.uuid4())
+        for i, t in enumerate(telemetry, start=1):
+            await self.insert_send_call(
+                action_execution_id=action_execution_id,
+                call_group_id=call_group_id,
+                provider=t.provider,
+                status=t.status.value if hasattr(t.status, "value") else str(t.status),
+                started_at=t.started_at,
+                finished_at=t.finished_at,
+                latency_ms=t.latency_ms,
+                operation=t.operation,
+                attempt=i,
+                http_status=t.http_status,
+                provider_request_id=t.provider_request_id,
+                error_type=t.error_type,
+                error_message=t.error_message,
+            )
+
+    # --- audit reads (Phase 10) -------------------------------------------
+
+    async def list_events_for_execution(self, action_execution_id: str) -> list[ActionEventRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionEventRow)
+                .where(ActionEventRow.action_execution_id == action_execution_id)
+                .order_by(ActionEventRow.ts.asc())
+            )
+            return list(result.scalars())
+
+    async def list_events_for_proposal(self, action_proposal_id: str) -> list[ActionEventRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionEventRow)
+                .where(ActionEventRow.action_proposal_id == action_proposal_id)
+                .order_by(ActionEventRow.ts.asc())
+            )
+            return list(result.scalars())
+
+    async def list_send_calls_for_execution(self, action_execution_id: str) -> list[ActionSendCallRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionSendCallRow)
+                .where(ActionSendCallRow.action_execution_id == action_execution_id)
+                .order_by(ActionSendCallRow.started_at.asc())
+            )
+            return list(result.scalars())
+
+    async def find_stale_claimed(self, *, before: datetime) -> list[ActionExecutionRow]:
+        """Phase 9 — candidates whose `CLAIMED` never advanced to
+        `IN_FLIGHT` (`dispatched_at IS NULL`) and are older than the stale
+        lease."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionExecutionRow).where(
+                    ActionExecutionRow.status == ActionExecutionStatus.CLAIMED.value,
+                    ActionExecutionRow.dispatched_at.is_(None),
+                    ActionExecutionRow.claimed_at < before,
+                )
+            )
+            return list(result.scalars())
+
+    async def find_stale_in_flight(self, *, before: datetime) -> list[ActionExecutionRow]:
+        """Phase 9 — candidates whose `IN_FLIGHT` dispatch never settled and
+        are older than the stale lease."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionExecutionRow).where(
+                    ActionExecutionRow.status == ActionExecutionStatus.IN_FLIGHT.value,
+                    ActionExecutionRow.dispatched_at.is_not(None),
+                    ActionExecutionRow.dispatched_at < before,
+                )
+            )
+            return list(result.scalars())
 
     async def record_event(
         self,

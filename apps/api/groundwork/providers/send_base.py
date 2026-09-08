@@ -17,6 +17,14 @@ Gmail itself is deployment-scoped, not run-scoped (see
 Protocol and `DemoEmailSendProvider` are therefore deliberately NOT part of
 `providers.base.ProviderBundle`; `ProviderBundle` stays exactly the three
 fields V2-D/V2-DH already established (`llm`, `search`, `enrichment`).
+
+V2-I-b: `SendOutcome`/`ReconcileStatus` are imported from `models/enums.py`
+— the frozen Part 4 canonical location, and the same classes
+`domain/send_classifier.py` and `models/tables.py::ActionExecutionRow`
+already use — rather than re-declared locally, so a `classify_send_outcome()`
+result can be assigned straight into a `SendResult`/`ReconcileResult` field
+without pydantic silently coercing across two same-named-but-distinct enum
+classes (which would break `is`/exhaustive-match identity checks).
 """
 
 from __future__ import annotations
@@ -27,6 +35,22 @@ from enum import StrEnum
 from typing import Protocol
 
 from pydantic import BaseModel, Field
+
+from groundwork.models.enums import ReconcileStatus, SendOutcome
+
+__all__ = [
+    "SendAttemptStatus",
+    "SendAttemptTelemetry",
+    "SendOutcome",
+    "OutboundEmailMessage",
+    "SendResult",
+    "ReconcileStatus",
+    "ReconcileBounds",
+    "ReconcileResult",
+    "LiveExternalEmailSendDisabled",
+    "EmailSendProvider",
+    "DemoEmailSendProvider",
+]
 
 
 class SendAttemptStatus(StrEnum):
@@ -62,13 +86,6 @@ class SendAttemptTelemetry(BaseModel):
     error_message: str | None = None  # redacted before this is set
 
 
-class SendOutcome(StrEnum):
-    ACCEPTED = "ACCEPTED"
-    PROVEN_NOT_DISPATCHED = "PROVEN_NOT_DISPATCHED"
-    DEFINITIVE_REJECTION = "DEFINITIVE_REJECTION"
-    ACCEPTANCE_UNKNOWN = "ACCEPTANCE_UNKNOWN"
-
-
 class OutboundEmailMessage(BaseModel):
     to: str
     subject: str
@@ -82,13 +99,6 @@ class SendResult(BaseModel):
     provider_thread_id: str | None = None
     dispatched: bool  # was the body written to the transport? sets dispatched_at
     telemetry: list[SendAttemptTelemetry] = Field(default_factory=list)
-
-
-class ReconcileStatus(StrEnum):
-    FOUND = "FOUND"
-    NOT_FOUND_WITHIN_BOUNDS = "NOT_FOUND_WITHIN_BOUNDS"  # NOT evidence of non-delivery
-    UNSUPPORTED = "UNSUPPORTED"  # provider cannot reconcile at all
-    LOOKUP_FAILED = "LOOKUP_FAILED"  # the reconciliation call itself failed
 
 
 class ReconcileBounds(BaseModel):
@@ -109,22 +119,23 @@ class ReconcileResult(BaseModel):
 class LiveExternalEmailSendDisabled(Exception):
     """V2-H, Critical Decision D1 — a dedicated, typed, structural refusal
     for `EMAIL_SEND` + `LIVE_EXTERNAL`. Deliberately NOT `ProviderNotConfigured`
-    (`providers/base.py`) and deliberately independent of whether any send
-    provider is registered: registering a future `GmailSendProvider` (V2-I-b)
-    must never silently make Live sending executable again just because a
-    provider object now exists. This exception is the one and only thing
-    that makes Live email sending unreachable — `resolve_send_provider`
-    (`providers/send_registry.py`) raises it unconditionally for `Mode.LIVE`,
-    before any provider instance, `send()` call, or network dispatch is ever
+    (`providers/base.py`).
+
+    History: through V2-H/V2-I-a, `resolve_send_provider(Mode.LIVE)`
+    (`providers/send_registry.py`) raised this unconditionally, and it was
+    the one and only thing making Live email sending unreachable — before
+    any provider instance, `send()` call, or network dispatch was ever
     reachable.
 
-    V2-I-a's legal/privacy send-suppression prerequisite (see
-    `docs/PROGRESS.md`'s V2-I-a entry) is now implemented — the message below
-    no longer names it as an unresolved blocker, since it no longer is one.
-    This refusal itself stays load-bearing and unconditional regardless: it
-    is not about suppression at all, it is about the fact that no real send
-    provider exists yet. It stays in force until V2-I-b *deliberately*
-    removes/replaces it, after implementing a real `GmailSendProvider`.
+    V2-I-b, refusal-removal gate: a real `GmailSendProvider` now exists, and
+    the real Live dispatch path (`api/routers/actions.py::execute_action` ->
+    `api/gmail_provider_factory.py::build_gmail_send_provider` ->
+    `api/live_send_orchestration.py::dispatch_live_email_send`) no longer
+    calls `resolve_send_provider` at all — so this exception is no longer on
+    that path and no longer gates real sending. It is kept, unchanged in
+    shape, as `resolve_send_provider(Mode.LIVE)`'s own defensive guard (see
+    that module's docstring) so a stray/legacy call site fails loudly with a
+    clearly-named error rather than silently returning a wrong provider.
     """
 
     code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
@@ -133,10 +144,9 @@ class LiveExternalEmailSendDisabled(Exception):
         super().__init__(
             message
             or (
-                "Live external email sending is disabled in this checkpoint: no GmailSendProvider "
-                "exists yet — real Gmail sending is V2-I-b scope. This refusal is unconditional and "
-                "independent of whether any send provider is registered or configured; configuring "
-                "one must never silently lift it — V2-I-b must remove it deliberately."
+                "resolve_send_provider(Mode.LIVE) is a defensive guard only — a real GmailSendProvider "
+                "exists (V2-I-b), but the real Live dispatch path never calls this function; it goes "
+                "through api/gmail_provider_factory.py::build_gmail_send_provider instead."
             )
         )
 

@@ -17,9 +17,11 @@ from fastapi import Depends, Request
 from groundwork.api.operator_auth import COOKIE_NAME, verify_session_cookie
 from groundwork.db import SessionLocal
 from groundwork.engine.runner import Repos
+from groundwork.config import settings
 from groundwork.repositories.actions import ActionRepository
 from groundwork.repositories.approvals import ApprovalRepository
 from groundwork.repositories.gmail_connection import GmailConnectionRepository
+from groundwork.repositories.live_send_allowance import LiveSendAllowanceRepository
 from groundwork.repositories.plays import PlayRepository
 
 
@@ -131,7 +133,16 @@ def get_actions_repo(session_factory: SessionFactory) -> ActionRepository:
     return ActionRepository(session_factory)
 
 
+def get_live_send_allowance_repo(session_factory: SessionFactory) -> LiveSendAllowanceRepository:
+    return LiveSendAllowanceRepository(
+        session_factory,
+        max_attempts=settings.allowance_lock_max_attempts,
+        retry_base_delay_s=settings.allowance_lock_retry_base_delay_s,
+    )
+
+
 ReposDep = Annotated[Repos, Depends(get_repos)]
 PlaysRepoDep = Annotated[PlayRepository, Depends(get_plays_repo)]
 ApprovalsRepoDep = Annotated[ApprovalRepository, Depends(get_approvals_repo)]
 ActionsRepoDep = Annotated[ActionRepository, Depends(get_actions_repo)]
+LiveSendAllowanceRepoDep = Annotated[LiveSendAllowanceRepository, Depends(get_live_send_allowance_repo)]

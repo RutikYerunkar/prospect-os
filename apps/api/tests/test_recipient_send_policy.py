@@ -252,3 +252,52 @@ class TestPartialUniqueIndexDemoNeverBlocksDemo:
         except IntegrityError:
             raised = True
         assert raised, "the partial unique index must reject a second blocking LIVE_EXTERNAL row for one recipient"
+
+
+class TestExcludeProposalIdIdempotentRetry:
+    """V2-I-b — an idempotent re-execute of the SAME proposal/approval that
+    already produced a blocking row must NOT see clause 12 fire against its
+    own prior execution (that would make §3.5A's "duplicate execute returns
+    the existing execution" guarantee unreachable for a Live send that
+    already succeeded/is UNCERTAIN — clause 12 would block first, before
+    the idempotency-key check is ever reached)."""
+
+    async def test_own_proposals_succeeded_row_is_excluded(self, client, session_factory):
+        proposal, northwind = await _real_proposal_ids(client)
+        await _insert_execution_row(
+            session_factory,
+            prospect_id=northwind["id"],
+            run_id=proposal["run_id"],
+            action_proposal_id=proposal["id"],
+            origin=ActionExecutionOrigin.LIVE_EXTERNAL,
+            status=ActionExecutionStatus.SUCCEEDED,
+        )
+        from groundwork.repositories.actions import ActionRepository
+
+        repo = ActionRepository(session_factory)
+        assert (
+            await repo.recipient_conflict(RECIPIENT_KEY, exclude_proposal_id=proposal["id"])
+            is RecipientConflict.NONE
+        )
+        # Without the exclusion, the same row still conflicts (proves the
+        # parameter is doing real filtering, not vacuously passing).
+        assert await repo.recipient_conflict(RECIPIENT_KEY) is RecipientConflict.SUCCEEDED
+
+    async def test_a_different_proposals_succeeded_row_still_conflicts(self, client, session_factory):
+        proposal, northwind = await _real_proposal_ids(client)
+        await _insert_execution_row(
+            session_factory,
+            prospect_id=northwind["id"],
+            run_id=proposal["run_id"],
+            action_proposal_id=proposal["id"],
+            origin=ActionExecutionOrigin.LIVE_EXTERNAL,
+            status=ActionExecutionStatus.SUCCEEDED,
+        )
+        from groundwork.repositories.actions import ActionRepository
+
+        repo = ActionRepository(session_factory)
+        # Excluding a DIFFERENT (unrelated) proposal id changes nothing.
+        assert (
+            await repo.recipient_conflict(RECIPIENT_KEY, exclude_proposal_id="some-other-proposal-id")
+            is RecipientConflict.SUCCEEDED
+        )

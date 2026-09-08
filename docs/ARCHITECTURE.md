@@ -549,3 +549,51 @@ that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no se
   (`errors[0].id` is captured for audit/provenance and never read to decide anything); suppression, once
   set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
   checkpoint — there is deliberately no clear/override endpoint.
+
+### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal removed
+
+Closes the remainder of V2-H's D1 refusal — a real `GmailSendProvider` exists, and Live `EMAIL_SEND` is
+now reachable end-to-end.
+
+- **A different seam than `resolve_send_provider`, deliberately.** `resolve_send_provider(mode)` is a
+  synchronous, mode-keyed function — correct for `Mode.DEMO` (a stateless, zero-egress provider,
+  constructable with no arguments), but structurally unable to construct a real Live provider, which
+  needs async DB access (the connected account + its decrypted refresh token via
+  `GmailConnectionRepository`/`token_crypto`). Rather than forcing that access through a synchronous
+  function, `execute_action`'s `LIVE_EXTERNAL` branch calls a purpose-built async pair instead:
+  `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the
+  token, constructs `GmailSendProvider`; `None` on no-usable-credential) then
+  `api/live_send_orchestration.py::dispatch_live_email_send` (the dispatch ordering itself).
+  `resolve_send_provider(Mode.LIVE)` is UNCHANGED — it still unconditionally raises
+  `LiveExternalEmailSendDisabled` — but it is no longer on the real dispatch path at all; it survives
+  only as a defensive guard against a stray/legacy call site. This is the same "separate, mode-keyed
+  resolver called only at the moments the design actually needs it" principle V2-H established, extended
+  rather than violated: proposal-creation sender capture still goes through `_resolve_email_sender`
+  (which reads `GmailConnectionRepository` directly, not `resolve_send_provider`, for `LIVE_EXTERNAL` —
+  unchanged since V2-H), and execute-time dispatch now goes through the new async pair.
+- **Dispatch ordering is the crash-recovery guarantee, not a convenience.** `CLAIMED` (write-ahead,
+  carrying the generated Message-ID) commits BEFORE the allowance reservation, which commits BEFORE the
+  guarded `IN_FLIGHT` transition, which commits BEFORE the one Gmail HTTP call. A process crash at any
+  point before `IN_FLIGHT` leaves a row the stale-claim sweep (`POST .../recover`) can safely resolve
+  without ever having dispatched; a crash after `IN_FLIGHT` but before settling leaves a row that
+  reconciliation (`POST .../reconcile`) or, eventually, `recover` can resolve to `UNCERTAIN` — never
+  re-dispatched, never guessed.
+- **The allowance is a belt-and-braces pair, exactly like §3.5B's own precedent.** `domain/action_policy.
+  py` clause 14 is a pre-check (denies with a clear `send_allowance_exhausted` reason before any write);
+  `LiveSendAllowanceRepository.try_reserve()`'s guarded transaction is the actual guarantee (a narrow race
+  between the pre-check and the reservation is resolved by the transaction, never by the pre-check).
+  Reservations are never released — the same permanent-consumption posture §3.5B's partial unique index
+  already established for the recipient-level rule.
+- **A real ordering bug, found and fixed by the first end-to-end test that could exercise it.** Policy
+  clause 12 (`recipient_conflict`) is recipient-scoped, not proposal-scoped, by design (§3.5B) — but that
+  meant an idempotent retry of an ALREADY-SUCCEEDED proposal also tripped it, before the request-
+  idempotency check (§3.5A) ever got a chance to return the existing execution. This was structurally
+  invisible before V2-I-b, because Live could never previously reach `SUCCEEDED`/`UNCERTAIN` to retry
+  against. Fixed by `exclude_proposal_id` on `recipient_conflict()` — see `docs/PROGRESS.md`'s "What
+  V2-I-b added" for the full account.
+- **Reconciliation never expands the OAuth scope.** `messages.list(labelIds=["SENT"])` + bounded
+  `messages.get(format="metadata", ...)` — never `q`, never `gmail.readonly` — confirming V2-G's own hard
+  gate finding (metadata-only reconciliation is viable) held through real implementation.
+- **`ABANDONED` is honest, not a euphemism for "probably not sent."** The audit copy states plainly that
+  reaching `ABANDONED` is not evidence the message wasn't sent — Groundwork simply stopped checking. The
+  recipient identity stays blocked permanently; there is no resend anywhere in this codebase.
