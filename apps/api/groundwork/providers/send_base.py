@@ -119,23 +119,28 @@ class ReconcileResult(BaseModel):
 class LiveExternalEmailSendDisabled(Exception):
     """V2-H, Critical Decision D1 — a dedicated, typed, structural refusal
     for `EMAIL_SEND` + `LIVE_EXTERNAL`. Deliberately NOT `ProviderNotConfigured`
-    (`providers/base.py`).
+    (`providers/base.py`) and deliberately independent of whether any send
+    provider is registered: a real `GmailSendProvider` existing must never
+    silently make Live sending executable just because a provider object now
+    exists. `resolve_send_provider` (`providers/send_registry.py`) raises it
+    unconditionally for `Mode.LIVE`, and `api/routers/actions.py::
+    execute_action`'s `LIVE_EXTERNAL` branch calls that function FIRST —
+    before `api/gmail_provider_factory.py::build_gmail_send_provider` or
+    `api/live_send_orchestration.py::dispatch_live_email_send` are ever
+    reached — so this exception is the one and only thing that makes Live
+    email sending unreachable, regardless of how complete or correct the
+    rest of the implementation is.
 
-    History: through V2-H/V2-I-a, `resolve_send_provider(Mode.LIVE)`
-    (`providers/send_registry.py`) raised this unconditionally, and it was
-    the one and only thing making Live email sending unreachable — before
-    any provider instance, `send()` call, or network dispatch was ever
-    reachable.
-
-    V2-I-b, refusal-removal gate: a real `GmailSendProvider` now exists, and
-    the real Live dispatch path (`api/routers/actions.py::execute_action` ->
-    `api/gmail_provider_factory.py::build_gmail_send_provider` ->
-    `api/live_send_orchestration.py::dispatch_live_email_send`) no longer
-    calls `resolve_send_provider` at all — so this exception is no longer on
-    that path and no longer gates real sending. It is kept, unchanged in
-    shape, as `resolve_send_provider(Mode.LIVE)`'s own defensive guard (see
-    that module's docstring) so a stray/legacy call site fails loudly with a
-    clearly-named error rather than silently returning a wrong provider.
+    Status as of V2-I-b (gate-order correction — see `docs/PROGRESS.md`): a
+    real `GmailSendProvider` and the full dispatch/reconciliation/allowance/
+    audit path now exist, fully implemented and independently unit-tested,
+    but this refusal remains load-bearing and unconditional — it stays in
+    force until the accepted plan's full verification checklist (full
+    SQLite, full Postgres + migration drift verified in CI, canonical Demo,
+    the complete safety-test matrix) passes AND a human deliberately
+    authorizes removing it, in its own dedicated, reviewed step. A
+    documented "could not verify" gap (e.g. no local Postgres) is explicitly
+    NOT sufficient grounds to remove it — only a passed check is.
     """
 
     code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
@@ -144,9 +149,11 @@ class LiveExternalEmailSendDisabled(Exception):
         super().__init__(
             message
             or (
-                "resolve_send_provider(Mode.LIVE) is a defensive guard only — a real GmailSendProvider "
-                "exists (V2-I-b), but the real Live dispatch path never calls this function; it goes "
-                "through api/gmail_provider_factory.py::build_gmail_send_provider instead."
+                "Live external email sending is disabled: a real GmailSendProvider exists (V2-I-b), but "
+                "this refusal remains the deliberate, load-bearing, unconditional gate on real Live "
+                "dispatch until the full accepted-plan verification checklist passes in CI (including "
+                "Postgres + migration drift) and a human explicitly authorizes removing it. Registering "
+                "or configuring a provider can never lift it on its own."
             )
         )
 

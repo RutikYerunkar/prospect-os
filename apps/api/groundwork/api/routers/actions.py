@@ -31,6 +31,7 @@ from groundwork.api.deps import (
     ReposDep,
 )
 from groundwork.api.errors import (
+    ActionDisabledError,
     ConflictError,
     NotFoundError,
     TooManyRequestsError,
@@ -73,7 +74,12 @@ from groundwork.models.enums import (
     ReviewVerdict,
 )
 from groundwork.models.tables import ActionExecutionRow, ActionProposalRow, ApprovalRow
-from groundwork.providers.send_base import OutboundEmailMessage, ReconcileBounds, ReconcileStatus
+from groundwork.providers.send_base import (
+    LiveExternalEmailSendDisabled,
+    OutboundEmailMessage,
+    ReconcileBounds,
+    ReconcileStatus,
+)
 from groundwork.providers.send_registry import resolve_send_provider
 from groundwork.timeutil import ensure_aware, utcnow
 
@@ -556,7 +562,6 @@ async def execute_action(
     actions: ActionsRepoDep,
     approvals: ApprovalsRepoDep,
     gmail: GmailRepoDep,
-    oauth_runtime: GoogleOAuthRuntimeDep,
     allowance: LiveSendAllowanceRepoDep,
     is_operator: IsOperatorDep,
 ) -> ActionProposalResponse:
@@ -575,13 +580,17 @@ async def execute_action(
        duplicate execute returns the EXISTING execution, never a second one
     9. dispatch: `LINKEDIN_COPY_AND_OPEN` never touches a send provider;
        Demo `EMAIL_SEND` dispatches via `resolve_send_provider(Mode.DEMO)`;
-       Live `EMAIL_SEND` dispatches via `api/live_send_orchestration.py::
-       dispatch_live_email_send`, itself ordered CLAIMED -> allowance
-       reservation -> guarded IN_FLIGHT -> the one Gmail HTTP call ->
-       classify -> settle (V2-I-b, Phase 7). `resolve_send_provider(Mode.
-       LIVE)` is no longer on this path at all — it remains Demo-only; a
-       stray call with `Mode.LIVE` still raises `LiveExternalEmailSendDisabled`
-       defensively, but nothing in this router calls it that way any more.
+       `LIVE_EXTERNAL` `EMAIL_SEND` dispatches via
+       `resolve_send_provider(Mode.LIVE)` — which unconditionally raises
+       `LiveExternalEmailSendDisabled` here, AFTER every gate above has
+       already passed, proving the refusal is structural, not merely a
+       policy verdict (D4). The real dispatch implementation
+       (`api/gmail_provider_factory.py::build_gmail_send_provider` +
+       `api/live_send_orchestration.py::dispatch_live_email_send`, ordered
+       CLAIMED -> allowance reservation -> guarded IN_FLIGHT -> the one
+       Gmail HTTP call -> classify -> settle) is fully implemented and
+       independently tested but deliberately NOT called from here — see
+       the comment above the refusal check for why and what un-gates it.
     """
     _rate_limit(request)
     proposal, run = await _load_proposal_and_run(proposal_id, repos, actions)
@@ -778,52 +787,42 @@ async def execute_action(
 
     # LIVE_EXTERNAL — every gate above has already passed (operator session,
     # approval, hash_version, sender match, content hash, fresh policy
-    # ELIGIBLE). V2-I-b: real dispatch, via the async seam
-    # `build_gmail_send_provider` + `dispatch_live_email_send` —
-    # deliberately NOT `resolve_send_provider(Mode.LIVE)`, which cannot
-    # provide the async DB/runtime context a real provider needs and
-    # remains Demo-only (see its own docstring). `provider is None` is a
-    # rare defensive case here (clauses 10/11 above already require a
-    # matching connected sender) — a refresh token that fails to decrypt
-    # (e.g. a key rotated without `_OLD` set) is the realistic cause.
-    provider = await build_gmail_send_provider(gmail, oauth_runtime)
-    if provider is None:
+    # ELIGIBLE). This is the deliberate D4 structural boundary, RESTORED
+    # (see docs/PROGRESS.md's V2-I-b gate-order correction): the accepted
+    # plan requires full SQLite + full Postgres/migration-drift + canonical
+    # Demo + the complete safety-test matrix to pass in CI BEFORE this
+    # refusal may be removed — a documented Postgres-unreachable-in-this-
+    # environment gap is NOT the same thing as a passed gate. Everything
+    # below this check (`build_gmail_send_provider`, `dispatch_live_email_
+    # send`, the whole Phase 6/7 dispatch path) is fully implemented and
+    # independently unit-tested (`test_gmail_send_provider.py`,
+    # `test_live_send_orchestration.py`) but is deliberately UNREACHABLE
+    # through this router until CI verification passes and a human
+    # explicitly authorizes removing this refusal again, in its own
+    # dedicated, reviewed step — never as a side effect of implementing or
+    # configuring anything. Checked FIRST, before `build_gmail_send_
+    # provider` is ever called, so a fully working Gmail connection can
+    # never bypass it — proven by
+    # `test_live_dispatch_refusal_not_bypassable.py`.
+    try:
+        resolve_send_provider(Mode.LIVE)
+    except LiveExternalEmailSendDisabled as exc:
         await actions.record_event(
             prospect_id=proposal.prospect_id,
-            type="live_send_unavailable",
+            type="live_send_disabled",
             actor=body.actor,
             action_proposal_id=proposal.id,
-            payload={"reason": "no working Gmail send provider could be constructed"},
+            payload={"reason": str(exc)},
         )
-        raise ConflictError(
-            "Gmail is not connected or its stored credential could not be used — reconnect Gmail in Settings",
-            code="GMAIL_NOT_CONNECTED",
-        )
-
-    settled = await dispatch_live_email_send(
-        actions=actions,
-        allowance=allowance,
-        provider=provider,
-        proposal=proposal,
-        approval=approval,
-        draft=draft,
-        idempotency_key=idempotency_key,
-        live_max_sends_per_day=settings.live_max_sends_per_day,
-    )
-    event_type = {
-        ActionExecutionStatus.SUCCEEDED.value: "execution_succeeded",
-        ActionExecutionStatus.FAILED.value: "execution_failed",
-        ActionExecutionStatus.UNCERTAIN.value: "execution_uncertain",
-    }.get(settled.status, "execution_settled")
-    await actions.record_event(
-        prospect_id=proposal.prospect_id,
-        type=event_type,
-        actor=body.actor,
-        action_proposal_id=proposal.id,
-        action_execution_id=settled.id,
-        payload={"outcome_class": settled.outcome_class, "provider_message_id": settled.provider_message_id},
-    )
-    return _proposal_response(proposal, approval=approval, execution=settled, created=True)
+        raise ActionDisabledError(str(exc), code=LiveExternalEmailSendDisabled.code) from exc
+    # Unreachable — resolve_send_provider(Mode.LIVE) always raises above.
+    # The real dispatch call (build_gmail_send_provider + dispatch_live_
+    # email_send) is NOT inlined here — it lives fully implemented and
+    # independently tested in api/gmail_provider_factory.py and
+    # api/live_send_orchestration.py, ready to be wired in with a small,
+    # reviewable diff at this exact point once the refusal above is
+    # deliberately removed.
+    raise AssertionError("unreachable: resolve_send_provider(Mode.LIVE) must always raise")
 
 
 # ============================================================================

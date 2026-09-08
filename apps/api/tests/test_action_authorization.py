@@ -99,29 +99,32 @@ class TestCriterion4ADemoNoOperatorNoGmail:
         assert body["execution"]["provider_message_id"].startswith("demo://")
 
 
-class TestCriterion4BLiveHonestDegradeOnUnusableCredential:
-    """4B, updated for V2-I-b's refusal-removal gate: `resolve_send_provider
-    (Mode.LIVE)`'s old unconditional structural refusal is no longer on the
-    real dispatch path at all (see `providers/send_registry.py`'s updated
-    docstring) — a real `GmailSendProvider` now exists and IS reachable.
-    This test's fabricated Gmail connection uses a placeholder ciphertext
-    (`"test-only-not-a-real-ciphertext"`, never real Fernet output) — which
-    is exactly the "a working provider cannot be constructed" case
-    `build_gmail_send_provider` is built to degrade honestly from (a refresh
-    token that fails to decrypt), never a fixture fallback. No provider
-    `send()`/network dispatch occurs, and no execution row is EVER created —
-    `build_gmail_send_provider` returning `None` is checked BEFORE
-    `dispatch_live_email_send`'s own `insert_claimed_execution` call."""
+class TestCriterion4BLiveStructuralRefusal:
+    """4B — Live: valid operator session, otherwise sufficient fabricated/
+    test-only authorization state, execution reaches the structural
+    refusal; no provider `send()`/network dispatch occurs.
 
-    async def test_live_execute_with_undecryptable_refresh_token_is_409_no_execution_row_created(
+    V2-I-b gate-order correction (see `docs/PROGRESS.md`): a real
+    `GmailSendProvider` and the full async dispatch seam
+    (`build_gmail_send_provider` + `dispatch_live_email_send`) are fully
+    implemented and independently tested, but `execute_action`'s
+    `LIVE_EXTERNAL` branch calls `resolve_send_provider(Mode.LIVE)` FIRST —
+    which unconditionally raises `LiveExternalEmailSendDisabled` — before
+    that seam is ever reached. This test's fabricated Gmail connection
+    (a placeholder, non-Fernet ciphertext) never even gets far enough to
+    matter: the refusal fires regardless of whether the connection would
+    have worked, proving Live sending is unreachable independent of
+    credential validity."""
+
+    async def test_live_execute_reaches_structural_refusal_with_no_execution_row_created(
         self, client, session_factory, monkeypatch
     ):
         proposal, _ = await _live_northwind_email_setup(client, session_factory, monkeypatch)
 
         execute_resp = await execute(client, proposal["id"])
-        assert execute_resp.status_code == 409, execute_resp.text
+        assert execute_resp.status_code == 403, execute_resp.text
         body = execute_resp.json()
-        assert body["code"] == "GMAIL_NOT_CONNECTED"
+        assert body["code"] == "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
 
         async with session_factory() as session:
             from sqlalchemy import select
@@ -131,7 +134,7 @@ class TestCriterion4BLiveHonestDegradeOnUnusableCredential:
             result = await session.execute(
                 select(ActionExecutionRow).where(ActionExecutionRow.action_proposal_id == proposal["id"])
             )
-            assert result.scalar_one_or_none() is None, "no execution row must ever be created here"
+            assert result.scalar_one_or_none() is None, "no execution row must ever be created for a Live send"
 
 
 class TestOrdinaryLiveWithoutOperatorIsUnauthorized:

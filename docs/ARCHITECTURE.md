@@ -550,27 +550,34 @@ that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no se
   set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
   checkpoint — there is deliberately no clear/override endpoint.
 
-### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal removed
+### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal implemented-but-retained
 
-Closes the remainder of V2-H's D1 refusal — a real `GmailSendProvider` exists, and Live `EMAIL_SEND` is
-now reachable end-to-end.
+A real `GmailSendProvider` and the full dispatch/reconciliation/allowance/audit path now exist, fully
+implemented and independently tested — but `LiveExternalEmailSendDisabled` remains the load-bearing,
+unconditional gate on real Live dispatch. **Gate-order correction, recorded explicitly:** an earlier state
+of this checkpoint removed the refusal on the reasoning that a documented Postgres-verification gap (no
+Docker/Postgres reachable in the implementation environment) was an acceptable substitute for a passed
+Postgres check. It was not, and the user reverted it — the accepted plan requires full SQLite, full
+Postgres + migration drift (verified in CI), canonical Demo, and the complete safety-test matrix to
+actually **pass**, not merely be attempted-and-explained-away, before this refusal may be removed. See
+`docs/PROGRESS.md`'s "What V2-I-b added" for the full account, including the new regression test proving a
+fully working Gmail connection cannot bypass the restored refusal.
 
-- **A different seam than `resolve_send_provider`, deliberately.** `resolve_send_provider(mode)` is a
-  synchronous, mode-keyed function — correct for `Mode.DEMO` (a stateless, zero-egress provider,
-  constructable with no arguments), but structurally unable to construct a real Live provider, which
-  needs async DB access (the connected account + its decrypted refresh token via
-  `GmailConnectionRepository`/`token_crypto`). Rather than forcing that access through a synchronous
-  function, `execute_action`'s `LIVE_EXTERNAL` branch calls a purpose-built async pair instead:
-  `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the
-  token, constructs `GmailSendProvider`; `None` on no-usable-credential) then
-  `api/live_send_orchestration.py::dispatch_live_email_send` (the dispatch ordering itself).
-  `resolve_send_provider(Mode.LIVE)` is UNCHANGED — it still unconditionally raises
-  `LiveExternalEmailSendDisabled` — but it is no longer on the real dispatch path at all; it survives
-  only as a defensive guard against a stray/legacy call site. This is the same "separate, mode-keyed
-  resolver called only at the moments the design actually needs it" principle V2-H established, extended
-  rather than violated: proposal-creation sender capture still goes through `_resolve_email_sender`
-  (which reads `GmailConnectionRepository` directly, not `resolve_send_provider`, for `LIVE_EXTERNAL` —
-  unchanged since V2-H), and execute-time dispatch now goes through the new async pair.
+- **A different seam than `resolve_send_provider`, ready but not wired to fire.** `resolve_send_provider
+  (mode)` is a synchronous, mode-keyed function — correct for `Mode.DEMO` (a stateless, zero-egress
+  provider, constructable with no arguments), but structurally unable to construct a real Live provider,
+  which needs async DB access (the connected account + its decrypted refresh token via
+  `GmailConnectionRepository`/`token_crypto`). The real construction path exists as a purpose-built async
+  pair — `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the
+  token, constructs `GmailSendProvider`; `None` on no-usable-credential) then `api/live_send_
+  orchestration.py::dispatch_live_email_send` (the dispatch ordering itself) — fully implemented and
+  independently unit-tested (never through the router, exactly how it was built and verified before any
+  wiring existed). `execute_action`'s `LIVE_EXTERNAL` branch calls `resolve_send_provider(Mode.LIVE)`
+  FIRST — its unconditional raise — BEFORE that async pair is ever reached, so the pair stays implemented
+  but unreachable until the refusal is deliberately removed in its own future, separately-reviewed step.
+  Proposal-creation sender capture still goes through `_resolve_email_sender` (which reads
+  `GmailConnectionRepository` directly, not `resolve_send_provider`, for `LIVE_EXTERNAL` — unchanged since
+  V2-H) — that part of the design was never gated and remains as-is.
 - **Dispatch ordering is the crash-recovery guarantee, not a convenience.** `CLAIMED` (write-ahead,
   carrying the generated Message-ID) commits BEFORE the allowance reservation, which commits BEFORE the
   guarded `IN_FLIGHT` transition, which commits BEFORE the one Gmail HTTP call. A process crash at any
