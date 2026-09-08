@@ -160,6 +160,39 @@ class Settings(BaseSettings):
     action_write_rate_limit_attempts: int = 30
     action_write_rate_limit_window_s: float = 60.0
 
+    # --- V2-I-b: Live Gmail execution + reconciliation + audit ---
+    # §3.3 bounded reconciliation bounds — a `messages.list(labelIds=SENT])`
+    # + bounded `messages.get(format="metadata")` scan under `gmail.metadata`
+    # least privilege (no `q`, no `gmail.readonly`). Defaults match the
+    # frozen plan's own table exactly.
+    reconcile_page_size: int = 25
+    reconcile_max_pages: int = 2
+    reconcile_max_messages: int = 50
+    reconcile_clock_skew_s: float = 60.0
+    reconcile_max_attempts: int = 3
+    reconcile_window_s: float = 900.0
+
+    # One HTTP request, zero-retry — the deadline for `messages.send` itself
+    # (distinct from `gmail_oauth_call_deadline_s`, which governs the
+    # connect/callback flow's token/profile calls).
+    gmail_send_call_deadline_s: float = 20.0
+
+    # A `CLAIMED` row with no `dispatched_at`, or an `IN_FLIGHT` row whose
+    # `dispatched_at` is older than this, is eligible for the stale-recovery
+    # sweep (Phase 9) — never dispatched automatically, only ever settled to
+    # `FAILED`/`UNCERTAIN` by an explicit operator-gated recover call.
+    execution_stale_lease_s: float = 300.0
+
+    # Rolling 24h Live send allowance (Phase 5) — a DB-backed, cross-process
+    # correct cap, never reset at UTC midnight (the window is rolling, not
+    # calendar-aligned).
+    live_max_sends_per_day: int = 50
+    # SQLite lock-retry bounds for the allowance reservation transaction —
+    # at most this many COMPLETE transaction attempts; exhaustion denies the
+    # reservation (grants nothing, dispatches nothing) rather than raising.
+    allowance_lock_max_attempts: int = 3
+    allowance_lock_retry_base_delay_s: float = 0.05
+
     # --- Checkpoint I1 Phase 9: request/host/error hardening ---
     # `["*"]` (any host) preserves today's unrestricted behavior for local
     # dev/tests. A production deployment should set this explicitly (see

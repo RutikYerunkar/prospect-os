@@ -804,3 +804,37 @@ class OAuthStateRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# =====================================================================
+# V2-I-b — rolling 24h Live send allowance (Phase 5). Exactly two additive
+# tables. `live_send_allowance_lock` carries exactly one seeded row
+# (`id="default"`) whose `version` column is the guard: every reservation
+# attempt starts with a guarded `UPDATE ... SET version = version + 1 WHERE
+# id = 'default'` inside the SAME transaction as the reservation-count
+# read and the reservation insert (see
+# `repositories/live_send_allowance.py`) — this row-level write lock is what
+# makes the count-then-insert correct under concurrency, exactly like
+# `runs.last_event_seq` already guards SSE sequencing. `live_send_
+# reservations` rows are NEVER deleted/released for any outcome — the
+# allowance is consumed the moment a reservation is inserted, permanently.
+# =====================================================================
+
+
+class LiveSendAllowanceLockRow(Base):
+    __tablename__ = "live_send_allowance_lock"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="default")
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class LiveSendReservationRow(Base):
+    """One row per successfully reserved Live send — `execution_id` is
+    unique (one reservation per execution, never released). `reserved_at`
+    is the rolling-window timestamp counted against `LIVE_MAX_SENDS_PER_DAY`
+    — the window is rolling (now - 24h), never reset at UTC midnight."""
+
+    __tablename__ = "live_send_reservations"
+
+    execution_id: Mapped[str] = mapped_column(ForeignKey("action_executions.id"), primary_key=True)
+    reserved_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
