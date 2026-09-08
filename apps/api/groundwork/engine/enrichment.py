@@ -17,6 +17,7 @@ import uuid
 
 from groundwork.engine.context import ProspectContext
 from groundwork.providers.contact_base import (
+    EnrichmentLegalRestriction,
     EnrichmentProviderError,
     PersonEnrichmentQuery,
     PersonEnrichmentResult,
@@ -41,6 +42,26 @@ async def call_enrichment(ctx: ProspectContext, query: PersonEnrichmentQuery) ->
     call_group_id = str(uuid.uuid4())
     try:
         result = await provider.enrich_person(query, ctx_key=ctx_key)
+    except EnrichmentLegalRestriction as exc:
+        # V2-I-a — caught BEFORE the generic `EnrichmentProviderError` branch
+        # below (this subclass would otherwise match there too): a legal/
+        # privacy restriction routes to the dedicated suppression-aware
+        # repository path, never the generic last-known-good failure path,
+        # and its identifiers are masked/redacted by the same discipline the
+        # generic branch already applies (`redact()` inside
+        # `ContactEnrichmentRepository._telemetry_rows`).
+        ctx.contact_channels = await ctx.enrichment_calls.record_legal_restriction(
+            call_group_id=call_group_id, telemetry=exc.telemetry, provider_code=exc.provider_code,
+        )
+        logger.warning(
+            "enrichment call legal/privacy restriction step=contact_enrichment attempts=%d",
+            len(exc.telemetry),
+            extra={
+                "run_id": ctx.run_id, "prospect_id": ctx.prospect_id,
+                "latency_ms": _total_latency_ms(exc.telemetry),
+            },
+        )
+        raise
     except EnrichmentProviderError as exc:
         # v2 §V2-F — the authoritative post-last-known-good states, even on
         # failure (e.g. `PROVIDER_ERROR`), flow onto `ctx.contact_channels`

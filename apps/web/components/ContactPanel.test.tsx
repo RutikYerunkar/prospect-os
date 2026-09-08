@@ -23,6 +23,10 @@ function channel(overrides: Partial<ContactChannel> & { channel: string }): Cont
     preserved_state: null,
     provider_confidence: null,
     is_catch_all: null,
+    send_suppressed_at: null,
+    send_suppression_reason: null,
+    send_suppression_source: null,
+    send_suppression_provider_code: null,
     ...overrides,
   };
 }
@@ -200,6 +204,54 @@ describe("ContactPanel — null/absent/unknown-state cases", () => {
     );
     expect(html).not.toMatch(/>true</);
     expect(html).not.toMatch(/>false</);
+  });
+});
+
+describe("ContactPanel — V2-I-a send suppression", () => {
+  const suppressedChannels: ContactChannel[] = [
+    channel({
+      channel: "email",
+      identifier: "priya.natarajan@northwindlabs.com",
+      discovery_state: "FOUND",
+      verification_state: "VERIFIED",
+      origin: "LIVE_PROVIDER",
+      provider: "hunter",
+      send_suppressed_at: "2026-01-02T00:00:00Z",
+      send_suppression_reason: "LEGAL_OR_PRIVACY_RESTRICTION",
+      send_suppression_source: "hunter",
+      send_suppression_provider_code: "claimed_email",
+    }),
+  ];
+
+  it("renders the provider-neutral suppression note when send_suppressed_at is set", () => {
+    const html = render(null, suppressedChannels);
+    expect(html).toContain("Suppressed for sending after a provider privacy/legal restriction signal");
+    expect(html).toContain("Retained for audit; not sendable.");
+    expect(html).toContain("hunter");
+    expect(html).toContain("claimed_email");
+  });
+
+  it("renders no suppression note when send_suppressed_at is null", () => {
+    const html = render(null, NORTHWIND_CHANNELS);
+    expect(html).not.toContain("Suppressed for sending");
+  });
+
+  it("never uses human-intent wording anywhere in the rendered panel", () => {
+    const suppressedHtml = render(null, suppressedChannels).toLowerCase();
+    const forbidden = ["withdrew", "consent", "claimed by its owner"];
+    for (const word of forbidden) {
+      expect(suppressedHtml).not.toContain(word);
+    }
+    // Sanity: every other rendered surface in this file is scanned too.
+    const northwindHtml = render(NORTHWIND_CONTACT, NORTHWIND_CHANNELS).toLowerCase();
+    for (const word of forbidden) {
+      expect(northwindHtml).not.toContain(word);
+    }
+  });
+
+  it("still shows VERIFIED even though the channel is suppressed — suppression is orthogonal to verification state", () => {
+    const html = render(null, suppressedChannels);
+    expect(html).toContain("VERIFIED");
   });
 });
 

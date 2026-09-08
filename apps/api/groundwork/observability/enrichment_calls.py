@@ -56,3 +56,11 @@ class EnrichmentCallRecorder:
             run_id=self.run_id, prospect_id=self.prospect_id, provider=self.provider,
             call_group_id=call_group_id, telemetry=telemetry,
         )
+
+    async def record_legal_restriction(
+        self, *, call_group_id: str, telemetry: list[EnrichmentAttemptTelemetry], provider_code: str | None
+    ) -> list[ContactChannelState]:
+        return await self.repo.record_legal_restriction(
+            run_id=self.run_id, prospect_id=self.prospect_id, provider=self.provider,
+            call_group_id=call_group_id, telemetry=telemetry, provider_code=provider_code,
+        )

@@ -48,6 +48,7 @@ __all__ = [
     "EnrichmentInvalidResponse",
     "EnrichmentQuotaExceeded",
     "EnrichmentBudgetExceeded",
+    "EnrichmentLegalRestriction",
     "ENRICHMENT_STEP_RETRYABLE",
     "EnrichmentProvider",
 ]
@@ -158,6 +159,32 @@ class EnrichmentBudgetExceeded(EnrichmentProviderError):
     would have started (§Part 4/§E) — Groundwork's own structural ceiling,
     never the provider's — mirrors `ProviderBudgetExceeded`. Not step-
     retryable: retrying cannot recover a spent budget slot."""
+
+
+class EnrichmentLegalRestriction(EnrichmentProviderError):
+    """V2-I-a — a permanent, never-retried subtype: the provider reported a
+    legal/privacy restriction on this identity (Hunter's HTTP 451 today).
+    Deliberately a DISTINCT subtype from `EnrichmentInvalidResponse` (404/422
+    stay `INVALID_RESPONSE` unchanged) so `engine/enrichment.py::
+    call_enrichment` can route it to a dedicated repository path
+    (`ContactEnrichmentRepository.record_legal_restriction`) that suppresses a
+    prior successful email observation, which a generic invalid-response
+    failure must never do.
+
+    `provider_code` carries the provider's own best-effort error identifier
+    (e.g. Hunter's `errors[0].id`) for audit/telemetry persistence only — it
+    is never load-bearing for classification, which is already decided by
+    HTTP status before this is raised (§Part 8's discipline, extended)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        telemetry: list[EnrichmentAttemptTelemetry] | None = None,
+        provider_code: str | None = None,
+    ) -> None:
+        super().__init__(message, telemetry=telemetry)
+        self.provider_code = provider_code
 
 
 # Legacy-name lookup for the demo fixture pack's `enrichment_failure_script.

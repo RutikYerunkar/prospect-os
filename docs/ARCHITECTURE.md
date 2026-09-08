@@ -509,3 +509,43 @@ Two smaller, non-divergent implementation notes, also worth stating plainly:
   edit is caught by `CONTENT_CHANGED`; a genuinely different resolved recipient (e.g. a re-enrichment
   between propose and execute) is out of scope for V2-H and would require a fresh proposal in practice,
   since nothing in this checkpoint re-runs enrichment mid-review.
+
+### V2-I-a — the legal/privacy send-suppression prerequisite, closed
+
+V2-H's D1 refusal named an unresolved gap: Hunter's `451`/`claimed_email` response did not retroactively
+suppress a prior successful email observation already sitting in `contact_channels`. V2-I-a closes exactly
+that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no send allowance.
+
+- **A new provider-signal type, not a repurposed one.** `451` used to fall into the same
+  `EnrichmentInvalidResponse`/`INVALID_RESPONSE` bucket as `404`/`422`. It is now `EnrichmentLegalRestriction`
+  / `EnrichmentAttemptStatus.LEGAL_RESTRICTION` — a distinct, permanent, never-retried signal, caught by
+  `engine/enrichment.py::call_enrichment` in its own `except` clause ordered before the generic one, and
+  routed to a dedicated repository method rather than the generic last-known-good failure path.
+- **Two suppression surfaces, one normalization.** LOCAL suppression lives on the `contact_channels` row
+  itself (four new columns) — it answers "is THIS prospect's email channel suppressed?" GLOBAL suppression
+  lives in a new `email_suppressions` table keyed by `domain/contact_identity.py::normalize_email_identity`
+  — the SAME function the recipient-level duplicate-send rule (§3.5B) already uses, deliberately never a
+  second normalization — and answers "has ANY prospect/run, ever, observed this exact real-world mailbox as
+  legally/privacy-restricted?" `domain/action_policy.py`'s new clause 15 checks both: local first, then
+  global. This two-surface design is what makes suppression survive across prospects and runs even though
+  `contact_channels` is scoped to one prospect.
+- **Preservation, not derivation, for the EMAIL channel.** Every other failure path in
+  `ContactEnrichmentRepository` (`_apply_failure_to_channel`) derives a NEW discovery state when no
+  provider-backed state exists yet (e.g. `PROVIDER_ERROR`). A legal restriction never does this for EMAIL —
+  it preserves whatever was there (a real identifier, or nothing) byte-for-byte, because "do not send to
+  this identity" and "we don't know anything about this identity" are different facts, and conflating them
+  would either fabricate a state that was never observed or discard a real one that was.
+- **Clause 15 is not origin-gated.** Unlike clause 12 (the recipient-level duplicate-send rule,
+  `LIVE_EXTERNAL`-only by design, since a public Demo visitor must never be blocked by or block a real
+  Live send), clause 15 fires identically for `DEMO_SIMULATED` and `LIVE_EXTERNAL` — a legal/privacy
+  restriction is a fact about the real-world recipient, not about which execution path is sending, so a
+  Demo walkthrough must exercise the real, unrelaxed policy.
+- **The structural refusal's message changed; the refusal itself did not.** `LiveExternalEmailSendDisabled`
+  no longer says the suppression prerequisite is unresolved — it is not, as of this checkpoint. It still
+  raises unconditionally for `Mode.LIVE`, for a narrower and now-accurate reason: no `GmailSendProvider`
+  exists yet. Closing V2-I-a does not by itself make Live sending reachable — that remains V2-I-b's
+  deliberate, separate decision.
+- **No LLM anywhere in this path, and no override anywhere.** Classification is HTTP-status-driven only
+  (`errors[0].id` is captured for audit/provenance and never read to decide anything); suppression, once
+  set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
+  checkpoint — there is deliberately no clear/override endpoint.

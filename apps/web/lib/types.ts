@@ -304,6 +304,12 @@ export interface ContactChannel {
   // explanation. Email channel only; always `null` for `linkedin`.
   provider_confidence: number | null;
   is_catch_all: boolean | null;
+  // V2-I-a — local send-suppression metadata. Email channel only; always
+  // `null` for `linkedin`, which has no suppression concept.
+  send_suppressed_at: string | null;
+  send_suppression_reason: string | null;
+  send_suppression_source: string | null;
+  send_suppression_provider_code: string | null;
 }
 
 export interface ClaimMapEntry {

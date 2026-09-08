@@ -591,7 +591,44 @@ class ContactChannelRow(Base):
     last_attempt_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_attempt_error_type: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # V2-I-a — local send-suppression metadata (EMAIL channel only; a
+    # provider-reported legal/privacy restriction, e.g. Hunter's HTTP 451).
+    # Sticky once set: `record_legal_restriction` never clears these, and a
+    # later successful enrichment observation never clears them either — see
+    # `repositories/contact_enrichment.py`.
+    send_suppressed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    send_suppression_reason: Mapped[str | None] = mapped_column(String, nullable=True)  # SendSuppressionReason
+    send_suppression_source: Mapped[str | None] = mapped_column(String, nullable=True)  # the reporting provider's name
+    send_suppression_provider_code: Mapped[str | None] = mapped_column(String, nullable=True)  # audit-only, e.g. errors[0].id
+
     __table_args__ = (UniqueConstraint("prospect_id", "channel", name="uq_contact_channels_prospect_channel"),)
+
+
+class EmailSuppressionRow(Base):
+    """V2-I-a — the GLOBAL, cross-prospect/cross-run send-suppression list,
+    keyed by `normalize_email_identity(...)` (the SAME normalization
+    `domain/contact_identity.py` already uses for the recipient-level
+    duplicate-send rule, §3.5B — never a second, independently-drifting
+    normalization). Exists because a legal/privacy restriction is a fact
+    about a real-world mailbox, not about one prospect's row: the same
+    address must stay suppressed regardless of which prospect or run
+    observed the restriction, and regardless of which prospect a later
+    send attempt targets.
+
+    Append/upsert-only from `ContactEnrichmentRepository.record_legal_
+    restriction` — never deleted, never cleared by a later successful
+    enrichment observation (there is deliberately no clear/override
+    endpoint anywhere in v2 — D7 extended to this axis)."""
+
+    __tablename__ = "email_suppressions"
+
+    identity_key: Mapped[str] = mapped_column(String, primary_key=True)
+    reason: Mapped[str] = mapped_column(String)  # SendSuppressionReason
+    source: Mapped[str] = mapped_column(String)  # the reporting provider's name
+    provider_code: Mapped[str | None] = mapped_column(String, nullable=True)  # audit-only, e.g. errors[0].id
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    observed_prospect_id: Mapped[str | None] = mapped_column(ForeignKey("prospects.id"), nullable=True)
 
 
 class ActionProposalRow(Base):

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActionApprovalPanel } from "@/components/ActionApprovalPanel";
+import { ActionApprovalPanel, reasonCopy } from "@/components/ActionApprovalPanel";
 import type { OutreachDraft, ProspectAggregate } from "@/lib/types";
 
 function draft(overrides: Partial<OutreachDraft> & { id: string; channel: string }): OutreachDraft {
@@ -74,5 +74,49 @@ describe("ActionApprovalPanel", () => {
     const html = renderToStaticMarkup(<ActionApprovalPanel prospect={p} />);
     expect(html).toContain("EMAIL_SEND");
     expect(html).toContain("LINKEDIN_COPY_AND_OPEN");
+  });
+});
+
+describe("ActionApprovalPanel — V2-I-a recipient_suppressed blocked-reason copy", () => {
+  it("has dedicated, provider-neutral copy for recipient_suppressed", () => {
+    const copy = reasonCopy("recipient_suppressed");
+    expect(copy).not.toBe("recipient_suppressed"); // not the unmapped-reason fallback
+    expect(copy.toLowerCase()).toContain("privacy/legal restriction");
+  });
+
+  it("never uses forbidden human-intent wording in ANY blocked-reason copy", () => {
+    const knownReasons = [
+      "review_not_passed",
+      "prospect_not_actionable",
+      "email_not_discovered",
+      "email_not_verified",
+      "contact_state_stale",
+      "draft_incomplete",
+      "recipient_identity_invalid",
+      "content_changed",
+      "approval_superseded",
+      "sender_not_connected",
+      "sender_changed",
+      "already_sent_to_recipient",
+      "prior_send_uncertain",
+      "send_in_flight",
+      "send_provider_unavailable",
+      "send_allowance_exhausted",
+      "demo_action_cap_reached",
+      "linkedin_not_resolved",
+      "linkedin_identity_not_strong",
+      "recipient_suppressed",
+    ];
+    const forbidden = ["withdrew", "consent", "claimed by its owner"];
+    for (const reason of knownReasons) {
+      const copy = reasonCopy(reason).toLowerCase();
+      for (const word of forbidden) {
+        expect(copy).not.toContain(word);
+      }
+    }
+  });
+
+  it("falls back to the raw reason string for an unrecognized code", () => {
+    expect(reasonCopy("some_future_reason")).toBe("some_future_reason");
   });
 });

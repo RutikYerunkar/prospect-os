@@ -174,6 +174,26 @@ function PreservedStateNote({ channel }: { channel: ContactChannel }) {
   return <p className="text-xs text-amber-500">{text}</p>;
 }
 
+// V2-I-a — a provider-reported legal/privacy restriction on this email
+// identity (e.g. Hunter's HTTP 451). Provider-neutral copy, deliberately
+// never asserting human intent ("withdrew consent", "claimed by its
+// owner") — Groundwork observes a provider signal, not a person's intent.
+function EmailSuppressionNote({ channel }: { channel: ContactChannel }) {
+  if (!channel.send_suppressed_at) return null;
+  return (
+    <div className="rounded border border-rose-900 bg-rose-950/40 p-2 text-xs text-rose-300">
+      <p className="font-medium">
+        Suppressed for sending after a provider privacy/legal restriction signal. Retained for audit; not sendable.
+      </p>
+      <p className="mt-1 text-[11px] text-rose-400/80">
+        {channel.send_suppression_source && <>Source: {channel.send_suppression_source} · </>}
+        Suppressed: {new Date(channel.send_suppressed_at).toLocaleString()}
+        {channel.send_suppression_provider_code && <> · Code: {channel.send_suppression_provider_code}</>}
+      </p>
+    </div>
+  );
+}
+
 function EmailObservations({ channel }: { channel: ContactChannel }) {
   if (channel.provider_confidence == null && channel.is_catch_all == null) return null;
   return (
@@ -315,6 +335,7 @@ export function ContactPanel({
             ? NOT_OBSERVED
             : (EMAIL_VERIFICATION_COPY[email.verification_state ?? ""] ?? UNKNOWN_STATE)
         }
+        extra={email && <EmailSuppressionNote channel={email} />}
       />
 
       {/* Axis 4: LinkedIn resolution */}

@@ -190,6 +190,19 @@ async def _evaluate_policy(
     if action_type is ActionType.EMAIL_SEND and origin is ActionExecutionOrigin.LIVE_EXTERNAL:
         recipient_conflict = await actions.recipient_conflict(recipient_identity_key)
 
+    # V2-I-a, clause 15 — suppressed if EITHER the current EMAIL channel
+    # carries local suppression metadata OR the normalized recipient
+    # identity is globally suppressed (a legal/privacy restriction observed
+    # for this address by ANY prospect/run, ever). Applies to both origins —
+    # never origin-gated the way clause 12 is.
+    recipient_suppressed = False
+    if action_type is ActionType.EMAIL_SEND:
+        if email_channel is not None and email_channel.send_suppressed_at is not None:
+            recipient_suppressed = True
+        elif recipient_identity_key:
+            global_suppression = await repos.contact_enrichment.get_email_suppression(recipient_identity_key)
+            recipient_suppressed = global_suppression is not None
+
     demo_cap_reached = False
     if origin is ActionExecutionOrigin.DEMO_SIMULATED:
         demo_cap_reached = (await actions.count_demo_executions_for_run(run_id)) >= settings.demo_max_actions_per_run
@@ -241,8 +254,9 @@ async def _evaluate_policy(
         # reached only AFTER a fresh policy ELIGIBLE verdict, at dispatch.
         send_provider_configured=True,
         recipient_conflict=recipient_conflict,
-        live_allowance_exhausted=False,  # V2-I scope — no real Live send exists to exhaust an allowance
+        live_allowance_exhausted=False,  # V2-I-b scope — no real Live send exists to exhaust an allowance
         demo_action_cap_reached=demo_cap_reached,
+        recipient_suppressed=recipient_suppressed,
     )
 
 

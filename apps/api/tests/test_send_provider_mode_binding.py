@@ -31,12 +31,17 @@ class TestResolveSendProviderModeBinding:
         with pytest.raises(LiveExternalEmailSendDisabled):
             resolve_send_provider(Mode.LIVE)
 
-    def test_live_refusal_message_names_v2_i_scope_and_claimed_email_prerequisite(self):
+    def test_live_refusal_message_names_missing_send_provider_not_the_resolved_suppression_prerequisite(self):
+        """V2-I-a narrowed this message (docs/PROGRESS.md): the legal/privacy
+        suppression prerequisite is now implemented, so the refusal must no
+        longer claim it is unresolved. The refusal itself stays unconditional
+        regardless — it now names the real remaining reason: no
+        `GmailSendProvider` exists yet (V2-I-b)."""
         with pytest.raises(LiveExternalEmailSendDisabled) as exc_info:
             resolve_send_provider(Mode.LIVE)
         message = str(exc_info.value)
-        assert "V2-I" in message
-        assert "claimed_email" in message
+        assert "GmailSendProvider" in message
+        assert "claimed_email" not in message
 
     def test_live_refusal_has_stable_code(self):
         with pytest.raises(LiveExternalEmailSendDisabled) as exc_info:

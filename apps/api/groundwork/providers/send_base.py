@@ -110,18 +110,21 @@ class LiveExternalEmailSendDisabled(Exception):
     """V2-H, Critical Decision D1 — a dedicated, typed, structural refusal
     for `EMAIL_SEND` + `LIVE_EXTERNAL`. Deliberately NOT `ProviderNotConfigured`
     (`providers/base.py`) and deliberately independent of whether any send
-    provider is registered: registering a future `GmailSendProvider` (V2-I)
+    provider is registered: registering a future `GmailSendProvider` (V2-I-b)
     must never silently make Live sending executable again just because a
     provider object now exists. This exception is the one and only thing
-    that makes Live email sending unreachable in V2-H — `resolve_send_provider`
+    that makes Live email sending unreachable — `resolve_send_provider`
     (`providers/send_registry.py`) raises it unconditionally for `Mode.LIVE`,
     before any provider instance, `send()` call, or network dispatch is ever
     reachable.
 
-    It stays load-bearing until V2-I *deliberately* removes/replaces it, and
-    only after implementing the `claimed_email` suppression semantics named
-    in `code`/`message` below — see docs/PROGRESS.md's "V2-H — D1" entry for
-    the full carried-forward disposition.
+    V2-I-a's legal/privacy send-suppression prerequisite (see
+    `docs/PROGRESS.md`'s V2-I-a entry) is now implemented — the message below
+    no longer names it as an unresolved blocker, since it no longer is one.
+    This refusal itself stays load-bearing and unconditional regardless: it
+    is not about suppression at all, it is about the fact that no real send
+    provider exists yet. It stays in force until V2-I-b *deliberately*
+    removes/replaces it, after implementing a real `GmailSendProvider`.
     """
 
     code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
@@ -130,12 +133,10 @@ class LiveExternalEmailSendDisabled(Exception):
         super().__init__(
             message
             or (
-                "Live external email sending is disabled in this checkpoint: "
-                "(1) real Gmail sending is V2-I scope — no GmailSendProvider exists yet, and "
-                "(2) Hunter 451/claimed_email suppression of a prior successful email observation "
-                "in contact_channels remains an unresolved hard prerequisite before any external "
-                "EMAIL_SEND path may be enabled. Configuring a future send provider must not silently "
-                "lift this refusal — V2-I must remove it deliberately, after implementing (2)."
+                "Live external email sending is disabled in this checkpoint: no GmailSendProvider "
+                "exists yet — real Gmail sending is V2-I-b scope. This refusal is unconditional and "
+                "independent of whether any send provider is registered or configured; configuring "
+                "one must never silently lift it — V2-I-b must remove it deliberately."
             )
         )
 

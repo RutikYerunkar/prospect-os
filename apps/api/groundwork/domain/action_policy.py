@@ -209,6 +209,7 @@ def evaluate(
     recipient_conflict: RecipientConflict = RecipientConflict.NONE,
     live_allowance_exhausted: bool = False,
     demo_action_cap_reached: bool = False,
+    recipient_suppressed: bool = False,
     now: datetime | None = None,
     stale_after_days: int = ENRICHMENT_STALE_AFTER_DAYS_DEFAULT,
 ) -> ActionPolicyResult:
@@ -298,6 +299,18 @@ def evaluate(
                 reasons.append("send_allowance_exhausted")
         elif demo_action_cap_reached:
             reasons.append("demo_action_cap_reached")
+
+        # --- clause 15 — recipient_suppressed (V2-I-a); applies to BOTH
+        # DEMO_SIMULATED and LIVE_EXTERNAL (unlike clause 12, which is
+        # LIVE_EXTERNAL-only) — a legal/privacy restriction is a fact about
+        # the real-world recipient identity, not about which origin is
+        # sending, so a Demo walkthrough must exercise this block too. No
+        # override (D7): the caller computes `recipient_suppressed` from
+        # BOTH the local `contact_channels` suppression columns and the
+        # GLOBAL `email_suppressions` table (this module has no database
+        # access, mirroring clause 12's `recipient_conflict` precedent).
+        if recipient_suppressed:
+            reasons.append("recipient_suppressed")
 
     verdict = ActionPolicyVerdict.BLOCKED if reasons else ActionPolicyVerdict.ELIGIBLE
     snapshot = {
