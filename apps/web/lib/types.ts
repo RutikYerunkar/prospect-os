@@ -572,3 +572,51 @@ export interface GmailConnectResponse {
 export interface OperatorLoginRequest {
   passphrase: string;
 }
+
+// --- V2-H: action proposal + human approval (Demo executor only) ---
+
+export type ActionType = "EMAIL_SEND" | "LINKEDIN_COPY_AND_OPEN";
+export type ActionExecutionOrigin = "DEMO_SIMULATED" | "LIVE_EXTERNAL";
+export type ActionPolicyVerdict = "ELIGIBLE" | "BLOCKED";
+
+export interface ActionApprovalInfo {
+  state: string;
+  actor: string | null;
+  reason: string | null;
+  decided_at: string | null;
+}
+
+export interface ActionExecutionInfo {
+  id: string;
+  status: string;
+  origin: ActionExecutionOrigin;
+  provider: string | null;
+  dispatched: boolean;
+  outcome_class: string | null;
+  provider_message_id: string | null;
+  claimed_at: string | null;
+  dispatched_at: string | null;
+  settled_at: string | null;
+}
+
+export interface ActionProposal {
+  id: string;
+  prospect_id: string;
+  run_id: string;
+  draft_id: string;
+  action_type: ActionType;
+  channel: string;
+  sender_identifier: string | null;
+  recipient_identifier: string | null;
+  content_hash: string;
+  hash_version: string;
+  policy_version: string;
+  policy_verdict: ActionPolicyVerdict;
+  blocked_reasons: string[];
+  origin: ActionExecutionOrigin;
+  created_at: string;
+  superseded_by: string | null;
+  created: boolean;
+  approval: ActionApprovalInfo | null;
+  execution: ActionExecutionInfo | null;
+}

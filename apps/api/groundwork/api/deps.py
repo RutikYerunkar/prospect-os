@@ -17,6 +17,7 @@ from fastapi import Depends, Request
 from groundwork.api.operator_auth import COOKIE_NAME, verify_session_cookie
 from groundwork.db import SessionLocal
 from groundwork.engine.runner import Repos
+from groundwork.repositories.actions import ActionRepository
 from groundwork.repositories.approvals import ApprovalRepository
 from groundwork.repositories.gmail_connection import GmailConnectionRepository
 from groundwork.repositories.plays import PlayRepository
@@ -126,6 +127,11 @@ def get_approvals_repo(session_factory: SessionFactory) -> ApprovalRepository:
     return ApprovalRepository(session_factory)
 
 
+def get_actions_repo(session_factory: SessionFactory) -> ActionRepository:
+    return ActionRepository(session_factory)
+
+
 ReposDep = Annotated[Repos, Depends(get_repos)]
 PlaysRepoDep = Annotated[PlayRepository, Depends(get_plays_repo)]
 ApprovalsRepoDep = Annotated[ApprovalRepository, Depends(get_approvals_repo)]
+ActionsRepoDep = Annotated[ActionRepository, Depends(get_actions_repo)]

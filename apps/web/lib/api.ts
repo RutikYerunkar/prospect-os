@@ -1,4 +1,5 @@
 import type {
+  ActionProposal,
   GmailConnectionResponse,
   GmailConnectResponse,
   OperatorLoginRequest,
@@ -193,4 +194,28 @@ export function connectGmail(): Promise<GmailConnectResponse> {
 
 export function disconnectGmail(): Promise<{ status: string; deleted: boolean }> {
   return apiDelete<{ status: string; deleted: boolean }>("/api/gmail/connection");
+}
+
+// V2-H — action proposal + human approval (Demo executor only). Demo action
+// endpoints require no operator session (D8) — these calls work identically
+// for a public, unauthenticated portfolio visitor and a logged-in operator;
+// only a Live run's endpoints are additionally gated server-side.
+export function listProspectActionProposals(prospectId: string): Promise<ActionProposal[]> {
+  return apiGet<ActionProposal[]>(`/api/actions/prospects/${prospectId}/proposals`);
+}
+
+export function proposeAction(draftId: string): Promise<ActionProposal> {
+  return apiPost<ActionProposal>("/api/actions/propose", { draft_id: draftId });
+}
+
+export function approveAction(proposalId: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/approve`, { actor });
+}
+
+export function rejectAction(proposalId: string, reason: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/reject`, { reason, actor });
+}
+
+export function executeAction(proposalId: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/execute`, { actor });
 }

@@ -11,6 +11,7 @@ import { Panel } from "@/components/ui/Panel";
 import { ScoreBreakdown } from "@/components/ScoreBreakdown";
 import { EvidenceCard } from "@/components/EvidenceCard";
 import { SignalList } from "@/components/SignalList";
+import { ActionApprovalPanel } from "@/components/ActionApprovalPanel";
 import { ContactPanel } from "@/components/ContactPanel";
 import { OutreachViewer } from "@/components/OutreachViewer";
 import { ReviewPanel } from "@/components/ReviewPanel";
@@ -299,6 +300,10 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
 
         <Panel title="Outreach">
           <OutreachViewer drafts={prospect.drafts} evidenceById={evidenceById} />
+        </Panel>
+
+        <Panel title="Outreach Actions">
+          <ActionApprovalPanel prospect={prospect} />
         </Panel>
 
         <Panel title="Review & Guardrails">

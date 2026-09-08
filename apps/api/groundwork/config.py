@@ -150,6 +150,16 @@ class Settings(BaseSettings):
     # not to constrain normal use.
     max_request_body_bytes: int = 256_000
 
+    # --- V2-H: action proposal + human approval (Demo executor only) ---
+    # Part 9 rate/abuse control — a public Demo visitor's action endpoints
+    # are Origin-checked and rate-limited but never operator-gated (D8); this
+    # is the DB-backed cap on how many `action_executions` rows one Demo run
+    # may accumulate (policy clause 14's `demo_action_cap_reached`), separate
+    # from the per-client-IP request-rate limiter below.
+    demo_max_actions_per_run: int = 10
+    action_write_rate_limit_attempts: int = 30
+    action_write_rate_limit_window_s: float = 60.0
+
     # --- Checkpoint I1 Phase 9: request/host/error hardening ---
     # `["*"]` (any host) preserves today's unrestricted behavior for local
     # dev/tests. A production deployment should set this explicitly (see

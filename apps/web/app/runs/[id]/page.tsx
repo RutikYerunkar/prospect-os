@@ -11,11 +11,12 @@ import { RunSummary } from "@/components/RunSummary";
 import { RunBoard } from "@/components/RunBoard";
 import { ActivityStream } from "@/components/ActivityStream";
 import { QualityTab } from "@/components/QualityTab";
+import { OutreachTab } from "@/components/OutreachTab";
 
 export default function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { run, prospects, events, retrying, connection, loadError, loadErrorUnreachable, retry } = useRunStream(id);
-  const [tab, setTab] = useState<"board" | "quality">("board");
+  const [tab, setTab] = useState<"board" | "quality" | "outreach">("board");
   const [play, setPlay] = useState<PlayResponse | null>(null);
   // Checkpoint I1 Phase 9: sourced from the API rather than a duplicated
   // frontend constant. `null` while loading — RunSummary treats that as
@@ -103,11 +104,16 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
               <Tab active={tab === "quality"} onClick={() => setTab("quality")}>
                 Quality
               </Tab>
+              <Tab active={tab === "outreach"} onClick={() => setTab("outreach")}>
+                Outreach
+              </Tab>
             </Tabs>
             {tab === "board" ? (
               <RunBoard prospects={prospects} retrying={retrying} />
-            ) : (
+            ) : tab === "quality" ? (
               <QualityTab runId={run.id} runStatus={run.status} prospects={prospects} />
+            ) : (
+              <OutreachTab prospects={prospects ?? []} />
             )}
           </Panel>
 

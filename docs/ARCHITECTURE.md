@@ -463,3 +463,49 @@ codebase.
 Everything else about how v2 is built — the checkpoint-by-checkpoint plan, the exact schema, the content
 hash algorithm, the Gmail OAuth/reconciliation design, and the full preserved-invariants checklist —
 lives in `docs/V2_IMPLEMENTATION_PLAN.md`, not here.
+
+### V2-H — implemented; two deliberate divergences from the frozen Part 4/9 wording
+
+V2-H (`action_proposals`, extended `approvals`, `action_events`, the propose/approve/reject/execute
+endpoints, `DemoEmailSendProvider`, the Outreach tab) is complete. Two implementation choices depart from
+the frozen plan's literal wording — both recorded here and in `docs/PROGRESS.md`'s "What V2-H added":
+
+- **`ProviderBundle` gains no `send` field (D2).** The frozen Part 9 sketch implies a send provider might
+  hang off the same bundle as `llm`/`search`/`enrichment`. It does not: Gmail is deployment-scoped, not
+  run-scoped (one `gmail_connections` singleton row, independent of any run), so wiring a send provider
+  into a per-run `ProviderBundle` would be the wrong ownership shape. Instead, `providers/send_registry.
+  py::resolve_send_provider(mode)` is a separate, mode-keyed resolver called only at the two moments the
+  design actually needs a send identity/provider — proposal creation (sender capture) and execute-time
+  dispatch — never threaded through pipeline provider wiring. `LINKEDIN_COPY_AND_OPEN` never calls it at
+  all (D6 — no sender, no executor).
+- **Live `EMAIL_SEND` is refused structurally, not by policy clause 13 (D1/D4).** `resolve_send_provider
+  (Mode.LIVE)` unconditionally raises `LiveExternalEmailSendDisabled` — a dedicated exception, never
+  `ProviderNotConfigured`, and never conditioned on whether any provider is registered. This is
+  deliberate: the real reason Live sending must stay unreachable in V2-H is not "no credentials are
+  configured" (that's what `ProviderNotConfigured` would imply, and a future `GOOGLE_CLIENT_ID`/
+  `GmailSendProvider` would silently lift it) — it's that Hunter's `451`/`claimed_email` response does
+  not yet retroactively suppress a prior successful email observation in `contact_channels` (carried
+  forward from V2-DH, restated at every checkpoint since). Until that suppression semantics is designed
+  and implemented, sending to a possibly-stale "verified" address is unsafe regardless of credentials.
+  V2-I must remove this refusal deliberately, only after closing that gap — never as a side effect of
+  wiring up `GmailSendProvider`. `domain/action_policy.py`'s clause 13 (`send_provider_unavailable`) is
+  therefore left `send_provider_configured=True` for `EMAIL_SEND` in both modes in V2-H — the policy
+  evaluates a normal ELIGIBLE verdict, and the *execute*-time dispatch step is what structurally refuses
+  Live, proving the refusal is reached deliberately rather than merely inferred from an earlier policy
+  block.
+
+Two smaller, non-divergent implementation notes, also worth stating plainly:
+
+- **Gmail is consulted only for `EMAIL_SEND` + `LIVE_EXTERNAL`.** A Demo proposal/execution never calls
+  `GmailConnectionRepository`, and `LINKEDIN_COPY_AND_OPEN` never calls it or the send-provider resolver,
+  in either mode — asserted by regression tests that patch both to raise unconditionally.
+  `ApprovalRepository.latest_for_prospect`/`latest_for_prospects` were fixed to filter to `scope=
+  "PROSPECT"` *before* any `ACTION`-scope row was ever written, closing a scope-leak that would otherwise
+  have let a governed-action approval bleed into the v1 prospect-approval aggregate/UI.
+- **The recipient identifier is not re-resolved at execute time.** Only the sender is re-verified fresh
+  (the Sender Resolution Matrix); the immutable proposal's own `recipient_identifier`/
+  `recipient_identity_key` — captured once, at proposal creation, from `contact_channels` — is what
+  content-hash recomputation and the recipient-level send-safety check both use. A draft body/subject
+  edit is caught by `CONTENT_CHANGED`; a genuinely different resolved recipient (e.g. a re-enrichment
+  between propose and execute) is out of scope for V2-H and would require a fresh proposal in practice,
+  since nothing in this checkpoint re-runs enrichment mid-review.

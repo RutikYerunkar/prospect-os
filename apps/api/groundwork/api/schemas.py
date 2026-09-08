@@ -161,6 +161,76 @@ class RejectRequest(BaseModel):
     actor: str = "demo_user"
 
 
+# --- v2 §V2-H: action proposal + human approval (Demo executor only) ---
+
+
+class ActionProposeRequest(BaseModel):
+    """D3 — a proposal is created only via an explicit POST naming a
+    specific draft. `model_config = extra="forbid"` so a client can never
+    smuggle `origin`/`sender_identifier`/anything else through this body —
+    origin is derived server-side from the run's own mode, never accepted
+    from request JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = Field(min_length=1)
+
+
+class ActionApproveRequest(BaseModel):
+    actor: str = "demo_user"
+
+
+class ActionRejectRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    actor: str = "demo_user"
+
+
+class ActionExecuteRequest(BaseModel):
+    actor: str = "demo_user"
+
+
+class ActionApprovalInfo(BaseModel):
+    state: str
+    actor: str | None = None
+    reason: str | None = None
+    decided_at: datetime | None = None
+
+
+class ActionExecutionInfo(BaseModel):
+    id: str
+    status: str
+    origin: str
+    provider: str | None = None
+    dispatched: bool
+    outcome_class: str | None = None
+    provider_message_id: str | None = None
+    claimed_at: datetime | None = None
+    dispatched_at: datetime | None = None
+    settled_at: datetime | None = None
+
+
+class ActionProposalResponse(BaseModel):
+    id: str
+    prospect_id: str
+    run_id: str
+    draft_id: str
+    action_type: str
+    channel: str
+    sender_identifier: str | None
+    recipient_identifier: str | None
+    content_hash: str
+    hash_version: str
+    policy_version: str
+    policy_verdict: str
+    blocked_reasons: list[str] = Field(default_factory=list)
+    origin: str
+    created_at: datetime
+    superseded_by: str | None = None
+    created: bool = True
+    approval: ActionApprovalInfo | None = None
+    execution: ActionExecutionInfo | None = None
+
+
 # --- settings ---
 
 
