@@ -32,6 +32,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             >
               New Play
             </Link>
+            <Link
+              href="/settings"
+              className="text-zinc-400 transition-colors hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+            >
+              Settings
+            </Link>
           </nav>
         </header>
         <div className="flex flex-1 flex-col">{children}</div>

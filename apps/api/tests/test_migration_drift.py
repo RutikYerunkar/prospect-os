@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,8 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine as create_sync_engine
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from groundwork.models.tables import Base
@@ -139,3 +143,188 @@ def test_alembic_upgrade_head_matches_orm_metadata_on_postgres():
         assert diff == [], f"schema drift between alembic head and ORM metadata (Postgres): {diff!r}"
     finally:
         asyncio.run(_drop_all())
+
+
+# =====================================================================
+# V2-B migration compatibility coverage (Part 13/§K).
+#
+# Proves the *migrated* schema behaves as V2-B's acceptance criteria
+# require: a pre-existing v1-shaped `approvals` row stays a valid
+# PROSPECT-scope row with the three new columns NULL, and an ACTION-scope
+# row missing any of the three required fields is rejected by the CHECK
+# constraint — the structural enforcement, not a convention. Runs against
+# `alembic upgrade head` output (not `create_all()`), because the
+# acceptance criterion is specifically about the migration path.
+# =====================================================================
+
+
+def _seed_minimal_prospect_chain(connection, *, table_for) -> str:
+    """Inserts the minimal FK chain (play -> run -> company -> prospect)
+    every `approvals` row needs, using the real ORM table objects so column
+    lists never drift from `models/tables.py`. Returns the new prospect id."""
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    play_id, run_id, company_id, prospect_id = (str(uuid.uuid4()) for _ in range(4))
+
+    connection.execute(
+        table_for("plays").insert(),
+        {
+            "id": play_id,
+            "name": "n",
+            "objective_text": "o",
+            "icp_spec": {},
+            "mode": "demo",
+            "created_at": now,
+        },
+    )
+    connection.execute(
+        table_for("runs").insert(),
+        {
+            "id": run_id,
+            "play_id": play_id,
+            "status": "COMPLETED",
+            "mode": "demo",
+            "seed": 1,
+            "plan": [],
+            "counters": {},
+            "provider_profile": {},
+            "started_at": now,
+            "last_event_seq": 0,
+        },
+    )
+    connection.execute(
+        table_for("companies").insert(),
+        {
+            "id": company_id,
+            "canonical_domain": f"{company_id}.example",
+            "normalized_name": "x",
+            "display_name": "X",
+            "profile": {},
+            "origin": "demo_fixture",
+            "first_seen_at": now,
+        },
+    )
+    connection.execute(
+        table_for("prospects").insert(),
+        {
+            "id": prospect_id,
+            "run_id": run_id,
+            "company_id": company_id,
+            "status": "PASS",
+            "current_stage": "DONE",
+            "dedupe_key": prospect_id,
+            "created_at": now,
+        },
+    )
+    return prospect_id
+
+
+def test_v1_prospect_scope_approval_survives_migration_unchanged(sqlite_path):
+    async_url = f"sqlite+aiosqlite:///{sqlite_path}"
+    command.upgrade(_config_targeting(async_url), "head")
+
+    sync_engine = create_sync_engine(f"sqlite:///{sqlite_path}")
+    try:
+        approvals = Base.metadata.tables["approvals"]
+        with sync_engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys=ON"))
+            prospect_id = _seed_minimal_prospect_chain(
+                connection, table_for=lambda name: Base.metadata.tables[name]
+            )
+            approval_id = str(uuid.uuid4())
+            # A pre-v2 write site never sets scope/action_proposal_id/
+            # content_hash/hash_version — exactly like every real v1
+            # `/approve` call site still doesn't.
+            connection.execute(
+                approvals.insert(),
+                {
+                    "id": approval_id,
+                    "prospect_id": prospect_id,
+                    "decision": "approve",
+                    "actor": "demo_user",
+                    "decided_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                },
+            )
+
+        with sync_engine.connect() as connection:
+            row = connection.execute(
+                approvals.select().where(approvals.c.id == approval_id)
+            ).mappings().one()
+            assert row["scope"] == "PROSPECT"
+            assert row["action_proposal_id"] is None
+            assert row["content_hash"] is None
+            assert row["hash_version"] is None
+    finally:
+        sync_engine.dispose()
+
+
+def test_action_scope_approval_missing_required_field_is_rejected(sqlite_path):
+    async_url = f"sqlite+aiosqlite:///{sqlite_path}"
+    command.upgrade(_config_targeting(async_url), "head")
+
+    sync_engine = create_sync_engine(f"sqlite:///{sqlite_path}")
+    try:
+        approvals = Base.metadata.tables["approvals"]
+        with sync_engine.connect() as connection:
+            connection.execute(text("PRAGMA foreign_keys=ON"))
+            connection.commit()
+            prospect_id = _seed_minimal_prospect_chain(
+                connection, table_for=lambda name: Base.metadata.tables[name]
+            )
+            connection.commit()
+
+            # scope='ACTION' with all three required fields NULL must be
+            # rejected by ck_approvals_action_scope_complete — the CHECK
+            # constraint, not application-level validation.
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    approvals.insert(),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "prospect_id": prospect_id,
+                        "decision": "approve",
+                        "actor": "demo_user",
+                        "decided_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        "scope": "ACTION",
+                    },
+                )
+                connection.commit()
+    finally:
+        sync_engine.dispose()
+
+
+def test_migrated_schema_has_action_scope_check_constraint(sqlite_path):
+    async_url = f"sqlite+aiosqlite:///{sqlite_path}"
+    command.upgrade(_config_targeting(async_url), "head")
+
+    sync_engine = create_sync_engine(f"sqlite:///{sqlite_path}")
+    try:
+        with sync_engine.connect() as connection:
+            inspector = inspect(connection)
+            check_names = {c["name"] for c in inspector.get_check_constraints("approvals")}
+            assert "ck_approvals_action_scope_complete" in check_names
+    finally:
+        sync_engine.dispose()
+
+
+def test_migrated_schema_has_live_recipient_partial_unique_index(sqlite_path):
+    async_url = f"sqlite+aiosqlite:///{sqlite_path}"
+    command.upgrade(_config_targeting(async_url), "head")
+
+    sync_engine = create_sync_engine(f"sqlite:///{sqlite_path}")
+    try:
+        with sync_engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_action_executions_live_recipient'")
+            ).fetchone()
+            assert row is not None, "uq_action_executions_live_recipient index missing from migrated schema"
+            sql = row[0]
+            assert "UNIQUE" in sql
+            assert "LIVE_EXTERNAL" in sql
+            assert "EMAIL_SEND" in sql
+            for status in ("CLAIMED", "IN_FLIGHT", "SUCCEEDED", "UNCERTAIN", "ABANDONED"):
+                assert status in sql
+            # FAILED is deliberately excluded — it is the only state that
+            # frees a recipient identity (§3.5B).
+            assert "FAILED" not in sql
+    finally:
+        sync_engine.dispose()

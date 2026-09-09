@@ -25,11 +25,13 @@ from groundwork.engine.pipeline import build_prospect_pipeline
 from groundwork.engine.search import call_discover
 from groundwork.models.enums import ExclusionEvaluation, ProspectStage, ProspectStatus, ReviewVerdict, RunStatus
 from groundwork.models.schemas import CompanySeed, PlaySpec, ProspectOutcome
+from groundwork.observability.enrichment_calls import EnrichmentCallRecorder
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.search_calls import SearchCallRecorder
 from groundwork.observability.trace import TraceRecorder
 from groundwork.providers.base import ProviderBundle
+from groundwork.repositories.contact_enrichment import ContactEnrichmentRepository
 from groundwork.repositories.events import EventRepository
 from groundwork.repositories.llm_calls import LLMCallRepository
 from groundwork.repositories.prospect_data import ProspectDataRepository
@@ -51,6 +53,7 @@ class Repos:
     events: EventRepository
     llm_calls: LLMCallRepository
     search: SearchRepository
+    contact_enrichment: ContactEnrichmentRepository
 
     @classmethod
     def build(cls, session_factory) -> "Repos":
@@ -63,6 +66,7 @@ class Repos:
             events=EventRepository(session_factory),
             llm_calls=LLMCallRepository(session_factory),
             search=SearchRepository(session_factory),
+            contact_enrichment=ContactEnrichmentRepository(session_factory),
         )
 
 
@@ -217,6 +221,11 @@ async def execute_run(
                 run_id=run_id, prospect_id=prospect_id, provider=providers.llm.name, repo=repos.llm_calls
             ),
             search_calls=SearchCallRecorder(run_id=run_id, prospect_id=prospect_id, repo=repos.search),
+            enrichment_calls=EnrichmentCallRecorder(
+                run_id=run_id, prospect_id=prospect_id,
+                provider=providers.enrichment.name if providers.enrichment is not None else "none",
+                repo=repos.contact_enrichment,
+            ),
             other_dedupe_keys=frozenset(other_dedupe_keys_by_prospect[prospect_id]),
             other_company_identifiers=frozenset(all_identifiers - own_identifiers),
         )

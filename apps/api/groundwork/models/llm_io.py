@@ -33,6 +33,16 @@ class PersonalizationOutput(BaseModel):
     claim_map: list[ClaimMapEntry] = Field(default_factory=list)
 
 
+class LinkedInOutreachOutput(BaseModel):
+    """v2 §V2-F — LinkedIn Personalization Agent output. Deliberately has no
+    `subject` (a LinkedIn message has none) — this is a distinct schema from
+    `PersonalizationOutput`, not a variant of it, produced by a distinct LLM
+    operation (`LLMOperation.LINKEDIN_PERSONALIZATION`)."""
+
+    body: str
+    claim_map: list[ClaimMapEntry] = Field(default_factory=list)
+
+
 class ScoreExplanationOutput(BaseModel):
     """The LLM writes this prose *from* the already-computed score numbers.
 

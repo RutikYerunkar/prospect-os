@@ -17,6 +17,7 @@ from groundwork.models.enums import ProspectStage, ProspectStatus
 from groundwork.models.schemas import (
     CompanySeed,
     Contact,
+    ContactChannelState,
     Evidence,
     ICPScore,
     OutreachDraft,
@@ -26,6 +27,7 @@ from groundwork.models.schemas import (
     Signal,
     SourceDocument,
 )
+from groundwork.observability.enrichment_calls import EnrichmentCallRecorder
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
 from groundwork.observability.search_calls import SearchCallRecorder
@@ -46,6 +48,12 @@ class ProspectContext:
     events: EventEmitter
     llm_calls: LLMCallRecorder
     search_calls: SearchCallRecorder
+    # v2 §Part 4/§G — the only new field this checkpoint's frozen plan
+    # requires on `ProspectContext`. Bound to a `ContactEnrichmentRepository`
+    # scoped to THIS prospect only (see `repositories/contact_enrichment.py`)
+    # — the same per-prospect isolation `llm_calls`/`search_calls` already
+    # give every other provider boundary.
+    enrichment_calls: EnrichmentCallRecorder
 
     # Read-only awareness of the *other* prospects in this run — company
     # names/domains and dedupe keys only, never their evidence, facts, score
@@ -68,6 +76,15 @@ class ProspectContext:
     signals: list[Signal] = field(default_factory=list)
     score: ICPScore | None = None
     contact: Contact | None = None
+    # v2 §V2-F — the AUTHORITATIVE post-write channel states handed back by
+    # `repositories/contact_enrichment.py::record_success`/`record_failure`,
+    # threaded through `EnrichmentCallRecorder` -> `engine/enrichment.py::
+    # call_enrichment` -> here. `domain/review.py::run_checks` reads this
+    # directly; nothing re-derives raw provider state or re-queries the
+    # repository. Stays `[]` for NOT_ATTEMPTED (no named person, a
+    # disqualified prospect, or no enrichment provider wired) — the empty
+    # list is itself the correct, unambiguous "nothing to check" state.
+    contact_channels: list[ContactChannelState] = field(default_factory=list)
     drafts: list[OutreachDraft] = field(default_factory=list)
     review: ReviewResult | None = None
 

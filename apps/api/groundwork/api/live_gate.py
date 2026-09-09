@@ -52,3 +52,19 @@ def enforce_live_gate(request: Request, mode: str, is_operator: bool) -> None:
         return
     require_operator(is_operator)
     require_allowed_origin(request)
+
+
+def enforce_action_gate(request: Request, mode: str, is_operator: bool) -> None:
+    """V2-H, Part 9 — the ONE deliberate deviation from `enforce_live_gate`'s
+    shape: a governed-action endpoint (propose/approve/reject/execute) is
+    `Origin`-checked even in Demo Mode, where every other endpoint stays
+    CSRF-unprotected. A forged cross-origin Demo action request is harmless
+    (D8 — no external side effect, zero egress), but it still writes durable
+    `action_proposals`/`action_executions`/`action_events` audit rows, and
+    the check costs nothing. Demo NEVER requires an operator session here —
+    that is the whole point of D8's public, no-Gmail-connection-required
+    Demo action path (criterion 4A). Live requires both, exactly like
+    `enforce_live_gate`."""
+    require_allowed_origin(request)
+    if mode == "live":
+        require_operator(is_operator)

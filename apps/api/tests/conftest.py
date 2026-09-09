@@ -10,8 +10,11 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from groundwork.api.deps import get_session_factory
+from groundwork.api.routers import actions as actions_router
+from groundwork.api.routers import plays as plays_router
 from groundwork.main import app
 from groundwork.models.tables import Base
+from groundwork.repositories.live_send_allowance import ensure_singleton_seeded
 
 
 def _enable_wal(dbapi_connection, connection_record) -> None:
@@ -47,6 +50,9 @@ async def session_factory():
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(test_engine, expire_on_commit=False)
+    # V2-I-b: every dialect/schema-initialization path must seed the
+    # `live_send_allowance_lock` singleton — this is the test-suite path.
+    await ensure_singleton_seeded(factory)
     yield factory
     await test_engine.dispose()
     for suffix in ("", "-wal", "-shm"):
@@ -82,3 +88,29 @@ async def client(session_factory):
     ) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_action_write_rate_limiter():
+    """V2-H's `api/routers/actions.py::_write_limiter` and `plays.py`'s own
+    pre-existing `_write_limiter` are module-level singletons (the same
+    `SlidingWindowRateLimiter` pattern `test_live_cost_abuse_controls.py`
+    already resets locally for ITS OWN tests), so they persist across every
+    test in one pytest process under the same fake `request.client.host`
+    key (`ASGITransport` gives every test client the same identity). The
+    V2-H test suite legitimately runs the Demo play-to-completion helper
+    (one `POST /api/plays` each) and calls propose/approve/execute dozens
+    of times across many test functions — without a reset between tests,
+    those shared buckets trip `TooManyRequestsError` well before an
+    unrelated LATER test file's own logic gets a chance to run, purely from
+    cross-test accumulation (this is what `plays.py::_write_limiter`
+    reaching its default 30-attempt cap did to several alphabetically-later
+    files the first time this checkpoint's tests ran together with the
+    full suite). Resetting here only makes each test start from a clean
+    slate; it never weakens a test that deliberately drives a limiter to
+    429 within its own body (including `test_live_cost_abuse_controls.py`'s
+    own local autouse fixture, which layers on top of this one harmlessly —
+    clearing `._hits` is idempotent)."""
+    actions_router._write_limiter._hits.clear()
+    plays_router._write_limiter._hits.clear()
+    yield

@@ -15,7 +15,11 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_version: str = "0.1.0"
+    # V2-J §6 — bumped to the v2 release version. Documented in
+    # `.env.example` under `APP_VERSION`; surfaced verbatim in the FastAPI
+    # app's own `version` and the `/health` response (`main.py`) — never
+    # hardcoded a second place.
+    app_version: str = "2.0.0"
     mode: Literal["demo", "live"] = "demo"
 
     # --- Checkpoint I1: environment/process identity ---
@@ -37,6 +41,50 @@ class Settings(BaseSettings):
 
     max_concurrent_prospects: int = 3
     run_wall_clock_timeout_s: float = 180.0
+
+    # --- v2 §Part 4/§E: contact-enrichment call budget ---
+    # A per-run HARD ceiling on enrichment-provider calls (`EnrichmentCallBudget`,
+    # checked inside the provider itself, exactly like `SearchCallBudget`).
+    # Generous relative to `target_count` (7 in the canonical demo) — this
+    # exists as a structural safety bound, not a throttle a normal run should
+    # ever hit.
+    max_enrichment_calls_per_run: int = 20
+
+    # --- V2-D/V2-DH: Live Apollo/Hunter contact enrichment ---
+    # Selects which `EnrichmentProvider` slot Live Mode wires, independent of
+    # `mode`/`openai_api_key`/`tavily_api_key` — enrichment is optional even
+    # in Live Mode. "none" -> `enrichment=None` -> NOT_ATTEMPTED, zero
+    # provider calls, never a fixture fallback. Never special-cased inside
+    # `engine/`/`domain/` — only `providers/registry.py`'s Live wiring reads
+    # this.
+    enrichment_provider: Literal["none", "apollo", "hunter"] = "none"
+    # Never logged, never persisted, never returned by any endpoint (added to
+    # `observability/redact.py`'s choke point) — GET /settings/providers
+    # reports `configured: bool` only.
+    apollo_api_key: str | None = None
+    apollo_call_deadline_s: float = 15.0
+    apollo_max_concurrency: int = 2
+    apollo_max_transport_retries: int = 1
+    # Unset -> `cost_usd` stays null for every enrichment_calls row (mirrors
+    # `tavily_price_usd_per_credit`) — as of V2-D this is moot regardless,
+    # since no verified numeric Apollo usage field has ever been observed
+    # (see `ApolloRuntime.estimate_cost_usd`'s docstring), so `credits_used`
+    # is never populated for this rate to even apply to.
+    apollo_price_usd_per_credit: float | None = None
+    # No `APOLLO_BASE_URL` — the endpoint/origin/path are pinned constants in
+    # `providers/live/enrichment_runtime.py`, deliberately not configurable.
+
+    # V2-DH: Hunter is a SECOND Live `EnrichmentProvider`, behind the same
+    # Protocol Apollo satisfies — never a second pipeline. Never logged,
+    # never persisted, never returned by any endpoint.
+    hunter_api_key: str | None = None
+    hunter_call_deadline_s: float = 15.0
+    hunter_max_concurrency: int = 2
+    hunter_max_transport_retries: int = 1
+    # Deliberately NO `hunter_price_usd_per_credit` field (frozen §Part 12)
+    # — `credits_used`/`cost_usd` stay permanently `None` for every Hunter
+    # attempt. No `HUNTER_BASE_URL` — pinned constants in
+    # `providers/live/hunter_runtime.py`.
 
     # `NoDecode`: pydantic-settings would otherwise try to JSON-decode any
     # env value for a `list[str]` field *before* our own validator runs, and
@@ -106,6 +154,49 @@ class Settings(BaseSettings):
     # not to constrain normal use.
     max_request_body_bytes: int = 256_000
 
+    # --- V2-H: action proposal + human approval (Demo executor only) ---
+    # Part 9 rate/abuse control — a public Demo visitor's action endpoints
+    # are Origin-checked and rate-limited but never operator-gated (D8); this
+    # is the DB-backed cap on how many `action_executions` rows one Demo run
+    # may accumulate (policy clause 14's `demo_action_cap_reached`), separate
+    # from the per-client-IP request-rate limiter below.
+    demo_max_actions_per_run: int = 10
+    action_write_rate_limit_attempts: int = 30
+    action_write_rate_limit_window_s: float = 60.0
+
+    # --- V2-I-b: Live Gmail execution + reconciliation + audit ---
+    # §3.3 bounded reconciliation bounds — a `messages.list(labelIds=SENT])`
+    # + bounded `messages.get(format="metadata")` scan under `gmail.metadata`
+    # least privilege (no `q`, no `gmail.readonly`). Defaults match the
+    # frozen plan's own table exactly.
+    reconcile_page_size: int = 25
+    reconcile_max_pages: int = 2
+    reconcile_max_messages: int = 50
+    reconcile_clock_skew_s: float = 60.0
+    reconcile_max_attempts: int = 3
+    reconcile_window_s: float = 900.0
+
+    # One HTTP request, zero-retry — the deadline for `messages.send` itself
+    # (distinct from `gmail_oauth_call_deadline_s`, which governs the
+    # connect/callback flow's token/profile calls).
+    gmail_send_call_deadline_s: float = 20.0
+
+    # A `CLAIMED` row with no `dispatched_at`, or an `IN_FLIGHT` row whose
+    # `dispatched_at` is older than this, is eligible for the stale-recovery
+    # sweep (Phase 9) — never dispatched automatically, only ever settled to
+    # `FAILED`/`UNCERTAIN` by an explicit operator-gated recover call.
+    execution_stale_lease_s: float = 300.0
+
+    # Rolling 24h Live send allowance (Phase 5) — a DB-backed, cross-process
+    # correct cap, never reset at UTC midnight (the window is rolling, not
+    # calendar-aligned).
+    live_max_sends_per_day: int = 50
+    # SQLite lock-retry bounds for the allowance reservation transaction —
+    # at most this many COMPLETE transaction attempts; exhaustion denies the
+    # reservation (grants nothing, dispatches nothing) rather than raising.
+    allowance_lock_max_attempts: int = 3
+    allowance_lock_retry_base_delay_s: float = 0.05
+
     # --- Checkpoint I1 Phase 9: request/host/error hardening ---
     # `["*"]` (any host) preserves today's unrestricted behavior for local
     # dev/tests. A production deployment should set this explicitly (see
@@ -146,6 +237,40 @@ class Settings(BaseSettings):
     # any endpoint — GET /settings/providers reports configured: bool only.
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
+
+    # --- V2-G: Gmail OAuth (connection only, no sending) ---
+    # A server-side confidential OAuth client. All three required together —
+    # `google_oauth_configured()` (providers/live/google_oauth_runtime.py)
+    # checks the AND, mirroring `operator_login_configured()`'s "both or
+    # neither" discipline. Never logged, never returned by any endpoint.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    # `redirect_uri` is CONFIGURED, never derived from a request header
+    # (Host/Origin/X-Forwarded-Host) — the exact-match value Google's
+    # authorization request and token exchange both send. Production value
+    # is the frontend origin's own `/api/gmail/callback` path (the existing
+    # I2 same-origin Next.js proxy forwards it server-to-server to this
+    # API's real `GET /api/gmail/callback`).
+    google_oauth_redirect_uri: str | None = None
+    # Fernet key(s) encrypting `gmail_connections.encrypted_refresh_token`
+    # at rest — same rotation posture as `SESSION_SIGNING_KEY`/
+    # `SESSION_SIGNING_KEY_OLD` (RUNBOOK.md documents the rotation
+    # procedure): `_OLD` is accepted for decryption only, never for new
+    # writes. Missing key(s) fail closed (`groundwork/token_crypto.py`),
+    # never a silent plaintext fallback.
+    token_encryption_key: str | None = None
+    token_encryption_key_old: str | None = None
+    gmail_oauth_state_ttl_s: float = 600.0
+    gmail_oauth_call_deadline_s: float = 15.0
+    # Bounded at 1 (§ "Retries/concurrency/idempotency") — never retried on
+    # a definitive OAuth-code-exchange 4xx, only on a transport failure that
+    # never reached Google at all.
+    gmail_oauth_max_transport_retries: int = 1
+    # Per-client-IP sliding window on OAuth-callback failures (a state/
+    # session binding mismatch) — process-local, same posture as the
+    # operator-login limiter (`api/rate_limit.py`).
+    gmail_callback_failure_rate_limit_attempts: int = 10
+    gmail_callback_failure_rate_limit_window_s: float = 300.0
 
     # --- Live Mode cost/safety bounds (Checkpoint G §7) ---
     # Model selection is config-only — no application code branches on this
@@ -219,7 +344,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "openai_price_input_usd_per_mtok", "openai_price_output_usd_per_mtok", "live_run_soft_budget_usd",
-        "tavily_price_usd_per_credit",
+        "tavily_price_usd_per_credit", "apollo_price_usd_per_credit",
         mode="before",
     )
     @classmethod

@@ -145,6 +145,11 @@ class ProspectAggregate(BaseModel):
     review: dict[str, Any] | None
     trace: list[dict[str, Any]]
     approval: ApprovalInfo
+    # v2 §Part 4/§L — additive only. One entry per (prospect, channel) with a
+    # provider-backed state; a channel that was never attempted simply has no
+    # entry (NOT_ATTEMPTED by omission — see
+    # `engine/steps/contact_enrichment.py`). No V2-E UI reads this yet.
+    contact_channels: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ApproveRequest(BaseModel):
@@ -154,6 +159,134 @@ class ApproveRequest(BaseModel):
 class RejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
     actor: str = "demo_user"
+
+
+# --- v2 §V2-H: action proposal + human approval (Demo executor only) ---
+
+
+class ActionProposeRequest(BaseModel):
+    """D3 — a proposal is created only via an explicit POST naming a
+    specific draft. `model_config = extra="forbid"` so a client can never
+    smuggle `origin`/`sender_identifier`/anything else through this body —
+    origin is derived server-side from the run's own mode, never accepted
+    from request JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = Field(min_length=1)
+
+
+class ActionApproveRequest(BaseModel):
+    actor: str = "demo_user"
+
+
+class ActionRejectRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    actor: str = "demo_user"
+
+
+class ActionExecuteRequest(BaseModel):
+    actor: str = "demo_user"
+
+
+class ActionApprovalInfo(BaseModel):
+    state: str
+    actor: str | None = None
+    reason: str | None = None
+    decided_at: datetime | None = None
+
+
+class ActionExecutionInfo(BaseModel):
+    id: str
+    status: str
+    origin: str
+    provider: str | None = None
+    dispatched: bool
+    outcome_class: str | None = None
+    provider_message_id: str | None = None
+    claimed_at: datetime | None = None
+    dispatched_at: datetime | None = None
+    settled_at: datetime | None = None
+    # V2-I-b — additive audit/reconciliation fields. Never a raw Gmail
+    # payload, OAuth token, or raw MIME body — see `ActionAuditResponse`.
+    reconcile_attempts: int = 0
+    messages_scanned: int = 0
+    reconciled_at: datetime | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+
+
+class ActionReconcileResponse(BaseModel):
+    """`POST /api/actions/executions/{id}/reconcile` (V2-I-b, Phase 8).
+    `reconcile_status` is what THIS call just established —
+    `"FOUND"` / `"NOT_FOUND_WITHIN_BOUNDS"` / `"LOOKUP_FAILED"` /
+    `"ABANDONED"` / `"ATTEMPTS_EXHAUSTED_WINDOW_OPEN"` — never conflated
+    with `execution.status`, which is the durable execution state."""
+
+    execution: ActionExecutionInfo
+    reconcile_status: str
+    attempts_remaining: int
+    next_terminalization_at: datetime | None = None
+
+
+class ActionRecoverResponse(BaseModel):
+    """`POST /api/actions/executions/{id}/recover` (V2-I-b, Phase 9)."""
+
+    execution: ActionExecutionInfo
+    recovered: bool
+    reason: str | None = None
+
+
+class ActionEventInfo(BaseModel):
+    id: str
+    type: str
+    actor: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    ts: datetime
+
+
+class ActionSendCallInfo(BaseModel):
+    id: str
+    operation: str
+    provider: str
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    latency_ms: float
+    http_status: int | None = None
+    error_type: str | None = None
+
+
+class ActionProposalResponse(BaseModel):
+    id: str
+    prospect_id: str
+    run_id: str
+    draft_id: str
+    action_type: str
+    channel: str
+    sender_identifier: str | None
+    recipient_identifier: str | None
+    content_hash: str
+    hash_version: str
+    policy_version: str
+    policy_verdict: str
+    blocked_reasons: list[str] = Field(default_factory=list)
+    origin: str
+    created_at: datetime
+    superseded_by: str | None = None
+    created: bool = True
+    approval: ActionApprovalInfo | None = None
+    execution: ActionExecutionInfo | None = None
+
+
+class ActionAuditResponse(BaseModel):
+    """`GET /api/actions/proposals/{id}/audit` (V2-I-b, Phase 10) — the full,
+    immutable audit trail for one proposal. Never a raw Gmail provider
+    payload, never an OAuth token, never raw MIME."""
+
+    proposal: ActionProposalResponse
+    events: list[ActionEventInfo] = Field(default_factory=list)
+    send_calls: list[ActionSendCallInfo] = Field(default_factory=list)
 
 
 # --- settings ---
@@ -180,6 +313,11 @@ class LiveAvailability(BaseModel):
     available: bool
     llm_available: bool = False
     search_available: bool = False
+    # V2-D/V2-DH: additive, never part of `available`'s AND — enrichment is
+    # optional even in Live Mode, so an unconfigured/absent Apollo/Hunter
+    # runtime must never disable Live Mode itself.
+    enrichment_provider: str = "none"
+    enrichment_available: bool = False
     operator_login_configured: bool = False
     is_operator: bool = False
     model: str
@@ -202,12 +340,57 @@ class LiveAvailability(BaseModel):
     soft_budget_enforceable: bool
 
 
+class GmailAvailability(BaseModel):
+    """V2-G: additive on `ProviderSettingsResponse`. `configured` and
+    `connected` are safe for anyone to see; `google_account_email`/`scopes`/
+    `connected_at` are the connected account's own identity, so
+    `routers/settings.py` only ever populates them for an operator —
+    identically `False`/empty/`None` otherwise, never a partial reveal."""
+
+    configured: bool = False
+    connected: bool = False
+    google_account_email: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    connected_at: datetime | None = None
+
+
 class ProviderSettingsResponse(BaseModel):
     mode: str
     llm: ProviderInfo
     search: ProviderInfo
+    # V2-D/V2-DH: additive. `name` is `"none"`, `"apollo"`, or `"hunter"`
+    # (mirrors `settings.enrichment_provider`); `configured` never exposes
+    # the key, only whether one is present when a live provider is selected.
+    enrichment: ProviderInfo
     live: LiveAvailability
+    # V2-G: additive — see `GmailAvailability` above.
+    gmail: GmailAvailability = Field(default_factory=GmailAvailability)
     # Checkpoint I1 Phase 9: sourced from the API rather than a duplicated
     # frontend constant — see apps/web/lib/constants.ts's old
     # MAX_CONCURRENT_PROSPECTS.
     max_concurrent_prospects: int
+
+
+class GmailConnectionResponse(BaseModel):
+    """`GET /api/gmail/connection` (V2-G, operator-only). Never the token/
+    ciphertext/key/PKCE-verifier — only safe metadata."""
+
+    connected: bool
+    google_account_email: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    connected_at: datetime | None = None
+    connected_by_actor: str | None = None
+    last_refreshed_at: datetime | None = None
+
+
+class GmailConnectResponse(BaseModel):
+    """`POST /api/gmail/connect` — never a server-side redirect (§Backend
+    routes); the frontend performs `window.location.assign(authorization_url)`
+    itself."""
+
+    authorization_url: str
+
+
+class GmailDisconnectResponse(BaseModel):
+    status: str
+    deleted: bool

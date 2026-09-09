@@ -17,7 +17,11 @@ from fastapi import Depends, Request
 from groundwork.api.operator_auth import COOKIE_NAME, verify_session_cookie
 from groundwork.db import SessionLocal
 from groundwork.engine.runner import Repos
+from groundwork.config import settings
+from groundwork.repositories.actions import ActionRepository
 from groundwork.repositories.approvals import ApprovalRepository
+from groundwork.repositories.gmail_connection import GmailConnectionRepository
+from groundwork.repositories.live_send_allowance import LiveSendAllowanceRepository
 from groundwork.repositories.plays import PlayRepository
 
 
@@ -65,6 +69,41 @@ def get_live_search_runtime(request: Request):
 LiveSearchRuntimeDep = Annotated[object, Depends(get_live_search_runtime)]
 
 
+def get_enrichment_runtime(request: Request):
+    """The process-scoped `ApolloRuntime`/`HunterRuntime` created once in
+    `main.py`'s lifespan, or `None` if `ENRICHMENT_PROVIDER` is `"none"` or
+    the selected provider's API key isn't configured (V2-D/V2-DH) — the
+    enrichment-side analogue of `get_live_runtime`/`get_live_search_runtime`.
+    Unlike those two, `None` here never disables Live Mode itself —
+    enrichment is optional, and at most one of Apollo/Hunter is ever active
+    at a time (never both — one `EnrichmentProvider` slot)."""
+    return getattr(request.app.state, "enrichment_runtime", None)
+
+
+EnrichmentRuntimeDep = Annotated[object, Depends(get_enrichment_runtime)]
+
+
+def get_google_oauth_runtime(request: Request):
+    """The process-scoped `GoogleOAuthRuntime` created once in `main.py`'s
+    lifespan, or `None` if Google OAuth isn't configured (V2-G) — the
+    Gmail-side analogue of `get_live_runtime`, except this runtime is
+    deployment-scoped, not run-scoped (it's never part of a
+    `ProviderBundle`). Tests override this the same way they override
+    `get_live_runtime` — via `app.dependency_overrides` — to inject a
+    runtime backed by `httpx.MockTransport`."""
+    return getattr(request.app.state, "google_oauth_runtime", None)
+
+
+GoogleOAuthRuntimeDep = Annotated[object, Depends(get_google_oauth_runtime)]
+
+
+def get_gmail_repo(session_factory: SessionFactory) -> GmailConnectionRepository:
+    return GmailConnectionRepository(session_factory)
+
+
+GmailRepoDep = Annotated[GmailConnectionRepository, Depends(get_gmail_repo)]
+
+
 def get_operator_session(request: Request) -> bool:
     """True iff the request carries a valid, currently-signed operator
     session cookie (Checkpoint I1 Phase 8). Read-only — never mutates
@@ -90,6 +129,20 @@ def get_approvals_repo(session_factory: SessionFactory) -> ApprovalRepository:
     return ApprovalRepository(session_factory)
 
 
+def get_actions_repo(session_factory: SessionFactory) -> ActionRepository:
+    return ActionRepository(session_factory)
+
+
+def get_live_send_allowance_repo(session_factory: SessionFactory) -> LiveSendAllowanceRepository:
+    return LiveSendAllowanceRepository(
+        session_factory,
+        max_attempts=settings.allowance_lock_max_attempts,
+        retry_base_delay_s=settings.allowance_lock_retry_base_delay_s,
+    )
+
+
 ReposDep = Annotated[Repos, Depends(get_repos)]
 PlaysRepoDep = Annotated[PlayRepository, Depends(get_plays_repo)]
 ApprovalsRepoDep = Annotated[ApprovalRepository, Depends(get_approvals_repo)]
+ActionsRepoDep = Annotated[ActionRepository, Depends(get_actions_repo)]
+LiveSendAllowanceRepoDep = Annotated[LiveSendAllowanceRepository, Depends(get_live_send_allowance_repo)]

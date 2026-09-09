@@ -110,6 +110,23 @@ companies:
       research: { fail_attempts: 1, error: ProviderTimeout }
     industry_profile_source_ref: funding-note
     employee_profile_source_ref: funding-note
+    # v2 §Part 7 — the hero contact-enrichment path: a provider OBSERVATION,
+    # never a Groundwork verdict. Groundwork's own deterministic derivation
+    # (domain/contact_identity.py) computes VERIFIED + RESOLVED +
+    # STRONG_MATCH from this at run time.
+    enrichment:
+      matched: true
+      email:
+        address: priya.natarajan@northwindlabs.com
+        provider_status: verified
+        provider_confidence: 0.94
+        is_catch_all: false
+      linkedin:
+        profile_url: demo://linkedin/priya-natarajan
+        asserted_full_name: Priya Natarajan
+        asserted_company_name: Northwind Labs
+        asserted_company_domain: northwindlabs.com
+        asserted_title: VP of Sales
 
   # 2. Riverbend Analytics — a funding claim that cannot be grounded (the
   #    snippet only hints at capital, never confirming round/amount), plus
@@ -393,3 +410,20 @@ companies:
         source_ref: leadership-note
     industry_profile_source_ref: funding-note
     employee_profile_source_ref: funding-note
+    # v2 §Part 7 — proves the email/LinkedIn axes are independent: a
+    # catch-all-domain observation derives RISKY (permanently unsendable,
+    # no override — D7), while the LinkedIn observation still derives
+    # RESOLVED + STRONG_MATCH.
+    enrichment:
+      matched: true
+      email:
+        address: marcus.webb@sablecompute.dev
+        provider_status: catch_all
+        provider_confidence: 0.45
+        is_catch_all: true
+      linkedin:
+        profile_url: demo://linkedin/marcus-webb
+        asserted_full_name: Marcus Webb
+        asserted_company_name: Sable Compute
+        asserted_company_domain: sablecompute.dev
+        asserted_title: VP of Sales

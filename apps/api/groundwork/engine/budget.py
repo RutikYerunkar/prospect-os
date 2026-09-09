@@ -19,6 +19,10 @@ class PipelineBudget:
     research_max_retries: int = 2
     personalize_timeout_s: float = 2.0
     personalize_max_retries: int = 1
+    # v2 — bounded, deterministic retry for the contact_enrichment step
+    # (§E: "Do not introduce unlimited retries"). Additive field with a
+    # default: does not change any v1 step's behavior.
+    contact_enrichment_max_retries: int = 1
     backoffs_s: tuple[float, ...] = (0.4, 0.8, 1.6)
     max_concurrent_prospects: int = 3
     run_wall_clock_timeout_s: float = 180.0

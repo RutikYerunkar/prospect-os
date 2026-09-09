@@ -30,9 +30,24 @@ class ApiError(Exception):
     status_code: int = 500
     title: str = "Internal Server Error"
 
-    def __init__(self, detail: str) -> None:
+    def __init__(self, detail: str, *, code: str | None = None) -> None:
+        """`code` (V2-H) is an ADDITIVE, optional stable machine-readable
+        identifier — e.g. `CONTENT_CHANGED`, `APPROVAL_SUPERSEDED`,
+        `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` — layered onto the existing
+        `type`/`title`/`detail`/`status` problem-JSON shape without changing
+        it for any existing caller that doesn't look for `code`."""
         self.detail = detail
+        self.code = code
         super().__init__(detail)
+
+
+class BadRequestError(ApiError):
+    """A request that's malformed before any business logic even runs —
+    e.g. an unparseable OAuth `state` parameter (V2-G). Never carries detail
+    derived from a secret or credential."""
+
+    status_code = 400
+    title = "Bad Request"
 
 
 class NotFoundError(ApiError):
@@ -73,6 +88,18 @@ class TooManyRequestsError(ApiError):
     title = "Too Many Requests"
 
 
+class ActionDisabledError(ApiError):
+    """V2-H, D1/D4 — the dedicated structural refusal for a governed action
+    that is deliberately unreachable in this checkpoint (currently: Live
+    `EMAIL_SEND`, via `LiveExternalEmailSendDisabled`). Distinct from
+    `UnprocessableEntityError`/`ProviderNotConfigured`-style 422s: this is
+    never about missing configuration, and configuring something can never
+    make it go away — only a deliberate future code change (V2-I) can."""
+
+    status_code = 403
+    title = "Action Disabled"
+
+
 def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
 
@@ -86,6 +113,8 @@ def _problem_response(error: ApiError, request_id: str | None) -> JSONResponse:
     }
     if request_id:
         content["request_id"] = request_id
+    if error.code:
+        content["code"] = error.code
     return JSONResponse(status_code=error.status_code, content=content)
 
 

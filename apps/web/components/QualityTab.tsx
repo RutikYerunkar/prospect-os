@@ -4,6 +4,8 @@ import { MetricGrid } from "@/components/MetricGrid";
 import { GuardrailPanel } from "@/components/GuardrailPanel";
 import { ModelUsagePanel } from "@/components/ModelUsagePanel";
 import { SearchQualityPanel } from "@/components/SearchQualityPanel";
+import { EnrichmentQualityPanel } from "@/components/EnrichmentQualityPanel";
+import { ActionGovernancePanel } from "@/components/ActionGovernancePanel";
 import type { ProspectSummary, RunEvaluation, RunStatus } from "@/lib/types";
 
 const POLL_MS = 2000;
@@ -87,6 +89,8 @@ export function QualityTab({
       <MetricGrid volume={evaluation.volume} quality={evaluation.quality} reliability={evaluation.reliability} />
       <ModelUsagePanel usage={evaluation.llm_usage} />
       <SearchQualityPanel search={evaluation.search_quality} />
+      <EnrichmentQualityPanel enrichment={evaluation.enrichment} />
+      <ActionGovernancePanel actions={evaluation.actions} />
       <div>
         <h3 className="px-4 pt-4 text-xs font-medium uppercase tracking-wide text-zinc-500">
           Guardrails — all seven deterministic checks

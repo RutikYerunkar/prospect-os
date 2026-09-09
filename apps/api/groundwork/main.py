@@ -14,7 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from groundwork.api import run_service
 from groundwork.api.errors import register_error_handlers
 from groundwork.api.middleware import MaxBodySizeMiddleware, RequestIdMiddleware
-from groundwork.api.routers import evaluation, operator, plays, prospects, runs, settings as settings_router
+from groundwork.api.routers import actions, evaluation, gmail, operator, plays, prospects, runs, settings as settings_router
 from groundwork.config import settings
 from groundwork.db import SessionLocal, create_all_if_sqlite, engine, schema_upgrade_problems
 from groundwork.logging_config import configure_logging
@@ -117,6 +117,38 @@ async def lifespan(app: FastAPI):
 
         app.state.live_search_runtime = LiveSearchRuntime.create(settings)
 
+    # V2-D/V2-DH: process-scoped enrichment provider runtime (Apollo OR
+    # Hunter — never both, exactly one `EnrichmentProvider` slot), same
+    # lifecycle discipline — created once here, closed once at shutdown.
+    # Guarded by BOTH conditions per provider: a stray `APOLLO_API_KEY`/
+    # `HUNTER_API_KEY` with a non-matching (or `none`) `ENRICHMENT_PROVIDER`
+    # must build no runtime, open no client, and never even import that
+    # provider's adapter module (the import stays lazy, here and in
+    # `providers/registry.py`). Enrichment is optional even in Live Mode —
+    # unlike `live_runtime`/`live_search_runtime`, a missing enrichment
+    # runtime never disables Live Mode itself.
+    app.state.enrichment_runtime = None
+    if settings.enrichment_provider == "apollo" and settings.apollo_api_key:
+        from groundwork.providers.live.enrichment_runtime import ApolloRuntime
+
+        app.state.enrichment_runtime = ApolloRuntime.create(settings)
+    elif settings.enrichment_provider == "hunter" and settings.hunter_api_key:
+        from groundwork.providers.live.hunter_runtime import HunterRuntime
+
+        app.state.enrichment_runtime = HunterRuntime.create(settings)
+
+    # V2-G: process-scoped Google OAuth runtime — DEPLOYMENT-scoped, not
+    # run-scoped (never part of a `ProviderBundle`; see `providers/live/
+    # google_oauth_runtime.py`'s module docstring). Only constructed when
+    # Google OAuth is fully configured — a deployment with no Google
+    # client id/secret/redirect_uri runs with Gmail connect/disconnect
+    # cleanly unavailable (`422`), never a half-configured runtime.
+    app.state.google_oauth_runtime = None
+    if settings.google_client_id and settings.google_client_secret and settings.google_oauth_redirect_uri:
+        from groundwork.providers.live.google_oauth_runtime import GoogleOAuthRuntime
+
+        app.state.google_oauth_runtime = GoogleOAuthRuntime.create(settings)
+
     yield
 
     # --- Shutdown (Checkpoint I1 Phase 4) ---
@@ -157,6 +189,10 @@ async def lifespan(app: FastAPI):
         await app.state.live_runtime.close()
     if app.state.live_search_runtime is not None:
         await app.state.live_search_runtime.close()
+    if app.state.enrichment_runtime is not None:
+        await app.state.enrichment_runtime.close()
+    if app.state.google_oauth_runtime is not None:
+        await app.state.google_oauth_runtime.close()
     await engine.dispose()
 
     logger.info("groundwork api shutdown complete", extra={"executor_id": app.state.executor_id})
@@ -187,6 +223,8 @@ app.include_router(evaluation.router)
 app.include_router(prospects.router)
 app.include_router(settings_router.router)
 app.include_router(operator.router)
+app.include_router(gmail.router)
+app.include_router(actions.router)
 
 
 @app.get("/api/health")

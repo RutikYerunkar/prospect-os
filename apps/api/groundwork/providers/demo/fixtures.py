@@ -60,6 +60,41 @@ class FixtureFailureSpec(BaseModel):
     error: str = "ProviderTimeout"
 
 
+# =====================================================================
+# v2 — contact-enrichment provider-boundary fixtures (§Part 7)
+#
+# These are provider OBSERVATIONS, never Groundwork verdicts: no VERIFIED/
+# STRONG_MATCH precomputed here — `DemoEnrichmentProvider` hands them to
+# `domain/contact_identity.py`'s pure derivation at run time, exactly like
+# the rest of the fixture pack.
+# =====================================================================
+
+
+class FixtureEnrichmentEmail(BaseModel):
+    address: str
+    provider_status: str  # the demo PROVIDER's own raw word — see
+    # `providers/demo/contact_enrichment.py::DEMO_EMAIL_STATUS_MAP`
+    provider_confidence: float | None = None
+    is_catch_all: bool | None = None
+
+
+class FixtureEnrichmentLinkedIn(BaseModel):
+    # The ONLY grammar a DEMO_FIXTURE row may carry — `demo://linkedin/<slug>`.
+    # Structurally enforced by `models/schemas.py::DEMO_LINKEDIN_URL_PATTERN`
+    # at persistence time, never a real-looking external LinkedIn URL.
+    profile_url: str
+    asserted_full_name: str | None = None
+    asserted_company_name: str | None = None
+    asserted_company_domain: str | None = None
+    asserted_title: str | None = None
+
+
+class FixtureEnrichment(BaseModel):
+    matched: bool = True
+    email: FixtureEnrichmentEmail | None = None
+    linkedin: FixtureEnrichmentLinkedIn | None = None
+
+
 class FixtureCompany(BaseModel):
     slug: str
     name: str
@@ -75,6 +110,12 @@ class FixtureCompany(BaseModel):
     tech_mentions: list[FixtureTechMention] = Field(default_factory=list)
     leadership: list[FixtureLeadership] = Field(default_factory=list)
     failure_script: dict[str, FixtureFailureSpec] = Field(default_factory=dict)
+    # v2 — a company with no `enrichment` block simply yields an unmatched
+    # provider observation (never a Groundwork verdict; never NOT_ATTEMPTED
+    # by itself — see `engine/steps/contact_enrichment.py` for what decides
+    # NOT_ATTEMPTED).
+    enrichment: FixtureEnrichment | None = None
+    enrichment_failure_script: dict[str, FixtureFailureSpec] = Field(default_factory=dict)
     # H1 Phase 8 — additive profile provenance. Each points at an EXISTING
     # `sources` ref (never a new one — adding a new source would move
     # `evidence_confidence`, since that dimension averages over evidence
@@ -108,6 +149,19 @@ class FixturePack(BaseModel):
             if company.slug == slug:
                 return company
         raise KeyError(f"no fixture company with slug {slug!r}")
+
+    def company_by_domain(self, domain: str) -> FixtureCompany | None:
+        """`PersonEnrichmentQuery` carries a company domain, not a fixture
+        slug (the `EnrichmentProvider` Protocol never sees a `CompanySeed`)
+        — this is how `DemoEnrichmentProvider` finds the right fixture
+        entry. `None` (not `KeyError`) for an unknown domain — a caller
+        outside the fixture pack (e.g. a hand-built test pack with no
+        `enrichment` block at all) is a legitimate unmatched observation,
+        not a bug."""
+        for company in self.companies:
+            if company.domain == domain:
+                return company
+        return None
 
 
 @lru_cache(maxsize=4)

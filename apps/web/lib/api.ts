@@ -1,4 +1,10 @@
 import type {
+  ActionAudit,
+  ActionProposal,
+  ActionReconcileResult,
+  ActionRecoverResult,
+  GmailConnectionResponse,
+  GmailConnectResponse,
   OperatorLoginRequest,
   PlayCreateRequest,
   PlayPreviewRequest,
@@ -177,4 +183,58 @@ export function loginOperator(body: OperatorLoginRequest): Promise<{ status: str
 
 export function logoutOperator(): Promise<{ status: string }> {
   return apiDelete<{ status: string }>("/api/operator/session");
+}
+
+// V2-G — Gmail OAuth (connection only, no sending). All three routes are
+// operator-gated server-side; the frontend never decides that on its own.
+export function getGmailConnection(): Promise<GmailConnectionResponse> {
+  return apiGet<GmailConnectionResponse>("/api/gmail/connection");
+}
+
+export function connectGmail(): Promise<GmailConnectResponse> {
+  return apiPost<GmailConnectResponse>("/api/gmail/connect", {});
+}
+
+export function disconnectGmail(): Promise<{ status: string; deleted: boolean }> {
+  return apiDelete<{ status: string; deleted: boolean }>("/api/gmail/connection");
+}
+
+// V2-H — action proposal + human approval (Demo executor only). Demo action
+// endpoints require no operator session (D8) — these calls work identically
+// for a public, unauthenticated portfolio visitor and a logged-in operator;
+// only a Live run's endpoints are additionally gated server-side.
+export function listProspectActionProposals(prospectId: string): Promise<ActionProposal[]> {
+  return apiGet<ActionProposal[]>(`/api/actions/prospects/${prospectId}/proposals`);
+}
+
+export function proposeAction(draftId: string): Promise<ActionProposal> {
+  return apiPost<ActionProposal>("/api/actions/propose", { draft_id: draftId });
+}
+
+export function approveAction(proposalId: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/approve`, { actor });
+}
+
+export function rejectAction(proposalId: string, reason: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/reject`, { reason, actor });
+}
+
+export function executeAction(proposalId: string, actor = "demo_user"): Promise<ActionProposal> {
+  return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/execute`, { actor });
+}
+
+// V2-I-b — reconciliation, stale recovery, audit. All three are operator-
+// gated server-side (Live-only concepts); the UI only renders their
+// controls when an operator session and a LIVE_EXTERNAL execution are both
+// present (see `ActionAuditPanel`).
+export function reconcileExecution(executionId: string): Promise<ActionReconcileResult> {
+  return apiPost<ActionReconcileResult>(`/api/actions/executions/${executionId}/reconcile`, {});
+}
+
+export function recoverExecution(executionId: string): Promise<ActionRecoverResult> {
+  return apiPost<ActionRecoverResult>(`/api/actions/executions/${executionId}/recover`, {});
+}
+
+export function getActionAudit(proposalId: string): Promise<ActionAudit> {
+  return apiGet<ActionAudit>(`/api/actions/proposals/${proposalId}/audit`);
 }

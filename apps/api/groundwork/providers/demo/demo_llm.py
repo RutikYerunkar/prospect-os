@@ -18,7 +18,12 @@ from datetime import date, datetime, timedelta, timezone
 
 from pydantic import BaseModel
 
-from groundwork.models.llm_io import PersonalizationOutput, ResearchExtractionOutput, ScoreExplanationOutput
+from groundwork.models.llm_io import (
+    LinkedInOutreachOutput,
+    PersonalizationOutput,
+    ResearchExtractionOutput,
+    ScoreExplanationOutput,
+)
 from groundwork.models.schemas import (
     ClaimMapEntry,
     CompanyProfileFacts,
@@ -90,6 +95,8 @@ class DemoLLMProvider:
             output: BaseModel = self._research_extraction(envelope)
         elif schema is PersonalizationOutput:
             output = self._personalization(envelope)
+        elif schema is LinkedInOutreachOutput:
+            output = self._linkedin_personalization(envelope)
         elif schema is ScoreExplanationOutput:
             output = self._explanation(envelope)
         else:
@@ -248,6 +255,31 @@ class DemoLLMProvider:
                 "Best,\nThe Groundwork Team"
             )
         return PersonalizationOutput(subject=subject, body=body, claim_map=claim_map)
+
+    def _linkedin_personalization(self, envelope: PromptEnvelope) -> LinkedInOutreachOutput:
+        """Deterministic templating, distinct wording from `_personalization`
+        (no subject; shorter, more conversational) — same "template from
+        `envelope.metadata`, never the fixture pack" isolation discipline."""
+        meta = envelope.metadata
+        company = meta["company_name"]
+        persona_name = meta.get("persona_name") or meta.get("persona_title") or "there"
+        signals: list[dict] = meta.get("signals", [])
+
+        claim_map = [
+            ClaimMapEntry(sentence=s["summary"], evidence_ids=[s["evidence_id"]]) for s in signals[:2]
+        ]
+        if claim_map:
+            highlight = " ".join(entry.sentence for entry in claim_map)
+            body = (
+                f"Hi {persona_name} — saw the news at {company}: {highlight} "
+                "Would love to connect and share how we could help. Open to a quick chat?"
+            )
+        else:
+            body = (
+                f"Hi {persona_name} — I've been following {company}'s progress and would love to "
+                "connect. Open to a quick chat?"
+            )
+        return LinkedInOutreachOutput(body=body, claim_map=claim_map)
 
     def _explanation(self, envelope: PromptEnvelope) -> ScoreExplanationOutput:
         meta = envelope.metadata

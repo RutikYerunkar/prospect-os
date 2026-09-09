@@ -61,6 +61,38 @@ async def test_prospect_aggregate_has_full_provenance_chain(client) -> None:
     assert agg["approval"]["state"] == "PENDING"
 
 
+async def test_prospect_aggregate_contact_channels_is_additive(client) -> None:
+    """v2 §Part 4/§L — additive only: every existing aggregate field from
+    `test_prospect_aggregate_has_full_provenance_chain` above still works,
+    and `contact_channels` carries the Northwind hero path (VERIFIED email,
+    STRONG_MATCH LinkedIn) without disturbing anything else."""
+    run_id, _ = await _run_to_completion(client)
+    prospects = (await client.get(f"/api/runs/{run_id}/prospects")).json()
+    passed = [p for p in prospects if p["status"] == "PASS"]
+    assert passed
+
+    northwind = None
+    for p in passed:
+        agg = (await client.get(f"/api/prospects/{p['id']}")).json()
+        channels = {c["channel"]: c for c in agg["contact_channels"]}
+        if channels.get("email", {}).get("verification_state") == "VERIFIED":
+            northwind = agg
+            break
+    assert northwind is not None, "expected one PASS prospect with a VERIFIED email channel (Northwind)"
+
+    channels = {c["channel"]: c for c in northwind["contact_channels"]}
+    assert channels["email"]["discovery_state"] == "FOUND"
+    assert channels["email"]["identifier"] == "priya.natarajan@northwindlabs.com"
+    assert channels["linkedin"]["discovery_state"] == "RESOLVED"
+    assert channels["linkedin"]["identity_match_state"] == "STRONG_MATCH"
+    assert channels["linkedin"]["identifier"] == "demo://linkedin/priya-natarajan"
+
+    # Every pre-existing field is untouched.
+    assert northwind["company"]["display_name"]
+    assert northwind["score"]["overall"] == 92
+    assert northwind["review"]["verdict"] == "PASS"
+
+
 async def test_prospect_aggregate_unknown_id_is_404(client) -> None:
     r = await client.get("/api/prospects/does-not-exist")
     assert r.status_code == 404

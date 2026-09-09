@@ -13,7 +13,7 @@ async def review(ctx: ProspectContext) -> StepResult:
         prospect_id=ctx.prospect_id,
         evidence=ctx.evidence,
         drafts=ctx.drafts,
-        contact=ctx.contact,
+        contact_channels=ctx.contact_channels,
         score=ctx.score,
         dedupe_key=ctx.dedupe_key,
         other_dedupe_keys=set(ctx.other_dedupe_keys),

@@ -7,7 +7,15 @@ from pydantic import ValidationError
 
 from fastapi import APIRouter, Request
 
-from groundwork.api.deps import ExecutorIdDep, IsOperatorDep, LiveRuntimeDep, LiveSearchRuntimeDep, PlaysRepoDep, ReposDep
+from groundwork.api.deps import (
+    EnrichmentRuntimeDep,
+    ExecutorIdDep,
+    IsOperatorDep,
+    LiveRuntimeDep,
+    LiveSearchRuntimeDep,
+    PlaysRepoDep,
+    ReposDep,
+)
 from groundwork.api.errors import NotFoundError, TooManyRequestsError, UnprocessableEntityError
 from groundwork.api.live_gate import enforce_live_gate
 from groundwork.api.rate_limit import SlidingWindowRateLimiter
@@ -22,6 +30,7 @@ from groundwork.api.schemas import (
     RunSummary,
 )
 from groundwork.config import settings
+from groundwork.engine.enrichment_budget import EnrichmentCallBudget
 from groundwork.engine.objective_parser import parse_objective
 from groundwork.engine.run_budget import RunBudget
 from groundwork.models.enums import Mode
@@ -72,6 +81,27 @@ def _require_search_runtime(search_runtime):
             "search fallback"
         )
     return search_runtime
+
+
+# V2-DH: which env var each selectable `ENRICHMENT_PROVIDER` value requires
+# — used only to name the right variable in the 422 below, never to branch
+# any other behavior.
+_ENRICHMENT_API_KEY_ENV_VAR = {"apollo": "APOLLO_API_KEY", "hunter": "HUNTER_API_KEY"}
+
+
+def _require_enrichment_runtime(enrichment_runtime, provider: str):
+    """V2-D/V2-DH: only called when `ENRICHMENT_PROVIDER` was explicitly set
+    to `"apollo"` or `"hunter"` — unlike `_require_live_runtime`/
+    `_require_search_runtime`, enrichment itself is optional in Live Mode
+    (`ENRICHMENT_PROVIDER=none` needs no runtime at all and is never gated
+    here)."""
+    if enrichment_runtime is None:
+        env_var = _ENRICHMENT_API_KEY_ENV_VAR[provider]
+        raise UnprocessableEntityError(
+            f"ENRICHMENT_PROVIDER={provider} requires {env_var} to be configured and the API "
+            "process restarted — Live enrichment never falls back to Demo fixtures"
+        )
+    return enrichment_runtime
 
 
 async def _to_response(play_row, repos: ReposDep) -> PlayResponse:
@@ -239,6 +269,7 @@ async def start_run(
     repos: ReposDep,
     live_runtime: LiveRuntimeDep,
     search_runtime: LiveSearchRuntimeDep,
+    enrichment_runtime: EnrichmentRuntimeDep,
     executor_id: ExecutorIdDep,
     is_operator: IsOperatorDep,
 ) -> RunCreateResponse:
@@ -292,6 +323,15 @@ async def start_run(
             play_spec = play_spec.model_copy(update={"target_count": settings.live_max_prospects_per_run})
         run_budget = RunBudget(settings.live_run_soft_budget_usd)
 
+    # V2-D/V2-DH: ENRICHMENT_PROVIDER=apollo|hunter is 422'd here, before the
+    # Run row is created, exactly like the LLM/search runtime checks above.
+    # ENRICHMENT_PROVIDER=none (the default) needs no check at all —
+    # enrichment is optional in Live Mode, unlike LLM/search.
+    enrichment_budget = None
+    if mode is Mode.LIVE and settings.enrichment_provider in ("apollo", "hunter"):
+        _require_enrichment_runtime(enrichment_runtime, settings.enrichment_provider)
+        enrichment_budget = EnrichmentCallBudget(max_calls=settings.max_enrichment_calls_per_run)
+
     provider_profile = build_provider_profile(mode, settings, run_budget=run_budget)
     run_id = await repos.runs.create(
         play_id=play_id, mode=mode_value, seed=seed, provider_profile=provider_profile, executor_id=executor_id,
@@ -299,6 +339,8 @@ async def start_run(
     launch_run(
         run_id, play_spec, mode, seed, repos,
         live_runtime=live_runtime, run_budget=run_budget, search_runtime=search_runtime,
+        enrichment_runtime=enrichment_runtime if mode is Mode.LIVE else None,
+        enrichment_budget=enrichment_budget,
         executor_id=executor_id,
     )
 

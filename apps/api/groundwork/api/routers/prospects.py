@@ -9,6 +9,7 @@ trigger.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -17,7 +18,13 @@ from groundwork.api.deps import ApprovalsRepoDep, IsOperatorDep, ReposDep
 from groundwork.api.errors import ConflictError, NotFoundError
 from groundwork.api.live_gate import enforce_live_gate
 from groundwork.api.schemas import ApprovalInfo, ApproveRequest, ProspectAggregate, RejectRequest
-from groundwork.models.enums import ProspectStatus
+from groundwork.domain.action_policy import (
+    ENRICHMENT_STALE_AFTER_DAYS_DEFAULT,
+    derive_preserved_enrichment_state,
+    is_enrichment_stale,
+)
+from groundwork.models.enums import Channel, ProspectStatus
+from groundwork.timeutil import utcnow
 
 router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 
@@ -90,6 +97,65 @@ def _draft_dict(row) -> dict[str, Any]:
         "claim_map": row.claim_map,
         "version": row.version,
         "status": row.status,
+        "content_hash": row.content_hash,
+        "hash_version": row.hash_version,
+    }
+
+
+def _contact_channel_dict(
+    row,
+    *,
+    now: datetime,
+    latest_enrichment_observed_at: datetime | None,
+    enrichment_by_id: dict[str, Any],
+) -> dict[str, Any]:
+    """V2-E, §5/§6: additive-only fields layered on top of the v2-C shape —
+    every field already returned above this comment is unchanged. The new
+    fields are the approved provider-neutral/read-only set: `origin`/
+    `provider` (from the `contact_enrichments` row this state derives from,
+    never the provider's raw payload), `stale`/`stale_after_days` (existing
+    `domain/action_policy.py` staleness semantics, reused not re-derived),
+    `preserved_state` (§8, `domain/action_policy.py::
+    derive_preserved_enrichment_state`), and `provider_confidence`/
+    `is_catch_all` for the email channel only — observations, never part of
+    any state's explanation text (that discipline lives in the frontend).
+    Deliberately NOT exposed: `email_provider_status`, any raw payload/
+    digest, `provider_person_id`, or raw provider error text."""
+    enrichment = enrichment_by_id.get(row.derived_from_enrichment_id) if row.derived_from_enrichment_id else None
+    is_email = row.channel == Channel.EMAIL.value
+    preserved_state = derive_preserved_enrichment_state(
+        discovery_state=row.discovery_state,
+        identifier=row.identifier,
+        observed_at=row.observed_at,
+        last_attempt_status=row.last_attempt_status,
+        latest_enrichment_observed_at=latest_enrichment_observed_at,
+    )
+    return {
+        "channel": row.channel,
+        "identifier": row.identifier,
+        "discovery_state": row.discovery_state,
+        "verification_state": row.verification_state,
+        "identity_match_state": row.identity_match_state,
+        "derivation_version": row.derivation_version,
+        "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+        "last_attempt_at": row.last_attempt_at.isoformat() if row.last_attempt_at else None,
+        "last_attempt_status": row.last_attempt_status,
+        "last_attempt_error_type": row.last_attempt_error_type,
+        "origin": enrichment.origin if enrichment else None,
+        "provider": enrichment.provider if enrichment else None,
+        "stale": is_enrichment_stale(row.observed_at, now, ENRICHMENT_STALE_AFTER_DAYS_DEFAULT),
+        "stale_after_days": ENRICHMENT_STALE_AFTER_DAYS_DEFAULT,
+        "preserved_state": preserved_state.value if preserved_state else None,
+        "provider_confidence": enrichment.email_provider_confidence if enrichment and is_email else None,
+        "is_catch_all": enrichment.email_is_catch_all if enrichment and is_email else None,
+        # V2-I-a — local send-suppression metadata (EMAIL channel only;
+        # always None for LINKEDIN, which never carries suppression). No raw
+        # provider payload is ever exposed here — only the already-derived
+        # audit fields the repository itself persisted.
+        "send_suppressed_at": row.send_suppressed_at.isoformat() if row.send_suppressed_at else None,
+        "send_suppression_reason": row.send_suppression_reason,
+        "send_suppression_source": row.send_suppression_source,
+        "send_suppression_provider_code": row.send_suppression_provider_code,
     }
 
 
@@ -148,6 +214,11 @@ async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: Approval
     review = await repos.prospect_data.get_review(prospect_id)
     trace = await repos.tasks.for_prospect(prospect_id)
     approval = await approvals.latest_for_prospect(prospect_id)
+    contact_channels = await repos.contact_enrichment.get_contact_channels(prospect_id)
+    enrichments = await repos.contact_enrichment.get_contact_enrichments(prospect_id)
+    enrichment_by_id = {e.id: e for e in enrichments}
+    latest_enrichment_observed_at = max((e.observed_at for e in enrichments), default=None)
+    now = utcnow()
 
     company_dict: dict[str, Any] = {}
     if company is not None:
@@ -174,6 +245,13 @@ async def _load_aggregate(prospect_id: str, repos: ReposDep, approvals: Approval
         drafts=[_draft_dict(d) for d in drafts],
         review=_review_dict(review) if review else None,
         trace=[_task_dict(t) for t in trace],
+        contact_channels=[
+            _contact_channel_dict(
+                c, now=now, latest_enrichment_observed_at=latest_enrichment_observed_at,
+                enrichment_by_id=enrichment_by_id,
+            )
+            for c in contact_channels
+        ],
         approval=ApprovalInfo(
             state=approval.decision if approval else "PENDING",
             actor=approval.actor if approval else None,

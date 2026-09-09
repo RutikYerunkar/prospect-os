@@ -11,6 +11,7 @@ import { Panel } from "@/components/ui/Panel";
 import { ScoreBreakdown } from "@/components/ScoreBreakdown";
 import { EvidenceCard } from "@/components/EvidenceCard";
 import { SignalList } from "@/components/SignalList";
+import { ActionApprovalPanel } from "@/components/ActionApprovalPanel";
 import { ContactPanel } from "@/components/ContactPanel";
 import { OutreachViewer } from "@/components/OutreachViewer";
 import { ReviewPanel } from "@/components/ReviewPanel";
@@ -95,7 +96,7 @@ function ProspectHeader({ prospect }: { prospect: ProspectAggregate }) {
           </span>
         </div>
         <div className="flex flex-col gap-0.5">
-          <span className="text-[11px] uppercase tracking-wide text-zinc-500">Contact</span>
+          <span className="text-[11px] uppercase tracking-wide text-zinc-500">Person identity</span>
           <Badge tone={prospect.contact ? VERIFICATION_TONE[prospect.contact.verification] ?? "neutral" : "neutral"}>
             {prospect.contact ? prospect.contact.verification : "not reached"}
           </Badge>
@@ -289,12 +290,20 @@ export default function ProspectDetailPage({ params }: { params: Promise<{ id: s
           </Panel>
         </div>
 
-        <Panel title="Contact / Buyer">
-          <ContactPanel contact={prospect.contact} evidenceById={evidenceById} />
+        <Panel title="Contact & Enrichment">
+          <ContactPanel
+            contact={prospect.contact}
+            contactChannels={prospect.contact_channels}
+            evidenceById={evidenceById}
+          />
         </Panel>
 
         <Panel title="Outreach">
           <OutreachViewer drafts={prospect.drafts} evidenceById={evidenceById} />
+        </Panel>
+
+        <Panel title="Outreach Actions">
+          <ActionApprovalPanel prospect={prospect} />
         </Panel>
 
         <Panel title="Review & Guardrails">

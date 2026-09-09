@@ -31,6 +31,8 @@ from groundwork.providers.demo.demo_llm import DemoLLMProvider
 from groundwork.providers.demo.demo_search import DemoSearchProvider
 from groundwork.providers.demo.fixtures import FixturePack, load_fixture_pack
 from groundwork.providers.registry import build_provider_bundle
+from groundwork.repositories.actions import ActionRepository
+from groundwork.repositories.approvals import ApprovalRepository
 from groundwork.repositories.plays import PlayRepository
 from groundwork.repositories.prospect_data import ProspectDataRepository
 
@@ -112,7 +114,9 @@ async def test_unknown_exclusion_round_trips_after_engine_disposal_and_reconnect
     # step 6: evaluation can count it using persisted data — a fresh Repos
     # bound to the same reconnected engine, computing entirely on read.
     repos2 = Repos.build(sf2)
-    evaluation = await compute_run_evaluation(run_id, repos2)
+    evaluation = await compute_run_evaluation(
+        run_id, repos2, actions=ActionRepository(sf2), approvals=ApprovalRepository(sf2)
+    )
     assert evaluation["search_quality"]["unevaluable_exclusion_count"] == 1
 
     await engine2.dispose()

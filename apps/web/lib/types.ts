@@ -255,11 +255,61 @@ export interface ProspectScore {
 export interface ProspectContact {
   full_name: string | null;
   title: string | null;
-  persona: string | null;
+  // §15 regression fix: this is `ContactRow.persona` / `Contact.persona_match`
+  // on the backend — a boolean flag ("does this title match a persona"),
+  // never a string. Was mistyped here; the only frontend consumer is
+  // `ContactPanel`, audited and updated alongside this fix.
+  persona: boolean;
   linkedin_url: string | null;
   email: string | null;
   verification: ContactVerification;
   evidence_ids: string[];
+}
+
+// --- v2 contact enrichment axes (V2-E) ---
+
+export type EmailDiscoveryState = "NOT_FOUND" | "FOUND" | "PROVIDER_ERROR";
+export type EmailVerificationState = "UNVERIFIED" | "UNVERIFIABLE" | "RISKY" | "VERIFIED" | "INVALID";
+export type LinkedInResolutionState = "NOT_FOUND" | "RESOLVED" | "PROVIDER_ERROR";
+export type LinkedInIdentityState = "UNKNOWN" | "MISMATCH" | "WEAK_MATCH" | "STRONG_MATCH";
+export type EnrichmentOrigin = "DEMO_FIXTURE" | "LIVE_PROVIDER";
+export type PreservedEnrichmentState = "REFRESH_FAILED" | "REFRESH_FOUND_NOTHING";
+
+/**
+ * One row per (prospect, channel) — additive, read-only (§Part 4/§L, V2-E
+ * §5/§6). A channel that was never attempted has NO entry at all (absence
+ * is `NOT_ATTEMPTED`, never a row with a literal state) — see
+ * `ContactChannelAxes` for how the UI renders that. State strings are kept
+ * as `string` (not the closed union types above) so an unrecognized future
+ * enum value fails open to a neutral "unknown state" render instead of a
+ * TypeScript narrowing mismatch at runtime.
+ */
+export interface ContactChannel {
+  channel: string;
+  identifier: string | null;
+  discovery_state: string | null;
+  verification_state: string | null;
+  identity_match_state: string | null;
+  derivation_version: string | null;
+  observed_at: string | null;
+  last_attempt_at: string | null;
+  last_attempt_status: string | null;
+  last_attempt_error_type: string | null;
+  origin: string | null;
+  provider: string | null;
+  stale: boolean | null;
+  stale_after_days: number | null;
+  preserved_state: string | null;
+  // Observations only (§4) — never affect or appear inside a state's "why"
+  // explanation. Email channel only; always `null` for `linkedin`.
+  provider_confidence: number | null;
+  is_catch_all: boolean | null;
+  // V2-I-a — local send-suppression metadata. Email channel only; always
+  // `null` for `linkedin`, which has no suppression concept.
+  send_suppressed_at: string | null;
+  send_suppression_reason: string | null;
+  send_suppression_source: string | null;
+  send_suppression_provider_code: string | null;
 }
 
 export interface ClaimMapEntry {
@@ -276,6 +326,10 @@ export interface OutreachDraft {
   claim_map: ClaimMapEntry[];
   version: number;
   status: string;
+  // v2 §V2-F: populated once an approval binds this draft to a content hash
+  // (V2-H). Always `null` at this checkpoint — V2-F never computes it.
+  content_hash: string | null;
+  hash_version: string;
 }
 
 export type ReviewSeverity = "hard" | "soft";
@@ -351,6 +405,7 @@ export interface ProspectAggregate {
   review: ReviewResult | null;
   trace: AgentTaskTrace[];
   approval: ApprovalInfo;
+  contact_channels: ContactChannel[];
 }
 
 // --- evaluation (GET /api/runs/{id}/evaluation) ---
@@ -439,6 +494,55 @@ export interface SearchQualityMetrics {
   domain_resolution_method_counts: Record<string, number>;
 }
 
+// V2-J §1 — enrichment metrics, computed on read from `enrichment_calls`/
+// `contact_channels`/`contact_enrichments`. Every rate is `number | null` —
+// `null` means "no denominator," rendered as "—", never coerced to 0%.
+export interface EnrichmentMetrics {
+  attempted: number;
+  matched: number;
+  match_rate: number | null;
+  email_found_rate: number | null;
+  email_verified_rate: number | null;
+  catch_all_rate: number | null;
+  linkedin_resolved_rate: number | null;
+  identity_match_distribution: Record<string, number>;
+  identifier_grammar_rejections: number;
+  provider_error_rate: number | null;
+  not_attempted_budget_count: number;
+  enrichment_attempts_by_status: Record<string, number>;
+  stale_channel_count: number;
+  preserved_last_known_good_count: number;
+  preserved_last_known_good_breakdown: Record<string, number>;
+  p50_enrichment_latency_ms: number | null;
+  p95_enrichment_latency_ms: number | null;
+  enrichment_credits_used: number | null;
+  enrichment_cost_usd: number | null;
+  enrichment_calls: number;
+}
+
+// V2-J §2/§3 — governed action-proposal/execution/reconciliation
+// observability, computed on read from `action_proposals`/
+// `action_executions`/`action_events`/`approvals`. Proposal-time
+// `blocked_reasons` and execution-time `execution_blocked_reasons` are
+// kept strictly separate — never merged into one map.
+export interface ActionMetrics {
+  proposals_by_verdict: Record<string, number>;
+  blocked_reasons: Record<string, number>;
+  execution_blocked_reasons: Record<string, number>;
+  execution_blocked_attempts: number;
+  execution_blocked_proposals: number;
+  content_hash_mismatch_count: number;
+  approval_to_execution_latency_p50_ms: number | null;
+  approval_to_execution_latency_p95_ms: number | null;
+  executions_by_status: Record<string, number>;
+  executions_by_origin: Record<string, number>;
+  uncertain_count: number;
+  reconciliation_outcomes: Record<string, number>;
+  mean_messages_scanned_per_reconcile: number | null;
+  cross_run_recipient_blocks: number;
+  cross_run_recipient_blocked_proposals: number;
+}
+
 export interface RunEvaluation {
   run_id: string;
   volume: VolumeMetrics;
@@ -447,6 +551,8 @@ export interface RunEvaluation {
   guardrails: GuardrailMetric[];
   llm_usage: LLMUsage;
   search_quality: SearchQualityMetrics;
+  enrichment: EnrichmentMetrics;
+  actions: ActionMetrics;
 }
 
 // --- settings ---
@@ -483,16 +589,138 @@ export interface LiveAvailability {
   is_operator: boolean;
 }
 
+// --- V2-G: Gmail OAuth (connection only, no sending) ---
+
+export interface GmailAvailability {
+  configured: boolean;
+  connected: boolean;
+  // Only ever populated for an operator (see `routers/settings.py`) — a
+  // non-operator always sees `false`/empty/`null` here, never a partial
+  // reveal of the connected account's identity.
+  google_account_email: string | null;
+  scopes: string[];
+  connected_at: string | null;
+}
+
 export interface ProviderSettingsResponse {
   mode: Mode;
   llm: ProviderInfo;
   search: ProviderInfo;
   live: LiveAvailability;
+  gmail: GmailAvailability;
   max_concurrent_prospects: number;
+}
+
+export interface GmailConnectionResponse {
+  connected: boolean;
+  google_account_email: string | null;
+  scopes: string[];
+  connected_at: string | null;
+  connected_by_actor: string | null;
+  last_refreshed_at: string | null;
+}
+
+export interface GmailConnectResponse {
+  authorization_url: string;
 }
 
 // --- operator session (Checkpoint I1 Phase 8) ---
 
 export interface OperatorLoginRequest {
   passphrase: string;
+}
+
+// --- V2-H: action proposal + human approval (Demo executor only) ---
+
+export type ActionType = "EMAIL_SEND" | "LINKEDIN_COPY_AND_OPEN";
+export type ActionExecutionOrigin = "DEMO_SIMULATED" | "LIVE_EXTERNAL";
+export type ActionPolicyVerdict = "ELIGIBLE" | "BLOCKED";
+
+export interface ActionApprovalInfo {
+  state: string;
+  actor: string | null;
+  reason: string | null;
+  decided_at: string | null;
+}
+
+export interface ActionExecutionInfo {
+  id: string;
+  status: string;
+  origin: ActionExecutionOrigin;
+  provider: string | null;
+  dispatched: boolean;
+  outcome_class: string | null;
+  provider_message_id: string | null;
+  claimed_at: string | null;
+  dispatched_at: string | null;
+  settled_at: string | null;
+  // V2-I-b — additive audit/reconciliation fields.
+  reconcile_attempts: number;
+  messages_scanned: number;
+  reconciled_at: string | null;
+  last_error_type: string | null;
+  last_error_message: string | null;
+}
+
+export interface ActionProposal {
+  id: string;
+  prospect_id: string;
+  run_id: string;
+  draft_id: string;
+  action_type: ActionType;
+  channel: string;
+  sender_identifier: string | null;
+  recipient_identifier: string | null;
+  content_hash: string;
+  hash_version: string;
+  policy_version: string;
+  policy_verdict: ActionPolicyVerdict;
+  blocked_reasons: string[];
+  origin: ActionExecutionOrigin;
+  created_at: string;
+  superseded_by: string | null;
+  created: boolean;
+  approval: ActionApprovalInfo | null;
+  execution: ActionExecutionInfo | null;
+}
+
+// --- V2-I-b: Live Gmail execution + reconciliation + audit ---
+
+export interface ActionReconcileResult {
+  execution: ActionExecutionInfo;
+  reconcile_status: string;
+  attempts_remaining: number;
+  next_terminalization_at: string | null;
+}
+
+export interface ActionRecoverResult {
+  execution: ActionExecutionInfo;
+  recovered: boolean;
+  reason: string | null;
+}
+
+export interface ActionEvent {
+  id: string;
+  type: string;
+  actor: string;
+  payload: Record<string, unknown>;
+  ts: string;
+}
+
+export interface ActionSendCall {
+  id: string;
+  operation: string;
+  provider: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  latency_ms: number;
+  http_status: number | null;
+  error_type: string | null;
+}
+
+export interface ActionAudit {
+  proposal: ActionProposal;
+  events: ActionEvent[];
+  send_calls: ActionSendCall[];
 }

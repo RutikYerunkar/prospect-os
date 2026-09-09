@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import re
 
+from groundwork.domain.contact_identity import (
+    InvalidEmailIdentity,
+    linkedin_identifier_key,
+    normalize_email_identity,
+)
 from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_evidence
-from groundwork.models.enums import ContactVerification, ReviewVerdict
-from groundwork.models.schemas import Contact, Evidence, ICPScore, OutreachDraft, ReviewCheck, ReviewResult
+from groundwork.models.enums import Channel, LinkedInIdentityState, ReviewVerdict
+from groundwork.models.schemas import ContactChannelState, Evidence, ICPScore, OutreachDraft, ReviewCheck, ReviewResult
 
 #: Production bug (post-Checkpoint-real-Live-Mode-run): the prior pattern set only
 #: matched the single literal string `[company]`, so any other bracket placeholder —
@@ -53,14 +58,77 @@ def _claim_grounding(
     return ReviewCheck(id="claim_grounding", passed=passed, severity="hard", detail=detail, evidence_refs=refs)
 
 
-def _no_fabricated_contact(contact: Contact | None) -> ReviewCheck:
-    has_contact_detail = bool(contact and (contact.email or contact.linkedin_url))
-    verified = bool(contact and contact.verification == ContactVerification.VERIFIED)
-    passed = not (has_contact_detail and not verified)
+#: v2 §V2-F — tokens shaped like the two identifier classes a draft could
+#: leak. Deliberately permissive shapes (over-matching is safe: every match
+#: is then normalized/validated through the same `domain/contact_identity.py`
+#: helpers the identifiers themselves were validated with, so a shape-only
+#: false positive on a non-identifier string cannot occur here).
+_EMAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_LINKEDIN_TOKEN_RE = re.compile(r"https?://(?:[a-z0-9\-]+\.)*linkedin\.com/in/[A-Za-z0-9\-_%]{1,120}/?", re.IGNORECASE)
+
+
+def _no_fabricated_contact(contact_channels: list[ContactChannelState], drafts: list[OutreachDraft]) -> ReviewCheck:
+    """v2 §V2-F rewrite (Part 6). Replaces the v1 `contact.verification`-based
+    check — that enum is the person-identity axis and says nothing about
+    reachability (§3.1) — with three provenance-based clauses, none of which
+    ever reads `contact.verification`:
+
+    1. every identifier on `contact_channels` must resolve to a real provider
+       observation (`derived_from_enrichment_id is not None`);
+    2. a LinkedIn identifier with `identity_match_state == MISMATCH` hard-fails
+       even though it may have produced a draft (personalize's eligibility
+       gate is RESOLVED-only — MISMATCH is a policy question, not a drafting
+       one, and is caught here instead);
+    3. no email- or `linkedin.com/in/`-shaped token may appear in any draft
+       unless it normalizes/canonicalizes to one of this prospect's own
+       provider-observed identifiers — the deterministic backstop for D3.
+    """
+    bad: list[str] = []
+
+    for ch in contact_channels:
+        if ch.identifier is not None and ch.derived_from_enrichment_id is None:
+            bad.append(f"{ch.channel.value} identifier present with no provider observation behind it")
+
+    for ch in contact_channels:
+        if ch.channel is Channel.LINKEDIN and ch.identity_match_state == LinkedInIdentityState.MISMATCH.value:
+            bad.append("linkedin identity_match_state is MISMATCH")
+
+    own_emails: set[str] = set()
+    own_linkedin_keys: set[str] = set()
+    for ch in contact_channels:
+        if ch.identifier is None:
+            continue
+        if ch.channel is Channel.EMAIL:
+            try:
+                own_emails.add(normalize_email_identity(ch.identifier))
+            except InvalidEmailIdentity:
+                continue
+        elif ch.channel is Channel.LINKEDIN:
+            key = linkedin_identifier_key(ch.identifier)
+            if key is not None:
+                own_linkedin_keys.add(key)
+
+    for draft in drafts:
+        text = f"{draft.subject or ''}\n{draft.body}"
+        for token in _EMAIL_TOKEN_RE.findall(text):
+            try:
+                normalized = normalize_email_identity(token)
+            except InvalidEmailIdentity:
+                bad.append(f"malformed email-shaped token in draft: {token}")
+                continue
+            if normalized not in own_emails:
+                bad.append(f"unbacked email identifier in draft: {token}")
+        for token in _LINKEDIN_TOKEN_RE.findall(text):
+            key = linkedin_identifier_key(token)
+            if key is None or key not in own_linkedin_keys:
+                bad.append(f"unbacked linkedin identifier in draft: {token}")
+
+    passed = not bad
     detail = (
-        "no contact detail present without verification"
+        "every identifier in contact_channels and every draft is backed by this "
+        "prospect's own provider-observed identifiers"
         if passed
-        else "an email or LinkedIn URL is present but the contact is not VERIFIED"
+        else f"{len(bad)} fabricated/unbacked/mismatched identifier issue(s): {bad[:3]}"
     )
     return ReviewCheck(id="no_fabricated_contact", passed=passed, severity="hard", detail=detail)
 
@@ -87,7 +155,12 @@ def _identifier_pattern(identifier: str) -> re.Pattern[str]:
 def _cross_prospect_leak(drafts: list[OutreachDraft], other_identifiers: set[str]) -> ReviewCheck:
     leaked: list[str] = []
     for draft in drafts:
-        text = f"{draft.subject}\n{draft.body}"
+        # v2 §V2-F bug fix: a LinkedIn draft's `subject` is `None` — an
+        # f-string interpolates that as the literal text "None", which would
+        # then be scanned (and could coincidentally match an identifier).
+        # `draft.subject or ""` keeps a null subject contributing nothing to
+        # the scanned text, exactly like an empty one always has.
+        text = f"{draft.subject or ''}\n{draft.body}"
         for identifier in other_identifiers:
             if identifier and _identifier_pattern(identifier).search(text):
                 leaked.append(identifier)
@@ -99,12 +172,19 @@ def _cross_prospect_leak(drafts: list[OutreachDraft], other_identifiers: set[str
 
 
 def _no_placeholders(drafts: list[OutreachDraft]) -> ReviewCheck:
+    """v2 §V2-F: the empty-subject clause applies only to channels carrying a
+    subject (EMAIL) — a LinkedIn draft's `subject is None` is its normal,
+    complete shape, not a placeholder-style omission. Body-empty stays
+    universal. The bracket/angle-bracket placeholder patterns are unchanged."""
     hits: list[str] = []
     for draft in drafts:
-        if not draft.subject.strip() or not draft.body.strip():
-            hits.append("empty subject/body")
+        if not draft.body.strip():
+            hits.append("empty body")
             continue
-        text = f"{draft.subject}\n{draft.body}".lower()
+        if draft.channel is Channel.EMAIL and not (draft.subject or "").strip():
+            hits.append("empty subject")
+            continue
+        text = f"{draft.subject or ''}\n{draft.body}".lower()
         for pattern in _PLACEHOLDER_PATTERNS:
             match = re.search(pattern, text)
             if match:
@@ -142,7 +222,7 @@ def run_checks(
     prospect_id: str,
     evidence: list[Evidence],
     drafts: list[OutreachDraft],
-    contact: Contact | None,
+    contact_channels: list[ContactChannelState],
     score: ICPScore,
     dedupe_key: str,
     other_dedupe_keys: set[str],
@@ -154,7 +234,7 @@ def run_checks(
 
     checks = [
         _claim_grounding(prospect_id, drafts, evidence_by_id, grounding_threshold),
-        _no_fabricated_contact(contact),
+        _no_fabricated_contact(contact_channels, drafts),
         _cross_prospect_leak(drafts, other_company_identifiers),
         _no_placeholders(drafts),
         _duplicate_account(dedupe_key, other_dedupe_keys),

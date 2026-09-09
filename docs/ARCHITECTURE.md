@@ -376,3 +376,373 @@ See `docs/IMPLEMENTATION_PLAN.md` §22 for the full folder structure. The load-b
 `domain/` (scoring, dedupe, grounding, review) is pure — no I/O, no imports from `providers/` or
 `repositories/`. That's what keeps the four modules that must be *right* unit-testable in
 milliseconds, and it's the answer to "can I use your scorer in a batch pipeline?": `import`.
+
+---
+
+## v2 architectural extension — Contact Enrichment & Governed Outbound Action
+
+**Status: approved architecture (rev 4 — frozen), persisted at Checkpoint V2-A. No application code
+changes with it.** Full rationale, every design decision (D1–D14), the domain model, the checkpoint
+plan (V2-A–V2-J), and the preserved-invariants checklist live in
+`docs/V2_IMPLEMENTATION_PLAN.md`. This section is the five-minute map of what v2 adds on top of
+everything above — it does not restate or revise the v1 architecture described in the rest of this
+file.
+
+v2 extends the v1 pipeline (`research → qualify → identify contact → draft → review → human approval →
+stop`) one stage further, without changing anything about how the v1 stages work:
+
+```
+research → qualify → identify contact → contact enrichment → channel-specific outreach
+    → deterministic policy → hash-bound human approval → governed action
+```
+
+`contact enrichment` is a new, `optional=True` pipeline step (`engine/steps/contact_enrichment.py` —
+deliberately never named `enrich`, which already means the v1 field-precedence merge in
+`engine/steps/enrich.py`). It calls an `EnrichmentProvider` (Apollo live, a fixture-driven provider in
+Demo) and derives five independent, provider-observed state axes — person identity (v1's unchanged
+`ContactVerification`), email discovery, email verification, LinkedIn resolution, and LinkedIn identity
+match — never one collapsed flag. `channel-specific outreach` replaces v1's single email draft with one
+draft per eligible channel (email, LinkedIn). `deterministic policy` is a new pure module,
+`domain/action_policy.py`, that evaluates whether a drafted action is even eligible to be proposed for
+approval — same "deterministic code decides, LLM never does" discipline as ICP scoring and the review
+verdict. `hash-bound human approval` extends v1's existing `approvals` audit table (additively — every
+v1 row stays valid) so an approval authorizes one exact outbound action (channel + sender + recipient +
+subject + body, bound by a versioned content hash), not a prospect. `governed action` is the new
+execution layer: a claim → dispatch → classify → (optionally) reconcile state machine, writing to new,
+additive tables (`action_proposals`, `action_executions`, `action_events`, …) that sit beside — never
+inside — the v1 schema.
+
+### The extension in one paragraph
+
+Every identifier that can reach a human — an email address, a LinkedIn URL — now goes through the exact
+discipline v1 already applies to evidence: **providers return observations, never verdicts; `domain/`
+derives states from those observations, pure and offline; and an LLM can never author an identifier**,
+mirroring `Evidence._no_fake_sources`'s origin-typed structural validation for a second and third
+identifier class. Nothing in `engine/`, `domain/`, or `api/` gets an "if this is a real send" branch —
+Demo and Live share the exact same action state machine, `action_policy` evaluation, and approval/hash
+mechanics; only the bound `EnrichmentProvider` / `EmailSendProvider` implementation differs, the same
+Protocol-swap discipline that already separates Demo Mode from Live Mode everywhere else in this
+codebase.
+
+### What must never be confused with a verdict, a credential, or proof of delivery
+
+- **Provider observations are not verdicts.** Apollo's `provider_status`/`provider_confidence`, and a
+  LinkedIn provider's asserted name/company/domain, are raw claims persisted as `contact_enrichments`
+  rows. `domain/contact_identity.py` — pure, no provider imports — is what turns an observation into a
+  `EmailVerificationState` or a `LinkedInIdentityState`. `domain/` never contains the string `"apollo"`.
+- **LLMs cannot create email or LinkedIn identifiers**, and never perform identity matching. Identifiers
+  reach the system only from a provider row; identity matching is deterministic, versioned, string-based
+  matching in `domain/contact_identity.py` (no fuzzy matching, no edit distance) — the same standing an
+  LLM has in the review verdict: none.
+- **LinkedIn has no SEND executor.** `ActionType` has exactly two members — `EMAIL_SEND` and
+  `LINKEDIN_COPY_AND_OPEN` — and there is no `LINKEDIN_SEND`. Nothing can invoke what does not exist;
+  this is enforced by the type, not a policy check.
+- **Demo simulated execution is zero-egress.** `DemoEmailSendProvider` opens no socket, performs no DNS
+  lookup, and writes an `action_executions` row carrying a validator-enforced `demo://` message id and
+  the IANA-reserved, unresolvable `@groundwork.invalid` sender. This is what lets Demo Mode stay fully
+  public — the same "Demo Mode must never gain an operator-session dependency" invariant Checkpoint I1
+  established for the rest of the product — while the action architecture is still genuinely walkable
+  end to end.
+- **Live external action remains operator-only.** `ActionExecutionOrigin.LIVE_EXTERNAL` names execution
+  on the live external-action path — a run capable of a real external side effect. **It is not itself
+  proof that a message was delivered or even left the system**; that is represented separately by the
+  execution's status/outcome (`SUCCEEDED` / `FAILED` / `UNCERTAIN` / `ABANDONED`, driven by the send
+  failure taxonomy and bounded Gmail reconciliation in `docs/V2_IMPLEMENTATION_PLAN.md` §3.3–§3.4). A
+  Live execution requires an operator session, a matching approval, a freshly re-verified sender
+  identity, a matching content hash, and a fresh policy pass — five gates, all server-side, none of them
+  the UI.
+- **Request idempotency and recipient-level send safety are separate mechanisms**, enforced separately
+  and tested separately. Request idempotency (a `sha256(approval_id | content_hash)` key with a
+  non-partial `UNIQUE` constraint) stops the *same approved execution* from running twice, and binds in
+  both Demo and Live. Recipient-level send safety (a partial unique index on the normalized recipient
+  address) stops *two different approvals* from sending two initial emails to the same human, and binds
+  **only** `LIVE_EXTERNAL` — a `DEMO_SIMULATED` row is not a message to a human, so it can neither
+  consume nor be blocked by this rule. Conflating these two questions was a real mistake caught and
+  corrected during this architecture's own review process (see `docs/V2_IMPLEMENTATION_PLAN.md` §3.5).
+
+Everything else about how v2 is built — the checkpoint-by-checkpoint plan, the exact schema, the content
+hash algorithm, the Gmail OAuth/reconciliation design, and the full preserved-invariants checklist —
+lives in `docs/V2_IMPLEMENTATION_PLAN.md`, not here.
+
+### V2-H — implemented; two deliberate divergences from the frozen Part 4/9 wording
+
+V2-H (`action_proposals`, extended `approvals`, `action_events`, the propose/approve/reject/execute
+endpoints, `DemoEmailSendProvider`, the Outreach tab) is complete. Two implementation choices depart from
+the frozen plan's literal wording — both recorded here and in `docs/PROGRESS.md`'s "What V2-H added":
+
+- **`ProviderBundle` gains no `send` field (D2).** The frozen Part 9 sketch implies a send provider might
+  hang off the same bundle as `llm`/`search`/`enrichment`. It does not: Gmail is deployment-scoped, not
+  run-scoped (one `gmail_connections` singleton row, independent of any run), so wiring a send provider
+  into a per-run `ProviderBundle` would be the wrong ownership shape. Instead, `providers/send_registry.
+  py::resolve_send_provider(mode)` is a separate, mode-keyed resolver called only at the two moments the
+  design actually needs a send identity/provider — proposal creation (sender capture) and execute-time
+  dispatch — never threaded through pipeline provider wiring. `LINKEDIN_COPY_AND_OPEN` never calls it at
+  all (D6 — no sender, no executor).
+- **Live `EMAIL_SEND` is refused structurally, not by policy clause 13 (D1/D4).** `resolve_send_provider
+  (Mode.LIVE)` unconditionally raises `LiveExternalEmailSendDisabled` — a dedicated exception, never
+  `ProviderNotConfigured`, and never conditioned on whether any provider is registered. This is
+  deliberate: the real reason Live sending must stay unreachable in V2-H is not "no credentials are
+  configured" (that's what `ProviderNotConfigured` would imply, and a future `GOOGLE_CLIENT_ID`/
+  `GmailSendProvider` would silently lift it) — it's that Hunter's `451`/`claimed_email` response does
+  not yet retroactively suppress a prior successful email observation in `contact_channels` (carried
+  forward from V2-DH, restated at every checkpoint since). Until that suppression semantics is designed
+  and implemented, sending to a possibly-stale "verified" address is unsafe regardless of credentials.
+  V2-I must remove this refusal deliberately, only after closing that gap — never as a side effect of
+  wiring up `GmailSendProvider`. `domain/action_policy.py`'s clause 13 (`send_provider_unavailable`) is
+  therefore left `send_provider_configured=True` for `EMAIL_SEND` in both modes in V2-H — the policy
+  evaluates a normal ELIGIBLE verdict, and the *execute*-time dispatch step is what structurally refuses
+  Live, proving the refusal is reached deliberately rather than merely inferred from an earlier policy
+  block.
+
+Two smaller, non-divergent implementation notes, also worth stating plainly:
+
+- **Gmail is consulted only for `EMAIL_SEND` + `LIVE_EXTERNAL`.** A Demo proposal/execution never calls
+  `GmailConnectionRepository`, and `LINKEDIN_COPY_AND_OPEN` never calls it or the send-provider resolver,
+  in either mode — asserted by regression tests that patch both to raise unconditionally.
+  `ApprovalRepository.latest_for_prospect`/`latest_for_prospects` were fixed to filter to `scope=
+  "PROSPECT"` *before* any `ACTION`-scope row was ever written, closing a scope-leak that would otherwise
+  have let a governed-action approval bleed into the v1 prospect-approval aggregate/UI.
+- **The recipient identifier is not re-resolved at execute time.** Only the sender is re-verified fresh
+  (the Sender Resolution Matrix); the immutable proposal's own `recipient_identifier`/
+  `recipient_identity_key` — captured once, at proposal creation, from `contact_channels` — is what
+  content-hash recomputation and the recipient-level send-safety check both use. A draft body/subject
+  edit is caught by `CONTENT_CHANGED`; a genuinely different resolved recipient (e.g. a re-enrichment
+  between propose and execute) is out of scope for V2-H and would require a fresh proposal in practice,
+  since nothing in this checkpoint re-runs enrichment mid-review.
+
+### V2-I-a — the legal/privacy send-suppression prerequisite, closed
+
+V2-H's D1 refusal named an unresolved gap: Hunter's `451`/`claimed_email` response did not retroactively
+suppress a prior successful email observation already sitting in `contact_channels`. V2-I-a closes exactly
+that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no send allowance.
+
+- **A new provider-signal type, not a repurposed one.** `451` used to fall into the same
+  `EnrichmentInvalidResponse`/`INVALID_RESPONSE` bucket as `404`/`422`. It is now `EnrichmentLegalRestriction`
+  / `EnrichmentAttemptStatus.LEGAL_RESTRICTION` — a distinct, permanent, never-retried signal, caught by
+  `engine/enrichment.py::call_enrichment` in its own `except` clause ordered before the generic one, and
+  routed to a dedicated repository method rather than the generic last-known-good failure path.
+- **Two suppression surfaces, one normalization.** LOCAL suppression lives on the `contact_channels` row
+  itself (four new columns) — it answers "is THIS prospect's email channel suppressed?" GLOBAL suppression
+  lives in a new `email_suppressions` table keyed by `domain/contact_identity.py::normalize_email_identity`
+  — the SAME function the recipient-level duplicate-send rule (§3.5B) already uses, deliberately never a
+  second normalization — and answers "has ANY prospect/run, ever, observed this exact real-world mailbox as
+  legally/privacy-restricted?" `domain/action_policy.py`'s new clause 15 checks both: local first, then
+  global. This two-surface design is what makes suppression survive across prospects and runs even though
+  `contact_channels` is scoped to one prospect.
+- **Preservation, not derivation, for the EMAIL channel.** Every other failure path in
+  `ContactEnrichmentRepository` (`_apply_failure_to_channel`) derives a NEW discovery state when no
+  provider-backed state exists yet (e.g. `PROVIDER_ERROR`). A legal restriction never does this for EMAIL —
+  it preserves whatever was there (a real identifier, or nothing) byte-for-byte, because "do not send to
+  this identity" and "we don't know anything about this identity" are different facts, and conflating them
+  would either fabricate a state that was never observed or discard a real one that was.
+- **Clause 15 is not origin-gated.** Unlike clause 12 (the recipient-level duplicate-send rule,
+  `LIVE_EXTERNAL`-only by design, since a public Demo visitor must never be blocked by or block a real
+  Live send), clause 15 fires identically for `DEMO_SIMULATED` and `LIVE_EXTERNAL` — a legal/privacy
+  restriction is a fact about the real-world recipient, not about which execution path is sending, so a
+  Demo walkthrough must exercise the real, unrelaxed policy.
+- **The structural refusal's message changed; the refusal itself did not.** `LiveExternalEmailSendDisabled`
+  no longer says the suppression prerequisite is unresolved — it is not, as of this checkpoint. It still
+  raises unconditionally for `Mode.LIVE`, for a narrower and now-accurate reason: no `GmailSendProvider`
+  exists yet. Closing V2-I-a does not by itself make Live sending reachable — that remains V2-I-b's
+  deliberate, separate decision.
+- **No LLM anywhere in this path, and no override anywhere.** Classification is HTTP-status-driven only
+  (`errors[0].id` is captured for audit/provenance and never read to decide anything); suppression, once
+  set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
+  checkpoint — there is deliberately no clear/override endpoint.
+
+### V2-I-b — real Live Gmail execution, reconciliation, audit; refusal removed, one real smoke performed, reconciliation corrected post-smoke
+
+A real `GmailSendProvider` and the full dispatch/reconciliation/allowance/audit path now exist, fully
+implemented and independently tested, AND wired into the real dispatch path —
+`LiveExternalEmailSendDisabled` is no longer on it. **Gate-order correction, recorded explicitly:** an
+earlier state of this checkpoint removed the refusal on the reasoning that a documented Postgres-
+verification gap (no Docker/Postgres reachable in the implementation environment) was an acceptable
+substitute for a passed Postgres check. It was not, and the user reverted it, requiring instead a
+CI-verification-only PR (#23) before any second attempt. That PR's CI came back green on all four required
+checks (`backend-sqlite`, `backend-postgres` + migration drift, `frontend`, `api-docker-build`), and the
+user then gave explicit, separate authorization to remove the refusal a second time — which is the current,
+final state. See `docs/PROGRESS.md`'s "What V2-I-b added" for the full three-state account.
+
+- **A different seam than `resolve_send_provider` — now the one actually wired to fire.**
+  `resolve_send_provider(mode)` is a synchronous, mode-keyed function — correct for `Mode.DEMO` (a
+  stateless, zero-egress provider, constructable with no arguments), but structurally unable to construct a
+  real Live provider, which needs async DB access (the connected account + its decrypted refresh token via
+  `GmailConnectionRepository`/`token_crypto`). The real construction path is a purpose-built async pair —
+  `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the token,
+  constructs `GmailSendProvider`; `None` on no-usable-credential — never a fixture fallback) then
+  `api/live_send_orchestration.py::dispatch_live_email_send` (the dispatch ordering itself). `execute_
+  action`'s `LIVE_EXTERNAL` branch now calls this async pair directly; `resolve_send_provider(Mode.LIVE)`
+  is never called on this path anymore — it remains defined, unchanged, and still unconditionally raises
+  `LiveExternalEmailSendDisabled` if anything calls it with `Mode.LIVE`, kept as a defensive-only guard
+  against a future accidental miswire, not as the thing doing the gating. Proposal-creation sender capture
+  still goes through `_resolve_email_sender` (which reads `GmailConnectionRepository` directly, not
+  `resolve_send_provider`, for `LIVE_EXTERNAL` — unchanged since V2-H).
+- **What actually gates real dispatch now that the refusal doesn't.** In `execute_action`'s documented,
+  load-bearing enforcement order: capability gate -> approval exists -> `hash_version` equality -> fresh
+  sender re-resolution -> fresh content-hash recomputation -> hash comparison -> a FRESH
+  `domain/action_policy.py::evaluate()` (all 15 clauses, including `recipient_suppressed` — local AND
+  global — and `send_allowance_exhausted`) -> request idempotency -> `build_gmail_send_provider` returning
+  a working provider (never `None` — a missing/undecryptable credential still degrades honestly to `409
+  GMAIL_NOT_CONNECTED` with no execution row ever created) -> `dispatch_live_email_send`'s own ordering
+  (CLAIMED -> allowance reservation -> guarded IN_FLIGHT -> the one Gmail HTTP call). Every one of these is
+  unchanged from V2-H/V2-I-a/V2-I-b's earlier phases; only the refusal step was removed, and only from this
+  one call site.
+- **Dispatch ordering is the crash-recovery guarantee, not a convenience.** `CLAIMED` (write-ahead,
+  carrying the generated Message-ID) commits BEFORE the pre-dispatch Gmail mailbox history checkpoint
+  (`get_history_checkpoint()`/`users.getProfile`) is acquired and persisted, which commits BEFORE the
+  allowance reservation, which commits BEFORE the guarded `IN_FLIGHT` transition, which commits BEFORE the
+  one Gmail HTTP call. The checkpoint sits between `CLAIMED` and the allowance deliberately: it needs a real
+  execution id to persist against (so it can't come before `CLAIMED`), and a transient checkpoint-acquisition
+  failure must never burn one of the day's limited Live sends (so it must come before the allowance is
+  touched) — it settles `FAILED`/`PROVEN_NOT_DISPATCHED` immediately on failure, exactly like an allowance
+  denial does, reaching Gmail no further. A process crash at any point before `IN_FLIGHT` leaves a row the
+  stale-claim sweep (`POST .../recover`) can safely resolve without ever having dispatched; a crash after
+  `IN_FLIGHT` but before settling leaves a row that reconciliation (`POST .../reconcile`) or, eventually,
+  `recover` can resolve to `UNCERTAIN` — never re-dispatched, never guessed.
+- **The allowance is a belt-and-braces pair, exactly like §3.5B's own precedent.** `domain/action_policy.
+  py` clause 14 is a pre-check (denies with a clear `send_allowance_exhausted` reason before any write);
+  `LiveSendAllowanceRepository.try_reserve()`'s guarded transaction is the actual guarantee (a narrow race
+  between the pre-check and the reservation is resolved by the transaction, never by the pre-check).
+  Reservations are never released — the same permanent-consumption posture §3.5B's partial unique index
+  already established for the recipient-level rule.
+- **A real ordering bug, found and fixed by the first end-to-end test that could exercise it.** Policy
+  clause 12 (`recipient_conflict`) is recipient-scoped, not proposal-scoped, by design (§3.5B) — but that
+  meant an idempotent retry of an ALREADY-SUCCEEDED proposal also tripped it, before the request-
+  idempotency check (§3.5A) ever got a chance to return the existing execution. This was structurally
+  invisible before V2-I-b, because Live could never previously reach `SUCCEEDED`/`UNCERTAIN` to retry
+  against. Fixed by `exclude_proposal_id` on `recipient_conflict()` — see `docs/PROGRESS.md`'s "What
+  V2-I-b added" for the full account.
+- **Reconciliation never expands the OAuth scope, and — since the post-smoke correction — no longer
+  depends on Gmail preserving our generated Message-ID.** The one authorized real Gmail smoke succeeded,
+  and a read-only follow-up diagnostic fetching that exact sent message by its `provider_message_id` found
+  `Message-ID` and `X-Google-Original-Message-ID` BOTH absent from Gmail's `format=metadata` response —
+  Subject/To/From/Date were present and matched. The original design's core assumption (Gmail preserves a
+  caller-supplied Message-ID) was disproven on the one real message this session is authorized to have
+  sent. Reconciliation was rebuilt on `users.history.list(startHistoryId=<pre-dispatch checkpoint>,
+  labelId="SENT", historyTypes=["messageAdded"])` + `messages.get(format="metadata",
+  metadataHeaders=[Subject,To,From,Date])` — still `gmail.metadata`-scoped only, still never `q`, still
+  never body/`full`/`raw`, never `gmail.readonly`. A new pure module, `domain/reconciliation_match.py`,
+  decides matches: canonicalized Subject equality (RFC-2047-aware, not naive raw-string comparison),
+  normalized To/From identity match, and Date within the dispatch/settle window (the same clock-skew
+  tolerance as before). ALL bounded candidates are evaluated before deciding — a first-match short-circuit
+  would be unable to distinguish `FOUND` (exactly one match) from the new `AMBIGUOUS` status (more than
+  one) — and a `404` from `history.list` (Gmail's "checkpoint too old" signal) is a new, distinct
+  `HISTORY_EXPIRED` status. Both new statuses, like `NOT_FOUND_WITHIN_BOUNDS`/`LOOKUP_FAILED` before them,
+  stay `UNCERTAIN` — never `FAILED`, never a guess. `message_id_header` is still generated and persisted
+  for historical/audit compatibility; nothing in the reconciliation path reads it any more. See
+  `docs/PROGRESS.md`'s "V2-I-b reconciliation correction" for the full account.
+- **`ABANDONED` is honest, not a euphemism for "probably not sent."** The audit copy states plainly that
+  reaching `ABANDONED` is not evidence the message wasn't sent — Groundwork simply stopped checking. The
+  recipient identity stays blocked permanently; there is no resend anywhere in this codebase.
+
+### V2-I-c — LinkedIn action-path closure
+
+COPY_AND_OPEN only, unchanged from every earlier checkpoint's own statement of this invariant: there is no
+`LINKEDIN_SEND` action anywhere in `models/enums.py::ActionType` (exactly two members,
+`EMAIL_SEND`/`LINKEDIN_COPY_AND_OPEN`), no scraping, no automation, no auto-DM, no LinkedIn OAuth or
+credentials, no unofficial API. V2-I-c closes the one remaining LinkedIn-specific gap the frozen plan's
+Part 13 closure step calls for — a UI inconsistency, not a backend gap — and adds the dedicated
+action-path test coverage that had not yet been written as its own file (LinkedIn's invariants had been
+proven incidentally, one test at a time, across `test_action_policy.py`, `test_action_policy_integration.py`,
+`test_suppression_policy.py`, and `test_audit_trail.py`, but never as one deliberate suite).
+
+**The gap.** `ContactPanel` (V2-E) already renders a real, safety-checked `<a>` for a `LIVE_PROVIDER`
+LinkedIn identifier that is `RESOLVED` and passes `lib/linkedinSafety.ts::isSafeLinkedInHref`. Until
+V2-I-c, `ActionApprovalPanel`'s own "Open profile" control for a SUCCEEDED LinkedIn execution never
+consulted that same check at all — it always toggled the inline simulated-profile panel, even for a
+prospect whose LinkedIn channel was exactly the kind of real, verified identifier `ContactPanel` would
+already have linked. Two independent surfaces disagreeing about whether the SAME identifier is safe to
+link is itself a defense-in-depth failure mode (V2-E's whole design rests on there being exactly one
+answer to "is this identifier safe," computed the same way everywhere it's asked).
+
+**The fix, and why it doesn't add a second safety path.** `ActionApprovalPanel` now finds the prospect's
+own `linkedin` row in `contact_channels` and calls `isSafeLinkedInHref` — the identical function
+`ContactPanel` calls, imported from the identical module, with the identical four inputs
+(`channel`/`origin`/`discoveryState`/`identifier`). There is still exactly one LinkedIn link-safety
+decision in this codebase; `ActionApprovalPanel` now asks it too, rather than never asking. When it
+returns `true`: a real `<a target="_blank" rel="noreferrer noopener">`. When `false`: the original
+toggle-reveals-inline-panel UX is unchanged, but the panel's copy is now `origin`-aware — `DEMO_FIXTURE`
+keeps its original wording byte-for-byte; `LIVE_PROVIDER` (a channel that is real but didn't pass the
+check — not yet `RESOLVED`, or a malformed/non-LinkedIn URL) gets distinct, provenance-honest copy that
+never claims "demo fixture" or "no network request was made" about a real provider observation — the same
+discipline V2-I-a's `recipient_suppressed` copy already established for this exact component (provider-
+neutral, never asserting something false about *how* the state came to be).
+
+**Backend: tests only, zero production-code change.** The eight dedicated tests this checkpoint adds
+(`tests/test_linkedin_action_path.py`) prove, through the real API, invariants that were already true as
+of V2-H/V2-I-a but had never been asserted together in one place: `LINKEDIN_COPY_AND_OPEN` executes with
+`provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None` and zero
+`action_send_calls`; neither send-provider resolver (`resolve_send_provider` for Demo,
+`build_gmail_send_provider` for Live) is ever called (D6/D2, proven structurally by patching both to
+raise); a LinkedIn execute in Live mode consumes no live recipient identity — `domain/action_policy.py`'s
+clause 12 (`recipient_conflict`) and clause 15 (`recipient_suppressed`) are structurally scoped to
+`action_type is ActionType.EMAIL_SEND` (see `evaluate()`'s own `if`/`else` split), so a LinkedIn proposal
+for a prospect whose email is independently suppressed or already-sent-to is provably unaffected; and a
+weak/mismatch/unknown LinkedIn identity match state is `BLOCKED` with no approve-time override, exactly
+like every other blocked verdict in this system (D7). All eight passed against the UNCHANGED backend on
+first run — per this checkpoint's own task brief ("if these tests expose a genuine backend defect, STOP
+and report it before changing groundwork backend source"), that meant nothing needed changing, not that
+the tests were skipped or weakened to pass.
+
+See `docs/PROGRESS.md`'s "What V2-I-c added" for the full file list, the exact test matrix, the manual
+Demo-mode UI verification (headless-Chromium, DOM-inspected, zero navigation), and one pre-existing,
+out-of-scope observation (`ActionAuditPanel.tsx`'s channel-agnostic "Gmail accepted this message" copy
+also rendering under a LinkedIn execution) noted but deliberately not fixed here.
+
+### V2-J — quality, metrics, production readiness, v2 release preparation
+
+Extends `/evaluation` with two more computed-on-read blocks — `enrichment` and `actions` — alongside the
+pre-existing `volume`/`quality`/`reliability`/`guardrails`/`llm_usage`/`search_quality`. Same discipline
+throughout: no `evaluation_metrics` table, no new model column, no migration; every field is a real
+aggregate over `enrichment_calls`/`contact_channels`/`contact_enrichments`/`action_proposals`/
+`action_executions`/`action_events`/`approvals` rows for one run, and a metric that has no denominator is
+`null`, never a fabricated `0`.
+
+**Wiring, not a new engine capability.** `evaluation/metrics.py::compute_run_evaluation` now takes
+`ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at
+`api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` dataclass
+(`engine/runner.py`). That preserves the standing architectural boundary that the pipeline engine can
+never write (or even read) governed-action state; evaluation is a read-only API surface, not the engine,
+so it may depend on repositories the engine itself never touches.
+
+**`execution_blocked` instrumentation — observability added, behavior unchanged.** Five pre-policy 409
+paths in `POST /api/actions/proposals/{id}/execute` (`NOT_APPROVED`, `APPROVAL_SUPERSEDED`,
+`SENDER_NOT_CONNECTED`, `SENDER_CHANGED`, `CONTENT_CHANGED`) now each write an `action_events` row of
+type `execution_blocked` immediately before raising — the same event type the pre-existing policy-block
+path already wrote, so the six sources feed one `execution_blocked_reasons` metric with no special-casing.
+Every one of the five `ConflictError` raises — status code, error `code`, message, ordering relative to
+the other gates — is byte-for-byte unchanged; the only new effect is one additional persisted, redacted
+audit row per blocked attempt. This is the same "the seam is a side observation, never a behavior branch"
+discipline the rest of this codebase's telemetry recorders already follow (`engine/llm.py::call_structured`,
+`engine/search.py::call_search`, `engine/enrichment.py::call_enrichment`) — the writes never gate what the
+caller does next.
+
+**Cross-run recipient metric — reuses the real constant, never a second list.** `ActionRepository.
+cross_run_blocking_runs` (the new method backing `actions.cross_run_recipient_blocks`/
+`cross_run_recipient_blocked_proposals`) queries against the SAME `_BLOCKING_LIVE_STATUSES` tuple
+`recipient_conflict()` already uses for the real, enforced §3.5B rule — never a duplicated, driftable
+status list in `evaluation/metrics.py`. `FAILED` is (still, unchanged) the only status that frees a Live
+recipient identity; `DEMO_SIMULATED` never participates in either direction (rev 4); a blocking row that
+belongs to the SAME run as the proposal being evaluated does not count as "cross-run" — it's ordinary
+same-run recipient-conflict protection, a distinct (and much more common) case this metric deliberately
+does not conflate with the cross-visitor/cross-session guarantee it's meant to prove is doing real work.
+
+**Frontend: two new Quality-tab panels, additive types only.** `EnrichmentQualityPanel` and
+`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s existing shape — a metric grid plus a few
+badge-list breakdowns) render the two new blocks; `lib/types.ts` gained `EnrichmentMetrics`/
+`ActionMetrics` and `RunEvaluation` gained the two new fields, no existing field touched. Both panels
+render generically off whatever `Record<string, number>` the backend sends for reason/status/outcome
+maps — an unrecognized future value (a new blocked reason, a new reconciliation outcome) renders
+correctly with no frontend change required, never a hardcoded switch over a closed reason vocabulary. A
+`null` rate always renders as "—", never coerced to "0%" — the same discipline `SearchQualityPanel`
+already established for `source_utilization_rate`/`duplicate_retrieval_rate`, extended here. A run with
+zero governed-action activity gets one explicit sentence ("No governed action has been proposed for this
+run yet"), never a grid of zeroed-out counters that would misread as a failure.
+
+**What V2-J deliberately does NOT do.** No Ruff introduced; no `_client_key` consolidation across routers;
+no implementation of the deferred secure BFF-side rate-limiting redesign (documented as a decision record
+in `docs/DEPLOYMENT.md` instead — the correct fix requires verifying Render's real edge-header behavior
+against a live deployment, which this checkpoint's session does not have access to); no production
+rate-limit saturation experiment performed; no schema migration (none needed); `master` untouched; the
+single `feature/v2-contact-enrichment -> master` integration PR, the Neon `production` migration, and the
+`v2.0.0` tag are explicitly next-session/human-authorized steps, not part of this checkpoint's own commit.

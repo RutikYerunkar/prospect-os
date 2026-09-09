@@ -109,13 +109,15 @@ class ProspectDataRepository:
                     OutreachDraftRow(
                         id=str(uuid.uuid4()),
                         prospect_id=d.prospect_id,
-                        channel=d.channel,
+                        channel=d.channel.value,
                         step_index=d.step_index,
                         subject=d.subject,
                         body=d.body,
                         claim_map=[c.model_dump(mode="json") for c in d.claim_map],
                         version=d.version,
                         status="DRAFT",
+                        content_hash=d.content_hash,
+                        hash_version=d.hash_version,
                     )
                 )
             await session.commit()
