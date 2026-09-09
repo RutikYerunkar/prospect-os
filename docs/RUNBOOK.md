@@ -234,3 +234,37 @@ A blocked `EMAIL_SEND` proposal with `recipient_suppressed` in `blocked_reasons`
   a deliberate, reviewed data migration, never a runtime toggle.
 - It applies to **both** Demo and Live `EMAIL_SEND` — a Demo walkthrough exercises the real policy, not a
   relaxed one. It does **not** apply to `LINKEDIN_COPY_AND_OPEN`, which has no suppression concept.
+
+## V2-J — reading the enrichment/actions Quality-tab panels
+
+`GET /api/runs/{id}/evaluation` gained two new top-level blocks, `enrichment` and `actions`, computed on
+read from `enrichment_calls`/`contact_channels`/`contact_enrichments` and `action_proposals`/
+`action_executions`/`action_events`/`approvals` respectively — no new table, no persisted metric, nothing
+that can silently drift out of sync with the underlying rows. A few things worth knowing when reading
+them operationally:
+
+- **A `null` rate is not zero.** Every `*_rate` field in `enrichment` is `null` when its denominator is
+  zero (e.g. `email_verified_rate` is `null` whenever no email was ever FOUND, not `0.0`). The frontend
+  renders `null` as "—", never "0%" — treat any observed `0%` in the UI as a REAL zero-rate outcome, not
+  an absence of data.
+- **`FAILED` is still the only status that frees a Live recipient identity** — restated here because
+  `actions.executions_by_status`/`cross_run_recipient_blocks` are the two places this now shows up in
+  aggregate: a run whose `executions_by_status` includes several `FAILED` rows for the same recipient and
+  zero blocks is expected and correct, not a bug in the metric.
+- **`uncertain_count` never means "will retry automatically."** An `UNCERTAIN` execution counted here
+  stays exactly as blocking (§3.5B) as any other non-`FAILED` status until an operator reconciles or
+  explicitly abandons it (see the reconciliation sections above) — the metric is observability, not a
+  queue Groundwork will ever drain on its own.
+- **`execution_blocked_attempts` vs `execution_blocked_proposals`.** The former counts every blocked
+  execute *attempt* (a caller retrying the same proposal after fixing nothing counts more than once); the
+  latter counts distinct proposals. A large gap between them on one proposal is a signal worth
+  investigating (a client retry-looping against a permanent block), not itself an error.
+- **`cross_run_recipient_blocks` is a subset, not a duplicate, of the ordinary recipient-conflict count.**
+  It only counts blocks whose conflicting prior send belongs to a DIFFERENT run — the metric that proves
+  the recipient-level rule is doing real cross-visitor/cross-session work, not just protecting a single
+  run's own retries. `DEMO_SIMULATED` never contributes to it in either direction (rev 4 — a public demo
+  visitor must never block, or be blocked by, anyone else).
+- **Proposal-time (`blocked_reasons`) and execution-time (`execution_blocked_reasons`) counters are
+  never merged.** A proposal can be created ELIGIBLE and only later blocked at execute time (e.g. the
+  approval's `hash_version` went stale) — that shows up in `execution_blocked_reasons` only, never
+  retroactively added to `blocked_reasons`.

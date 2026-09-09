@@ -756,6 +756,69 @@ class ActionRepository:
             )
             return list(result.scalars())
 
+    # --- run-level reads (V2-J evaluation metrics) -------------------------
+
+    async def proposals_for_run(self, run_id: str) -> list[ActionProposalRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionProposalRow)
+                .where(ActionProposalRow.run_id == run_id)
+                .order_by(ActionProposalRow.created_at.asc())
+            )
+            return list(result.scalars())
+
+    async def executions_for_run(self, run_id: str) -> list[ActionExecutionRow]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionExecutionRow)
+                .where(ActionExecutionRow.run_id == run_id)
+                .order_by(ActionExecutionRow.claimed_at.asc())
+            )
+            return list(result.scalars())
+
+    async def events_for_proposals(self, proposal_ids: list[str]) -> list[ActionEventRow]:
+        if not proposal_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionEventRow)
+                .where(ActionEventRow.action_proposal_id.in_(proposal_ids))
+                .order_by(ActionEventRow.ts.asc())
+            )
+            return list(result.scalars())
+
+    async def cross_run_blocking_runs(
+        self, recipient_identity_keys: set[str], *, exclude_run_id: str
+    ) -> dict[str, str]:
+        """V2-J §3 — for each recipient identity key, the `run_id` of a
+        currently-blocking `LIVE_EXTERNAL` `EMAIL_SEND` execution that
+        belongs to a DIFFERENT run than `exclude_run_id`, if any. Reuses the
+        SAME `_BLOCKING_LIVE_STATUSES` constant `recipient_conflict` already
+        uses — no second, drifting blocking-status list. `DEMO_SIMULATED`
+        never participates (the `origin` filter already excludes it,
+        mirroring `recipient_conflict` exactly). A recipient identity with
+        more than one candidate row is resolved to the FIRST one found —
+        this is a read-only observability signal (whether the metric
+        classifies a proposal as cross-run-blocked at all), never the
+        authoritative blocking decision itself (`recipient_conflict` is)."""
+        keys = {k for k in recipient_identity_keys if k}
+        if not keys:
+            return {}
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ActionExecutionRow.recipient_identity_key, ActionExecutionRow.run_id).where(
+                    ActionExecutionRow.action_type == ActionType.EMAIL_SEND.value,
+                    ActionExecutionRow.origin == ActionExecutionOrigin.LIVE_EXTERNAL.value,
+                    ActionExecutionRow.recipient_identity_key.in_(keys),
+                    ActionExecutionRow.status.in_(_BLOCKING_LIVE_STATUSES),
+                    ActionExecutionRow.run_id != exclude_run_id,
+                )
+            )
+            mapping: dict[str, str] = {}
+            for identity_key, run_id in result.all():
+                mapping.setdefault(identity_key, run_id)
+            return mapping
+
     async def find_stale_in_flight(self, *, before: datetime) -> list[ActionExecutionRow]:
         """Phase 9 — candidates whose `IN_FLIGHT` dispatch never settled and
         are older than the stale lease."""

@@ -15,6 +15,8 @@ from groundwork.evaluation.metrics import compute_run_evaluation
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.search_calls import SearchCallRecorder
 from groundwork.providers.base import SearchAttemptKind, SearchAttemptStatus, SearchAttemptTelemetry, SearchOperation
+from groundwork.repositories.actions import ActionRepository
+from groundwork.repositories.approvals import ApprovalRepository
 from tests.search_live_helpers import make_search_provider, search_response, search_result
 from groundwork.models.schemas import PlaySpec
 
@@ -71,7 +73,9 @@ async def test_discovery_metrics_reconcile_from_run_events(session_factory) -> N
     await events.emit("discovery.domain_resolved", company="Acme Robotics", method="deterministic")
     await events.emit("discovery.domain_resolved", company="Beta Systems", method="llm")
 
-    evaluation = await compute_run_evaluation(run_id, repos)
+    evaluation = await compute_run_evaluation(
+        run_id, repos, actions=ActionRepository(session_factory), approvals=ApprovalRepository(session_factory)
+    )
     sq = evaluation["search_quality"]
     assert sq["discovery_rejection_reasons"] == {"unsupported_refs": 2, "unresolved_domain": 1}
     assert sq["domain_resolution_method_counts"] == {"deterministic": 1, "llm": 1}
@@ -88,7 +92,9 @@ async def test_extraction_failure_and_usage_metrics(session_factory) -> None:
     recorder = SearchCallRecorder(run_id=run_id, prospect_id=None, repo=repos.search)
     await recorder.record(telemetry=[extract_ok], documents=[])
 
-    evaluation = await compute_run_evaluation(run_id, repos)
+    evaluation = await compute_run_evaluation(
+        run_id, repos, actions=ActionRepository(session_factory), approvals=ApprovalRepository(session_factory)
+    )
     sq = evaluation["search_quality"]
     assert sq["extraction_calls"] == 1
     assert sq["partial_extractions"] == 1

@@ -15,7 +15,11 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_version: str = "0.1.0"
+    # V2-J §6 — bumped to the v2 release version. Documented in
+    # `.env.example` under `APP_VERSION`; surfaced verbatim in the FastAPI
+    # app's own `version` and the `/health` response (`main.py`) — never
+    # hardcoded a second place.
+    app_version: str = "2.0.0"
     mode: Literal["demo", "live"] = "demo"
 
     # --- Checkpoint I1: environment/process identity ---

@@ -9,7 +9,7 @@ Zero-paid by construction: this script only ever drives **Demo Mode**. It has no
 code path that can request Live Mode — verifying a real deployment's health/readiness and its Demo Mode
 path never risks a real OpenAI/Tavily charge, regardless of what's configured on the target.
 
-Three checks, in order, each printed clearly and each a hard stop on failure:
+Four checks, in order, each printed clearly and each a hard stop on failure:
 
 1. `GET /api/health` — process liveness. A non-200 here means don't bother with anything else.
 2. `GET /api/ready` — real readiness (DB reachable, Postgres schema current). Reports the full `checks`
@@ -20,6 +20,12 @@ Three checks, in order, each printed clearly and each a hard stop on failure:
    `groundwork/scripts/run_demo.py` does headlessly against the engine directly — this one instead
    proves the deployed HTTP surface, SSE-adjacent polling, and the database round-trip all work against
    whatever's actually running at `--base-url`.
+4. **V2-J** — `GET /api/runs/{run_id}/evaluation` against that same Demo run: asserts the response
+   carries both the `enrichment` and `actions` blocks (proving the deployed build actually includes the
+   V2-J evaluation extensions, not just an older schema) and checks basic internal consistency between
+   their fields (e.g. `matched <= attempted`, every `proposals_by_verdict`/`executions_by_status` count
+   non-negative). Still Demo-only, still zero paid provider calls — this is a read against a run that
+   already finished in check 3, never a new action proposed/approved/executed by this script itself.
 
 Requires the exact `--i-understand-this-targets-a-real-deployment` flag and an explicit `--base-url`
 (no default — never silently targets `localhost` and calls that a "prod" smoke). Exits nonzero on any
@@ -71,7 +77,7 @@ async def _check_ready(client: httpx.AsyncClient) -> None:
         raise SystemExit(f"FAILURE: /api/ready returned {resp.status_code} — target is not ready to serve traffic")
 
 
-async def _run_demo_smoke(client: httpx.AsyncClient) -> None:
+async def _run_demo_smoke(client: httpx.AsyncClient) -> str:
     print("\n--- real Demo Mode run through the HTTP API ---")
     create_resp = await client.post(
         "/api/plays",
@@ -116,6 +122,65 @@ async def _run_demo_smoke(client: httpx.AsyncClient) -> None:
     print(f"prospects: {len(prospects)} total, {len(completed)} reached a terminal status")
     if not completed:
         raise SystemExit("FAILURE: run reached a terminal status but zero prospects did — real bug, not a smoke artifact")
+    return run_id
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(f"FAILURE: {message}")
+
+
+async def _check_evaluation(client: httpx.AsyncClient, run_id: str) -> None:
+    """V2-J — proves the deployed build actually serves the enrichment/
+    actions evaluation extensions, and that their own internal arithmetic
+    is self-consistent. Zero provider egress: a plain GET against a run
+    that already finished in `_run_demo_smoke`."""
+    print(f"\n--- GET /api/runs/{run_id}/evaluation ---")
+    resp = await client.get(f"/api/runs/{run_id}/evaluation")
+    if resp.status_code != 200:
+        raise SystemExit(f"FAILURE: GET /api/runs/{run_id}/evaluation returned {resp.status_code}: {resp.text}")
+    evaluation = resp.json()
+
+    _require("enrichment" in evaluation, "evaluation response has no 'enrichment' block — V2-J not deployed?")
+    _require("actions" in evaluation, "evaluation response has no 'actions' block — V2-J not deployed?")
+
+    e = evaluation["enrichment"]
+    for key in (
+        "attempted", "matched", "not_attempted_budget_count", "identifier_grammar_rejections",
+        "stale_channel_count", "preserved_last_known_good_count", "enrichment_calls",
+    ):
+        _require(key in e and isinstance(e[key], int) and e[key] >= 0, f"enrichment.{key} missing or negative")
+    _require(e["matched"] <= e["attempted"], "enrichment.matched exceeds enrichment.attempted")
+    for rate_key in ("match_rate", "email_found_rate", "email_verified_rate", "catch_all_rate", "linkedin_resolved_rate"):
+        _require(rate_key in e, f"enrichment.{rate_key} missing")
+        value = e[rate_key]
+        _require(value is None or 0.0 <= value <= 1.0, f"enrichment.{rate_key}={value!r} out of [0,1] range")
+    print(f"enrichment: attempted={e['attempted']} matched={e['matched']} match_rate={e['match_rate']}")
+
+    a = evaluation["actions"]
+    for key in (
+        "proposals_by_verdict", "blocked_reasons", "execution_blocked_reasons",
+        "executions_by_status", "executions_by_origin", "reconciliation_outcomes",
+    ):
+        _require(key in a and isinstance(a[key], dict), f"actions.{key} missing or not an object")
+        _require(all(isinstance(v, int) and v >= 0 for v in a[key].values()), f"actions.{key} has a negative count")
+    for key in (
+        "execution_blocked_attempts", "execution_blocked_proposals", "content_hash_mismatch_count",
+        "uncertain_count", "cross_run_recipient_blocks", "cross_run_recipient_blocked_proposals",
+    ):
+        _require(key in a and isinstance(a[key], int) and a[key] >= 0, f"actions.{key} missing or negative")
+    _require(
+        a["execution_blocked_proposals"] <= a["execution_blocked_attempts"],
+        "actions.execution_blocked_proposals exceeds actions.execution_blocked_attempts",
+    )
+    _require(
+        a["cross_run_recipient_blocked_proposals"] <= a["cross_run_recipient_blocks"],
+        "actions.cross_run_recipient_blocked_proposals exceeds actions.cross_run_recipient_blocks",
+    )
+    print(
+        f"actions: proposals_by_verdict={a['proposals_by_verdict']} "
+        f"execution_blocked_attempts={a['execution_blocked_attempts']}"
+    )
 
 
 async def main(base_url: str) -> int:
@@ -124,7 +189,8 @@ async def main(base_url: str) -> int:
     async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
         await _check_health(client)
         await _check_ready(client)
-        await _run_demo_smoke(client)
+        run_id = await _run_demo_smoke(client)
+        await _check_evaluation(client, run_id)
     print("\nAll checks passed.")
     return 0
 

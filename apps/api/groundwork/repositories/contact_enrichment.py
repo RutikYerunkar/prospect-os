@@ -522,3 +522,42 @@ class ContactEnrichmentRepository:
                 select(EnrichmentCallRow).where(EnrichmentCallRow.prospect_id == prospect_id)
             )
             return list(result.scalars())
+
+    # --- run-level reads (V2-J evaluation metrics) ---
+
+    async def contact_channels_for_prospects(self, prospect_ids: list[str]) -> list[ContactChannelRow]:
+        """Every `contact_channels` row (both EMAIL and LINKEDIN) belonging
+        to any of `prospect_ids` — used to compute run-level enrichment
+        metrics from the same already-derived, provider-agnostic current
+        state the API aggregate reads (never re-derived from a raw provider
+        status word here)."""
+        if not prospect_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ContactChannelRow).where(ContactChannelRow.prospect_id.in_(prospect_ids))
+            )
+            return list(result.scalars())
+
+    async def contact_enrichments_for_prospects(self, prospect_ids: list[str]) -> list[ContactEnrichmentRow]:
+        """Every successful-observation-group row (§3.6) for `prospect_ids`
+        — used for run-level `matched`/catch-all/identifier-grammar
+        metrics, which need the raw per-observation facts `contact_channels`
+        (latest-state-only) doesn't carry."""
+        if not prospect_ids:
+            return []
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ContactEnrichmentRow).where(ContactEnrichmentRow.prospect_id.in_(prospect_ids))
+            )
+            return list(result.scalars())
+
+    async def enrichment_calls_for_run(self, run_id: str) -> list[EnrichmentCallRow]:
+        """`enrichment_calls` carries `run_id` directly (unlike the two
+        methods above), mirroring `LLMCallRepository.for_run`/
+        `SearchRepository.search_calls_for_run`."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(EnrichmentCallRow).where(EnrichmentCallRow.run_id == run_id)
+            )
+            return list(result.scalars())

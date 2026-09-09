@@ -33,20 +33,99 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-I-a — Legal/privacy send-suppression prerequisite** | `d185c95` (branch `claude/v2-i-a-send-suppression`, merged to `feature/v2-contact-enrichment` via PR #22) | Closes the BLOCKING `claimed_email` suppression requirement carried forward from V2-DH through V2-H, under the provider-neutral name `LEGAL_OR_PRIVACY_RESTRICTION`. Hunter's HTTP 451 is now `EnrichmentAttemptStatus.LEGAL_RESTRICTION` / a dedicated `EnrichmentLegalRestriction` exception (was `INVALID_RESPONSE`, indistinguishable from 404/422, until this checkpoint) — routed by `engine/enrichment.py::call_enrichment` to a new `ContactEnrichmentRepository.record_legal_restriction`, which preserves the EMAIL channel's prior identifier/state/observed_at byte-for-byte, writes LOCAL suppression metadata onto `contact_channels`, and — when a real identifier was already on record — upserts a GLOBAL `email_suppressions` row keyed by the existing `normalize_email_identity`. One additive Alembic revision (`94f688f37818`). New `domain/action_policy.py` clause 15 (`recipient_suppressed`) blocks `EMAIL_SEND` in BOTH `DEMO_SIMULATED` and `LIVE_EXTERNAL` origins (unlike clause 12), with no override, evaluated fresh at both proposal-creation and execute time. `LiveExternalEmailSendDisabled`'s message was narrowed to stop claiming the suppression prerequisite is unresolved (it no longer is) while remaining exactly as unconditional and load-bearing as before — Live `EMAIL_SEND` remains structurally impossible; only the *reason stated* changed, not the refusal itself. Frontend: `ContactPanel` renders a provider-neutral suppression note under Email verification; `ActionApprovalPanel` gained `recipient_suppressed` blocked-reason copy. No Gmail send provider, no reconciliation, no live-send allowance, and no suppression-clear/override endpoint were added — all explicitly out of scope, deferred to V2-I-b. Canonical Demo byte-identical. Zero provider/network calls anywhere in this session. See "What V2-I-a added" below. |
 | **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed, one real smoke performed, reconciliation corrected post-smoke)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`, retained for historical/audit compatibility only — see below), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->history-checkpoint->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Two real pre-existing bugs fixed while wiring this in (enum-class unification; a policy-ordering bug where `recipient_conflict` blocked an idempotent retry before the idempotency check ran). `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states — removed (incorrectly, on a documented-not-passed Postgres gap), restored, then removed again correctly only after PR #23's CI came back green on all four required checks and the user's explicit separate authorization. **The one authorized real-Gmail smoke was then performed and succeeded — and its own read-only follow-up diagnostic proved Gmail omits our generated Message-ID from the sent message's headers, disproving the original §3.3 reconciliation design's core assumption.** Reconciliation was rebuilt on a Gmail mailbox `historyId` checkpoint (captured pre-dispatch, persisted before `messages.send`) plus approved-metadata matching (Subject/To/From/Date, via a new pure `domain/reconciliation_match.py`) instead of the generated Message-ID — see "V2-I-b reconciliation correction — the real smoke's finding and the fix" below for the full account, including the corrected dispatch ordering, the new `pre_dispatch_history_id` column/migration, the new `AMBIGUOUS`/`HISTORY_EXPIRED` reconcile outcomes, and the complete updated test matrix. Canonical Demo byte-identical throughout. No real sender/recipient address, provider message id, raw Message-ID value, token, or secret is recorded anywhere in this document or the tests. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made or authorized. |
 | **V2-I-c — LinkedIn action-path closure** | *this commit* (branch `claude/v2-i-c-linkedin-closure`) | `ActionApprovalPanel`'s LinkedIn "Open" now reuses `lib/linkedinSafety.ts::isSafeLinkedInHref` (the same defense-in-depth check `ContactPanel`/V2-E already applies — never a second URL parser) against the LinkedIn contact-channel row's own `origin`/`discovery_state`/`identifier`: when it returns true, "Open" renders a real `<a target="_blank" rel="noreferrer noopener">` to the validated identifier; when false, the existing inline fallback panel renders instead, now with `origin`-aware copy — `DEMO_FIXTURE` keeps the original "simulated profile · demo fixture / no network request was made" wording verbatim, while a `LIVE_PROVIDER` channel that still didn't pass the safety check gets distinct, provenance-honest copy that never claims "demo fixture" or "no network request was made" about a real provider observation. The anchor-vs-fallback decision was extracted into an exported `LinkedInOpenAction` component so it's directly testable with explicit props (the existing test file has no jsdom/testing-library — `renderToStaticMarkup` never runs `useEffect`, so the real `ActionApprovalPanel`'s async `proposal` state can never be driven from a test). Eight new dedicated backend tests (`tests/test_linkedin_action_path.py`) prove, through the real API rather than pure kwargs: `LINKEDIN_COPY_AND_OPEN` executes with `provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None`/zero `action_send_calls`; no send-provider or Gmail-provider resolver is ever called (proven by monkeypatching both to raise); a Live LinkedIn execute consumes no live recipient identity and a later Live `EMAIL_SEND` to the same person still dispatches; a prior successful Live `EMAIL_SEND` to the recipient does NOT block a sibling LinkedIn proposal (clause 12 is `EMAIL_SEND`-only); a real legal/privacy suppression on the EMAIL channel does not affect the sibling LinkedIn proposal (clause 15 is `EMAIL_SEND`-only, complementing the existing pure-function coverage in `test_suppression_policy.py`); duplicate execute is idempotent; and weak/mismatch/unknown LinkedIn identity is blocked with no override. All eight passed on the first run against the existing backend — **no genuine backend defect was found, so no groundwork backend source was changed.** Five new frontend tests cover the four required scenarios (DEMO_FIXTURE zero-href, LIVE_PROVIDER valid-URL real anchor, LIVE_PROVIDER malformed-URL fallback, LIVE_PROVIDER fallback never says "demo fixture") plus a no-channel-row default case. Manual Demo-mode UI walkthrough (propose → approve → execute → Copy → Open) performed via a headless-Chromium Playwright script, confirmed: "Open profile" renders as a `<button>` (never a link) for `DEMO_FIXTURE`, zero `href` anywhere on the page, zero navigation. Canonical Demo untouched (no backend production code changed). Zero provider/network calls. No real LinkedIn URL was ever opened. Gmail/V2-I, reconciliation, suppression, allowance, contact identity grammar/matching, the review check count, the action-policy clause set, `fixtures/demo_pack.yaml`, schema/Alembic, and `master` are all untouched. See "What V2-I-c added" below. |
+| **V2-J — Quality, metrics, production, v2 release preparation** | *this commit* (branch `claude/v2-j-quality-release`) | Two new computed-on-read `/evaluation` blocks, `enrichment` and `actions` — no `evaluation_metrics` table, no new model column, no migration. `enrichment`: `attempted`/`matched`/`match_rate`/`email_found_rate`/`email_verified_rate` (FOUND-denominated)/`catch_all_rate` (NULL-excluded)/`linkedin_resolved_rate`/`identity_match_distribution`/`identifier_grammar_rejections`/`provider_error_rate` (NOT_FOUND never counts)/`not_attempted_budget_count`/`enrichment_attempts_by_status`/`stale_channel_count` (observed-then-aged only, never never-attempted)/`preserved_last_known_good_count`+`_breakdown`/p50-p95 latency/credits+cost+calls (CONTRIB excludes NOT_ATTEMPTED_BUDGET; cost sums across providers, provider-native credits refuse to sum across more than one distinct provider). `actions`: `proposals_by_verdict`/`blocked_reasons` (proposal-time) kept strictly separate from `execution_blocked_reasons`/`execution_blocked_attempts`/`execution_blocked_proposals` (execution-time) /`content_hash_mismatch_count`/approval→execution latency p50-p95/`executions_by_status`+`_by_origin`/`uncertain_count`/`reconciliation_outcomes`/`mean_messages_scanned_per_reconcile`/`cross_run_recipient_blocks`+`_blocked_proposals`. Instrumented the five pre-policy `execute` 409 paths (`NOT_APPROVED`/`APPROVAL_SUPERSEDED`/`SENDER_NOT_CONNECTED`/`SENDER_CHANGED`/`CONTENT_CHANGED`) with a persisted `execution_blocked` `action_events` row before each raise — the five original error contracts (status/code/message/ordering) are byte-for-byte unchanged; this is the same "the seam is an observation, never a behavior branch" discipline the rest of this codebase's telemetry recorders already follow. `ActionRepository.cross_run_blocking_runs` (new) reuses the SAME `_BLOCKING_LIVE_STATUSES` constant `recipient_conflict()` already enforces — never a second, driftable status list; `DEMO_SIMULATED` never participates; a same-run blocking execution is correctly excluded from the cross-run count. `compute_run_evaluation` now takes `ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at `api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` (`engine/runner.py`), preserving the standing boundary that the pipeline engine never touches governed-action state. Minimal new read methods added to `ContactEnrichmentRepository`/`ActionRepository`/`ApprovalRepository` — no provider import anywhere in `evaluation/`/`domain/`. Frontend: `EnrichmentQualityPanel`/`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s shape), additive `EnrichmentMetrics`/`ActionMetrics` types, both rendered from `QualityTab`; every `null` rate renders "—", never "0%"; blocked-reason/status/outcome maps render generically (an unrecognized future value still renders correctly); the action-empty-state reads one explicit sentence, never a wall of zeros. `APP_VERSION`/API package version bumped to `2.0.0`; CI's push-trigger branch fixed `main`→`master`; root `.env.example` documents `APP_VERSION`/`MAX_ENRICHMENT_CALLS_PER_RUN`/`TRUSTED_HOSTS` and its stale `NEXT_PUBLIC_API_URL` block replaced with a pointer to `apps/web/.env.example`/`GROUNDWORK_API_ORIGIN`. `scripts/prod_smoke.py` gained a fourth check (`/evaluation` shape + internal consistency), still Demo-only, still zero egress, still never run by CI. `docs/DEPLOYMENT.md` gained a documentation-only production rate-limiting section (BFF/shared-bucket behavior, the Uvicorn/Render layer honestly marked INFERRED, no blindly-trusted `X-Forwarded-For`, the deferred secure BFF-side redesign) and a release/rollback sequence (migration-before-serve, tag-after-verify, additive-schema-safe rollback); `docs/RUNBOOK.md` gained an operational reading guide for the two new panels; `docs/ARCHITECTURE.md` gained the V2-J narrative section. 24 new backend tests (`tests/test_evaluation_enrichment_metrics.py`, `tests/test_evaluation_action_metrics.py`) plus 5 existing evaluation call sites updated for the new required kwargs — full SQLite suite 1195 passed/1 skipped (baseline 1171 passed/1 skipped, +24, same 1 skip); 11 new frontend tests — full suite 133 passed (baseline 122, +11); frontend lint/typecheck/build all clean; Alembic head unchanged (`336c199f2d05` — no migration, none needed). Canonical Demo regression tests unchanged and green. `master` untouched; no merge, no tag, no deploy, no Neon migration, zero provider/network calls, zero Gmail sends, zero LinkedIn navigation. Local Docker/Postgres were NOT reachable in this session's sandbox (no Docker daemon socket, no local Postgres server) — the Postgres+migration-drift and Docker-build gates are asserted only by GitHub CI, not locally reproduced; stated here explicitly rather than claimed. See "What V2-J added" below. |
 
 ---
 
 ## Current checkpoint
 
-**V2-I-c — LinkedIn action-path closure.** COPY_AND_OPEN only — no LinkedIn scraping, automation, auto-DM,
-OAuth, credentials, unofficial API, or `LINKEDIN_SEND` action anywhere (unchanged v2 invariant). Closes the
-one remaining gap in `ActionApprovalPanel`'s LinkedIn "Open" behavior (it previously always showed the
-inline simulated panel, even for a real, safety-checked `LIVE_PROVIDER` LinkedIn URL that `ContactPanel`
-would already render as a real link) and adds the dedicated backend/frontend LinkedIn action-path test
-coverage the frozen plan calls for but no prior checkpoint had written as its own file. Supersedes the
-section below, which describes V2-I-b. The V2-I-b text below (through "What V2-I-b added" and the
-reconciliation-correction section) is **historical** and remains accurate for V2-I-b itself; this
-checkpoint's own narrative is under "What V2-I-c added" immediately below.
+**V2-J — Quality, metrics, production, v2 release preparation.** The final V2 checkpoint per
+`docs/V2_IMPLEMENTATION_PLAN.md` Part 13: `/evaluation` extended with `enrichment`/`actions` blocks, the
+five pre-policy execute 409 paths instrumented with `execution_blocked` events, the cross-run recipient
+metric wired through `ActionRepository` (reusing `_BLOCKING_LIVE_STATUSES`, never a second list), two new
+frontend Quality-tab panels, `APP_VERSION`/CI/`.env.example` brought current, `scripts/prod_smoke.py`
+extended, and `docs/DEPLOYMENT.md`/`docs/RUNBOOK.md`/`docs/ARCHITECTURE.md` updated. **This checkpoint
+does NOT perform the single `feature/v2-contact-enrichment -> master` integration PR, the Neon
+`production` migration, or the `v2.0.0` tag** — those remain explicitly out of scope for this session per
+its own task brief (no merge, no deploy, no production mutation) and are the next session's job once this
+PR is reviewed. See "What V2-J added" immediately below. Supersedes the section further down, which
+describes V2-I-c; that text (through "What V2-I-c added") is **historical** and remains accurate for
+V2-I-c itself.
+
+### What V2-J added
+
+- **`evaluation/metrics.py`** — `_compute_enrichment_metrics()` and `_compute_action_metrics()`, both
+  computed on read, both returning `None`/`{}`/`0` (never a fabricated number) for a run with no relevant
+  activity. `compute_run_evaluation()`'s signature changed to `(run_id, repos, *, actions, approvals)` —
+  every pre-existing call site (5 across `tests/test_search_quality_metrics.py`,
+  `tests/test_search_observability.py`, `tests/test_exclusion_persistence_reload.py`,
+  `tests/test_live_search_pipeline_integration.py`) updated to pass the two new repositories; every
+  pre-existing assertion in those files is unchanged.
+- **`api/routers/actions.py`** — `execute_action`'s five pre-policy `ConflictError` raises (`NOT_APPROVED`,
+  `APPROVAL_SUPERSEDED`, `SENDER_NOT_CONNECTED`, `SENDER_CHANGED`, `CONTENT_CHANGED`) each now call
+  `actions.record_event(type="execution_blocked", ...)` immediately before raising, with a one-element
+  `blocked_reasons` payload matching the corresponding policy-clause reason string where one already
+  exists (`approval_superseded`, `sender_not_connected`, `sender_changed`, `content_changed`) or a new,
+  analogous one (`not_approved`) where it doesn't. No other line in any of the five branches changed.
+- **`repositories/actions.py`** — `proposals_for_run`, `executions_for_run`, `events_for_proposals` (plain
+  `run_id`/`action_proposal_id` reads), and `cross_run_blocking_runs(recipient_identity_keys,
+  exclude_run_id)` — the last one is the only new query-shape method, and it reuses the module's existing
+  `_BLOCKING_LIVE_STATUSES` tuple rather than redeclaring the blocking-status set.
+- **`repositories/contact_enrichment.py`** — `contact_channels_for_prospects`, `contact_enrichments_for_prospects`
+  (both prospect-id-list reads — neither table carries `run_id`), `enrichment_calls_for_run` (does).
+- **`repositories/approvals.py`** — `get_many(approval_ids)`, a batch primary-key lookup for the
+  approval→execution latency metric.
+- **`api/routers/evaluation.py`** — now depends on `ActionsRepoDep`/`ApprovalsRepoDep` (both pre-existing
+  dependency providers in `api/deps.py`) alongside the existing `ReposDep`. `engine/runner.py::Repos` was
+  NOT touched — the engine still cannot read or write governed-action state.
+- **`groundwork/config.py`/`pyproject.toml`** — `app_version`/`version` bumped `0.1.0 -> 2.0.0`.
+- **`.github/workflows/ci.yml`** — push trigger branch `main -> master` (the repo's actual default/deploy
+  branch; the workflow had never been exercised on a real push since it was authored against the wrong
+  name).
+- **`.env.example`** (root) — added `APP_VERSION`, `MAX_ENRICHMENT_CALLS_PER_RUN`, `TRUSTED_HOSTS` (all
+  three already existed as real `config.py` settings but were undocumented here); replaced the stale
+  `NEXT_PUBLIC_API_URL` block (dead since the I2 same-origin proxy shipped) with a pointer to
+  `apps/web/.env.example`'s real `GROUNDWORK_API_ORIGIN`.
+- **`scripts/prod_smoke.py`** — `_run_demo_smoke` now returns the completed run's id; a new
+  `_check_evaluation()` GETs `/api/runs/{id}/evaluation` against it and asserts the `enrichment`/`actions`
+  blocks exist with internally-consistent, non-negative fields (`matched <= attempted`,
+  `execution_blocked_proposals <= execution_blocked_attempts`, every rate in `[0,1]` or `null`). Still
+  Demo-only by construction, still never invoked by `make test`/CI, still no flag or code path that can
+  reach Live Mode.
+- **Frontend** — `components/EnrichmentQualityPanel.tsx`, `components/ActionGovernancePanel.tsx` (new,
+  mirroring `SearchQualityPanel.tsx`'s metric-grid-plus-badge-lists shape); `lib/types.ts` gained
+  `EnrichmentMetrics`/`ActionMetrics` and two new `RunEvaluation` fields (additive only); `QualityTab.tsx`
+  renders both new panels after `SearchQualityPanel`. `ProviderSettingsResponse` was deliberately left
+  untouched (explicitly out of scope per the task brief).
+- **Tests** — `tests/test_evaluation_enrichment_metrics.py` (10 tests: zero-denominator/empty-everything,
+  attempted/matched/match_rate, the FOUND-denominated `email_verified_rate`, catch-all NULL exclusion,
+  NOT_FOUND-is-not-a-provider-error, NOT_ATTEMPTED_BUDGET exclusion, malformed LIVE_PROVIDER LinkedIn
+  grammar rejection, preserved-last-known-good counting — including the correction that a definitive
+  NOT_FOUND is itself provider-backed and preservable, unlike PROVIDER_ERROR/NOT_ATTEMPTED — stale vs
+  never-observed, cost/credit completeness, cross-provider credit incomparability) and
+  `tests/test_evaluation_action_metrics.py` (14 tests: the action empty state, proposal-time
+  verdict/reason counts, the `NOT_APPROVED`/`CONTENT_CHANGED` pre-policy paths with their original 409
+  contracts asserted unchanged, repeated-attempt grain, successful-execution metrics with real latency,
+  and the full cross-run recipient status matrix — `SUCCEEDED`/`ABANDONED`/`UNCERTAIN`/`IN_FLIGHT`/
+  `CLAIMED` all block, `FAILED` never blocks, `DEMO_SIMULATED` never participates, a same-run blocking
+  execution is correctly excluded — parametrized over all six statuses plus two dedicated same-run/
+  DEMO_SIMULATED negative cases).
+- **Docs** — `docs/DEPLOYMENT.md` gained a documentation-only "V2-J — production rate limiting" section
+  (the I2 proxy's shared-bucket behavior, the Uvicorn/Render trust boundary honestly marked INFERRED
+  rather than verified, confirmation nothing in this codebase trusts a client-supplied
+  `X-Forwarded-For`, and the deferred secure BFF-side redesign) and a "V2-J — release/rollback sequence"
+  (migration-before-serve, deploy API-then-frontend, `prod_smoke.py` verification, tag-after-verify,
+  additive-schema-safe rollback via redeploy rather than an Alembic downgrade). `docs/RUNBOOK.md` gained
+  an operational reading guide for the two new panels (null-vs-zero, `FAILED`-frees-the-identity restated
+  in the new metric's context, `uncertain_count` is not a retry queue, attempts-vs-proposals grain,
+  proposal-time/execution-time counters never merged). `docs/ARCHITECTURE.md` gained the V2-J narrative
+  section (this document's companion — the technical "why," not the operational "how").
+- **What V2-J deliberately did NOT do**: no Ruff; no `_client_key` consolidation; no implementation of the
+  deferred BFF-side rate-limit redesign (documented as a decision record only); no production rate-limit
+  saturation experiment; no schema/Alembic migration (none needed — confirmed by `alembic heads` reporting
+  the same `336c199f2d05` before and after); `master` untouched; no merge; no tag; no deploy; no Neon
+  migration; the Gmail scratch DB from earlier V2-I sessions was left in place, not cleaned up (explicitly
+  out of scope per the task brief).
 
 **Three-state history, recorded explicitly per `CLAUDE.md`'s "flag rather than silently resolve"
 instruction:**

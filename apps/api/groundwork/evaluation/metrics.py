@@ -10,12 +10,34 @@ from __future__ import annotations
 
 from typing import Any
 
+from groundwork.domain.action_policy import derive_preserved_enrichment_state, is_enrichment_stale
+from groundwork.domain.contact_identity import IdentifierVerdict, validate_linkedin_identifier
 from groundwork.domain.grounding import DEFAULT_OVERLAP_THRESHOLD, verify_claim_evidence
 from groundwork.domain.scoring import exclusion_status_from_persisted
 from groundwork.engine.runner import Repos
-from groundwork.models.enums import EvidenceOrigin, ExclusionEvaluation, ProspectStatus, SignalType
+from groundwork.models.enums import (
+    Channel,
+    EmailDiscoveryState,
+    EmailVerificationState,
+    EnrichmentOrigin,
+    EvidenceOrigin,
+    ExclusionEvaluation,
+    LinkedInResolutionState,
+    ProspectStatus,
+    SignalType,
+)
 from groundwork.models.schemas import Evidence
-from groundwork.timeutil import elapsed_seconds
+from groundwork.repositories.actions import ActionRepository
+from groundwork.repositories.approvals import ApprovalRepository
+from groundwork.timeutil import elapsed_seconds, ensure_aware, utcnow
+
+# V2-J §3 — the recipient-conflict blocked-reason vocabulary (§6.1 clause 12,
+# `domain/action_policy.py::_RECIPIENT_CONFLICT_REASONS`'s value set),
+# reused here (never re-typed as a second literal list) so the cross-run
+# recipient metric recognizes exactly the same reasons the real policy emits.
+_RECIPIENT_CONFLICT_REASON_STRINGS = frozenset(
+    {"already_sent_to_recipient", "send_in_flight", "prior_send_uncertain"}
+)
 
 
 def _percentile(values: list[float], pct: float) -> float | None:
@@ -48,7 +70,9 @@ def _evidence_row_to_model(row: Any) -> Evidence:
     )
 
 
-async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
+async def compute_run_evaluation(
+    run_id: str, repos: Repos, *, actions: ActionRepository, approvals: ApprovalRepository
+) -> dict[str, Any]:
     run_row = await repos.runs.get(run_id)
     prospects = await repos.prospects.list_for_run(run_id)
     evidence_rows = await repos.prospect_data.evidence_for_run(run_id)
@@ -211,6 +235,9 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
 
     llm_usage = await _compute_llm_usage(run_id, repos)
     search_quality = await _compute_search_quality(run_id, repos, score_rows=score_rows)
+    prospect_ids = [p.id for p in prospects]
+    enrichment = await _compute_enrichment_metrics(run_id, repos, prospect_ids=prospect_ids)
+    actions_metrics = await _compute_action_metrics(run_id, actions=actions, approvals=approvals)
 
     return {
         "run_id": run_id,
@@ -220,6 +247,8 @@ async def compute_run_evaluation(run_id: str, repos: Repos) -> dict[str, Any]:
         "guardrails": guardrails,
         "llm_usage": llm_usage,
         "search_quality": search_quality,
+        "enrichment": enrichment,
+        "actions": actions_metrics,
     }
 
 
@@ -393,4 +422,305 @@ async def _compute_llm_usage(run_id: str, repos: Any) -> dict[str, Any]:
         "transport_retries": sum(1 for c in calls if c.attempt_kind == "transport_retry"),
         "schema_repairs": sum(1 for c in calls if c.attempt_kind == "schema_repair"),
         "budget_tripped": any(c.status == "NOT_ATTEMPTED_BUDGET" for c in calls),
+    }
+
+
+async def _compute_enrichment_metrics(run_id: str, repos: Any, *, prospect_ids: list[str]) -> dict[str, Any]:
+    """V2-J §1 — computed on read from `enrichment_calls` (run-scoped) and
+    `contact_channels`/`contact_enrichments` (prospect-scoped, gathered here
+    for this run's own prospects only). No new table, no persistence.
+
+    Grain: `attempted`/`matched`/`match_rate` are call-level — one call
+    GROUP (`enrichment_calls.call_group_id`) is one enrichment attempt,
+    mirroring `_compute_llm_usage`'s `logical_calls`. A group whose only
+    telemetry row is `NOT_ATTEMPTED_BUDGET` (the run's `EnrichmentCallBudget`
+    was already exhausted — the provider was never actually called) is
+    counted in `not_attempted_budget_count`, never in `attempted` — this is
+    the load-bearing "CONTRIB excludes NOT_ATTEMPTED_BUDGET" rule extended to
+    the funnel counters, not just credits/cost below.
+
+    The FOUND/VERIFIED/RESOLVED/identity-match rates are read from
+    `contact_channels` — the already-derived, provider-agnostic CURRENT
+    state (§3.6 last-known-good) — never re-derived from a raw provider
+    status word here (that would require importing a provider's own
+    `email_status_map`, which `domain`/`evaluation` must never do, D2).
+    `catch_all_rate` and `identifier_grammar_rejections` are the two
+    exceptions: `email_is_catch_all` is already a plain, provider-neutral
+    boolean on `contact_enrichments`, and LinkedIn grammar validation is a
+    pure `domain/contact_identity.py` re-check of the raw observed URL —
+    both computed straight from the raw observation rows, not the channel
+    snapshot.
+    """
+    channels = await repos.contact_enrichment.contact_channels_for_prospects(prospect_ids)
+    enrichments = await repos.contact_enrichment.contact_enrichments_for_prospects(prospect_ids)
+    calls = await repos.contact_enrichment.enrichment_calls_for_run(run_id)
+
+    groups: dict[str, list] = {}
+    for c in calls:
+        groups.setdefault(c.call_group_id, []).append(c)
+
+    not_attempted_budget_count = 0
+    attempted = 0
+    for group_calls in groups.values():
+        last = max(group_calls, key=lambda c: c.attempt)
+        if last.status == "NOT_ATTEMPTED_BUDGET":
+            not_attempted_budget_count += 1
+        else:
+            attempted += 1
+
+    matched = sum(1 for e in enrichments if e.matched)
+    match_rate = matched / attempted if attempted else None
+
+    enrichment_attempts_by_status: dict[str, int] = {}
+    for c in calls:
+        enrichment_attempts_by_status[c.status] = enrichment_attempts_by_status.get(c.status, 0) + 1
+
+    # CONTRIB — every attempt row EXCEPT NOT_ATTEMPTED_BUDGET (never a real
+    # provider call); latency/credits/cost/provider-error-rate below are all
+    # computed over this same set, so "contributing" means one thing
+    # throughout this function.
+    contributing_calls = [c for c in calls if c.status != "NOT_ATTEMPTED_BUDGET"]
+    provider_error_rate = (
+        sum(1 for c in contributing_calls if c.status == "PROVIDER_ERROR") / len(contributing_calls)
+        if contributing_calls
+        else None
+    )
+
+    email_channels = [c for c in channels if c.channel == Channel.EMAIL.value]
+    linkedin_channels = [c for c in channels if c.channel == Channel.LINKEDIN.value]
+
+    email_found = sum(1 for c in email_channels if c.discovery_state == EmailDiscoveryState.FOUND.value)
+    email_found_rate = email_found / attempted if attempted else None
+
+    email_verified = sum(
+        1
+        for c in email_channels
+        if c.discovery_state == EmailDiscoveryState.FOUND.value
+        and c.verification_state == EmailVerificationState.VERIFIED.value
+    )
+    # Pinned semantics (V2-J test matrix): the denominator is FOUND, not
+    # `attempted` — "what fraction of the emails we actually found turned
+    # out to be verified," not diluted by prospects with no email at all.
+    email_verified_rate = email_verified / email_found if email_found else None
+
+    linkedin_resolved = sum(
+        1 for c in linkedin_channels if c.discovery_state == LinkedInResolutionState.RESOLVED.value
+    )
+    linkedin_resolved_rate = linkedin_resolved / attempted if attempted else None
+
+    identity_match_distribution: dict[str, int] = {}
+    for c in linkedin_channels:
+        if c.identity_match_state:
+            identity_match_distribution[c.identity_match_state] = (
+                identity_match_distribution.get(c.identity_match_state, 0) + 1
+            )
+
+    # catch_all_rate — NULL (`email_is_catch_all is None`, e.g. the
+    # provider's own status word wasn't mapped to a catch-all signal at all)
+    # is excluded from BOTH numerator and denominator, never treated as
+    # "not catch-all."
+    catch_all_known = [
+        bool(e.email_is_catch_all) for e in enrichments if e.email_address and e.email_is_catch_all is not None
+    ]
+    catch_all_rate = (sum(catch_all_known) / len(catch_all_known)) if catch_all_known else None
+
+    identifier_grammar_rejections = 0
+    for e in enrichments:
+        if e.linkedin_url:
+            verdict = validate_linkedin_identifier(e.linkedin_url, origin=EnrichmentOrigin(e.origin))
+            if verdict is IdentifierVerdict.REJECTED:
+                identifier_grammar_rejections += 1
+
+    now = utcnow()
+    latest_observed_by_prospect: dict[str, Any] = {}
+    for e in enrichments:
+        observed = ensure_aware(e.observed_at)
+        if observed is None:
+            continue
+        prior = latest_observed_by_prospect.get(e.prospect_id)
+        if prior is None or observed > prior:
+            latest_observed_by_prospect[e.prospect_id] = observed
+
+    # stale vs never-observed (pinned): only a channel that WAS observed at
+    # least once and has since aged past the threshold counts as stale — a
+    # channel that was never successfully observed (`observed_at is None`)
+    # is simply not-yet-attempted, not stale.
+    stale_channel_count = 0
+    preserved_last_known_good_count = 0
+    preserved_last_known_good_breakdown: dict[str, int] = {}
+    for c in channels:
+        observed_at = ensure_aware(c.observed_at)
+        if observed_at is not None and is_enrichment_stale(observed_at, now):
+            stale_channel_count += 1
+        preserved = derive_preserved_enrichment_state(
+            discovery_state=c.discovery_state,
+            identifier=c.identifier,
+            observed_at=observed_at,
+            last_attempt_status=c.last_attempt_status,
+            latest_enrichment_observed_at=latest_observed_by_prospect.get(c.prospect_id),
+        )
+        if preserved is not None:
+            preserved_last_known_good_count += 1
+            preserved_last_known_good_breakdown[preserved.value] = (
+                preserved_last_known_good_breakdown.get(preserved.value, 0) + 1
+            )
+
+    latencies = [c.latency_ms for c in contributing_calls]
+
+    # Credits/cost completeness (pinned) — CONTRIB excludes
+    # NOT_ATTEMPTED_BUDGET (already true of `contributing_calls`); beyond
+    # that: no contributing calls -> None; any contributing cost/credits
+    # unknown -> None; multiple distinct provider credit UNITS -> None
+    # (Apollo credits and Hunter credits are not comparable/summable) —
+    # never a partial numeric total presented as complete.
+    costs = [c.cost_usd for c in contributing_calls]
+    enrichment_cost_usd = sum(costs) if contributing_calls and all(v is not None for v in costs) else None
+
+    providers_seen = {c.provider for c in contributing_calls}
+    credits = [c.credits_used for c in contributing_calls]
+    if not contributing_calls or len(providers_seen) != 1 or any(v is None for v in credits):
+        enrichment_credits_used = None
+    else:
+        enrichment_credits_used = sum(credits)
+
+    return {
+        "attempted": attempted,
+        "matched": matched,
+        "match_rate": match_rate,
+        "email_found_rate": email_found_rate,
+        "email_verified_rate": email_verified_rate,
+        "catch_all_rate": catch_all_rate,
+        "linkedin_resolved_rate": linkedin_resolved_rate,
+        "identity_match_distribution": identity_match_distribution,
+        "identifier_grammar_rejections": identifier_grammar_rejections,
+        "provider_error_rate": provider_error_rate,
+        "not_attempted_budget_count": not_attempted_budget_count,
+        "enrichment_attempts_by_status": enrichment_attempts_by_status,
+        "stale_channel_count": stale_channel_count,
+        "preserved_last_known_good_count": preserved_last_known_good_count,
+        "preserved_last_known_good_breakdown": preserved_last_known_good_breakdown,
+        "p50_enrichment_latency_ms": _percentile(latencies, 0.5),
+        "p95_enrichment_latency_ms": _percentile(latencies, 0.95),
+        "enrichment_credits_used": enrichment_credits_used,
+        "enrichment_cost_usd": enrichment_cost_usd,
+        "enrichment_calls": len(contributing_calls),
+    }
+
+
+async def _compute_action_metrics(run_id: str, *, actions: ActionRepository, approvals: ApprovalRepository) -> dict[str, Any]:
+    """V2-J §2/§3 — governed-action observability, computed on read from
+    `action_proposals`/`action_executions`/`action_events`/`approvals`.
+    Proposal-time blocked reasons (`blocked_reasons`, from each proposal's
+    own persisted `policy_verdict`/`blocked_reasons`) are kept strictly
+    separate from execution-time blocked reasons (`execution_blocked_reasons`,
+    from `action_events` rows of type `"execution_blocked"` — both the five
+    pre-policy 409 paths and the policy-block path emit exactly this event
+    type, so this metric sees all six with no special-casing).
+    """
+    proposals = await actions.proposals_for_run(run_id)
+    executions = await actions.executions_for_run(run_id)
+    proposal_ids = [p.id for p in proposals]
+    events = await actions.events_for_proposals(proposal_ids)
+
+    proposals_by_verdict: dict[str, int] = {}
+    blocked_reasons: dict[str, int] = {}
+    for p in proposals:
+        proposals_by_verdict[p.policy_verdict] = proposals_by_verdict.get(p.policy_verdict, 0) + 1
+        for reason in p.blocked_reasons:
+            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+
+    execution_blocked_events = [e for e in events if e.type == "execution_blocked"]
+    execution_blocked_reasons: dict[str, int] = {}
+    for e in execution_blocked_events:
+        for reason in (e.payload or {}).get("blocked_reasons", []):
+            execution_blocked_reasons[reason] = execution_blocked_reasons.get(reason, 0) + 1
+    execution_blocked_attempts = len(execution_blocked_events)
+    execution_blocked_proposals = len(
+        {e.action_proposal_id for e in execution_blocked_events if e.action_proposal_id}
+    )
+    content_hash_mismatch_count = sum(
+        1
+        for e in execution_blocked_events
+        if "content_changed" in (e.payload or {}).get("blocked_reasons", [])
+    )
+
+    executions_by_status: dict[str, int] = {}
+    executions_by_origin: dict[str, int] = {}
+    for x in executions:
+        executions_by_status[x.status] = executions_by_status.get(x.status, 0) + 1
+        executions_by_origin[x.origin] = executions_by_origin.get(x.origin, 0) + 1
+    uncertain_count = executions_by_status.get("UNCERTAIN", 0)
+
+    approvals_by_id = await approvals.get_many([x.approval_id for x in executions if x.approval_id])
+    latencies_ms: list[float] = []
+    for x in executions:
+        approval = approvals_by_id.get(x.approval_id) if x.approval_id else None
+        if approval is None or approval.decided_at is None or x.claimed_at is None:
+            continue
+        latencies_ms.append(max(elapsed_seconds(approval.decided_at, x.claimed_at) * 1000, 0.0))
+
+    reconciliation_outcomes: dict[str, int] = {}
+    messages_scanned_values: list[int] = []
+    for e in events:
+        payload = e.payload or {}
+        if e.type == "execution_reconciled":
+            outcome = payload.get("result", "FOUND")
+        elif e.type == "execution_reconcile_attempt":
+            outcome = payload.get("result")
+        elif e.type == "execution_abandoned" and payload.get("reason") == "reconciliation window expired":
+            outcome = "ABANDONED"
+        else:
+            outcome = None
+        if outcome:
+            reconciliation_outcomes[outcome] = reconciliation_outcomes.get(outcome, 0) + 1
+        if e.type in ("execution_reconciled", "execution_reconcile_attempt") and "messages_scanned" in payload:
+            messages_scanned_values.append(payload["messages_scanned"])
+
+    mean_messages_scanned_per_reconcile = (
+        sum(messages_scanned_values) / len(messages_scanned_values) if messages_scanned_values else None
+    )
+
+    # --- cross-run recipient blocking (§3 — do not hardcode; delegates the
+    # actual blocking-status lookup to ActionRepository.cross_run_blocking_
+    # runs, which reuses `_BLOCKING_LIVE_STATUSES` in-module) ---
+    proposal_by_id = {p.id: p for p in proposals}
+    per_proposal_attempts: dict[str, int] = {}
+    for p in proposals:
+        if p.recipient_identity_key and any(r in _RECIPIENT_CONFLICT_REASON_STRINGS for r in p.blocked_reasons):
+            per_proposal_attempts[p.id] = per_proposal_attempts.get(p.id, 0) + 1
+    for e in execution_blocked_events:
+        reasons = (e.payload or {}).get("blocked_reasons", [])
+        if not e.action_proposal_id or not any(r in _RECIPIENT_CONFLICT_REASON_STRINGS for r in reasons):
+            continue
+        p = proposal_by_id.get(e.action_proposal_id)
+        if p is not None and p.recipient_identity_key:
+            per_proposal_attempts[p.id] = per_proposal_attempts.get(p.id, 0) + 1
+
+    recipient_keys = {proposal_by_id[pid].recipient_identity_key for pid in per_proposal_attempts}
+    cross_run_map = await actions.cross_run_blocking_runs(recipient_keys, exclude_run_id=run_id)
+
+    cross_run_recipient_blocks = 0
+    cross_run_blocked_proposal_ids: set[str] = set()
+    for pid, attempt_count in per_proposal_attempts.items():
+        key = proposal_by_id[pid].recipient_identity_key
+        if key in cross_run_map:
+            cross_run_recipient_blocks += attempt_count
+            cross_run_blocked_proposal_ids.add(pid)
+
+    return {
+        "proposals_by_verdict": proposals_by_verdict,
+        "blocked_reasons": blocked_reasons,
+        "execution_blocked_reasons": execution_blocked_reasons,
+        "execution_blocked_attempts": execution_blocked_attempts,
+        "execution_blocked_proposals": execution_blocked_proposals,
+        "content_hash_mismatch_count": content_hash_mismatch_count,
+        "approval_to_execution_latency_p50_ms": _percentile(latencies_ms, 0.5),
+        "approval_to_execution_latency_p95_ms": _percentile(latencies_ms, 0.95),
+        "executions_by_status": executions_by_status,
+        "executions_by_origin": executions_by_origin,
+        "uncertain_count": uncertain_count,
+        "reconciliation_outcomes": reconciliation_outcomes,
+        "mean_messages_scanned_per_reconcile": mean_messages_scanned_per_reconcile,
+        "cross_run_recipient_blocks": cross_run_recipient_blocks,
+        "cross_run_recipient_blocked_proposals": len(cross_run_blocked_proposal_ids),
     }

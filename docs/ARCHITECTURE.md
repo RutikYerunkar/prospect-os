@@ -688,3 +688,61 @@ See `docs/PROGRESS.md`'s "What V2-I-c added" for the full file list, the exact t
 Demo-mode UI verification (headless-Chromium, DOM-inspected, zero navigation), and one pre-existing,
 out-of-scope observation (`ActionAuditPanel.tsx`'s channel-agnostic "Gmail accepted this message" copy
 also rendering under a LinkedIn execution) noted but deliberately not fixed here.
+
+### V2-J — quality, metrics, production readiness, v2 release preparation
+
+Extends `/evaluation` with two more computed-on-read blocks — `enrichment` and `actions` — alongside the
+pre-existing `volume`/`quality`/`reliability`/`guardrails`/`llm_usage`/`search_quality`. Same discipline
+throughout: no `evaluation_metrics` table, no new model column, no migration; every field is a real
+aggregate over `enrichment_calls`/`contact_channels`/`contact_enrichments`/`action_proposals`/
+`action_executions`/`action_events`/`approvals` rows for one run, and a metric that has no denominator is
+`null`, never a fabricated `0`.
+
+**Wiring, not a new engine capability.** `evaluation/metrics.py::compute_run_evaluation` now takes
+`ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at
+`api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` dataclass
+(`engine/runner.py`). That preserves the standing architectural boundary that the pipeline engine can
+never write (or even read) governed-action state; evaluation is a read-only API surface, not the engine,
+so it may depend on repositories the engine itself never touches.
+
+**`execution_blocked` instrumentation — observability added, behavior unchanged.** Five pre-policy 409
+paths in `POST /api/actions/proposals/{id}/execute` (`NOT_APPROVED`, `APPROVAL_SUPERSEDED`,
+`SENDER_NOT_CONNECTED`, `SENDER_CHANGED`, `CONTENT_CHANGED`) now each write an `action_events` row of
+type `execution_blocked` immediately before raising — the same event type the pre-existing policy-block
+path already wrote, so the six sources feed one `execution_blocked_reasons` metric with no special-casing.
+Every one of the five `ConflictError` raises — status code, error `code`, message, ordering relative to
+the other gates — is byte-for-byte unchanged; the only new effect is one additional persisted, redacted
+audit row per blocked attempt. This is the same "the seam is a side observation, never a behavior branch"
+discipline the rest of this codebase's telemetry recorders already follow (`engine/llm.py::call_structured`,
+`engine/search.py::call_search`, `engine/enrichment.py::call_enrichment`) — the writes never gate what the
+caller does next.
+
+**Cross-run recipient metric — reuses the real constant, never a second list.** `ActionRepository.
+cross_run_blocking_runs` (the new method backing `actions.cross_run_recipient_blocks`/
+`cross_run_recipient_blocked_proposals`) queries against the SAME `_BLOCKING_LIVE_STATUSES` tuple
+`recipient_conflict()` already uses for the real, enforced §3.5B rule — never a duplicated, driftable
+status list in `evaluation/metrics.py`. `FAILED` is (still, unchanged) the only status that frees a Live
+recipient identity; `DEMO_SIMULATED` never participates in either direction (rev 4); a blocking row that
+belongs to the SAME run as the proposal being evaluated does not count as "cross-run" — it's ordinary
+same-run recipient-conflict protection, a distinct (and much more common) case this metric deliberately
+does not conflate with the cross-visitor/cross-session guarantee it's meant to prove is doing real work.
+
+**Frontend: two new Quality-tab panels, additive types only.** `EnrichmentQualityPanel` and
+`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s existing shape — a metric grid plus a few
+badge-list breakdowns) render the two new blocks; `lib/types.ts` gained `EnrichmentMetrics`/
+`ActionMetrics` and `RunEvaluation` gained the two new fields, no existing field touched. Both panels
+render generically off whatever `Record<string, number>` the backend sends for reason/status/outcome
+maps — an unrecognized future value (a new blocked reason, a new reconciliation outcome) renders
+correctly with no frontend change required, never a hardcoded switch over a closed reason vocabulary. A
+`null` rate always renders as "—", never coerced to "0%" — the same discipline `SearchQualityPanel`
+already established for `source_utilization_rate`/`duplicate_retrieval_rate`, extended here. A run with
+zero governed-action activity gets one explicit sentence ("No governed action has been proposed for this
+run yet"), never a grid of zeroed-out counters that would misread as a failure.
+
+**What V2-J deliberately does NOT do.** No Ruff introduced; no `_client_key` consolidation across routers;
+no implementation of the deferred secure BFF-side rate-limiting redesign (documented as a decision record
+in `docs/DEPLOYMENT.md` instead — the correct fix requires verifying Render's real edge-header behavior
+against a live deployment, which this checkpoint's session does not have access to); no production
+rate-limit saturation experiment performed; no schema migration (none needed); `master` untouched; the
+single `feature/v2-contact-enrichment -> master` integration PR, the Neon `production` migration, and the
+`v2.0.0` tag are explicitly next-session/human-authorized steps, not part of this checkpoint's own commit.

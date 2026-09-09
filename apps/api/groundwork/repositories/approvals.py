@@ -130,3 +130,15 @@ class ApprovalRepository:
                 .order_by(ApprovalRow.decided_at.desc())
             )
             return result.scalars().first()
+
+    async def get_many(self, approval_ids: list[str]) -> dict[str, ApprovalRow]:
+        """V2-J evaluation metrics — batch lookup by primary key (e.g. every
+        `action_executions.approval_id` in a run), so the
+        approval-to-execution latency metric doesn't issue one query per
+        execution."""
+        ids = [i for i in approval_ids if i]
+        if not ids:
+            return {}
+        async with self._session_factory() as session:
+            result = await session.execute(select(ApprovalRow).where(ApprovalRow.id.in_(ids)))
+            return {row.id: row for row in result.scalars()}

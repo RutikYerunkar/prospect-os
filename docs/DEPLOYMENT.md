@@ -174,5 +174,82 @@ this document). Kept here, marked, so a future session doesn't have to re-derive
 6. **A decision on secrets management** for Render specifically — not verified by this session.
 7. **`scripts/prod_smoke.py`** (author-only — see its own docstring) is still the intended first thing
    to run against the real deployment to verify `/api/health`/`/api/ready` and a real Demo Mode run
-   end-to-end. Not run by this session (out of scope — no real Live Mode call, no direct access to the
+   end-to-end. As of V2-J it also asserts `/evaluation` carries the `enrichment`/`actions` blocks and
+   basic internal consistency between their fields — still Demo-only, still zero paid provider calls.
+   Not run by this session (out of scope — no real Live Mode call, no direct access to the
    production URLs beyond what was given in the task).
+
+## V2-J — production rate limiting (documentation-only for v2.0.0)
+
+No new rate-limiting code shipped in V2-J. This section records the real, already-shipped behavior and
+its known gap so a future session implementing the deferred redesign doesn't have to re-derive it.
+
+- **BFF/shared-bucket behavior.** Every rate limiter in this codebase (`api/rate_limit.py`'s
+  `SlidingWindowRateLimiter` — public-write, preview, operator-login, and the V2-H/I action-write
+  limiter) is in-process, per-`request.client.host`. The I2 same-origin proxy (`apps/web/app/api/
+  [...path]/route.ts`) is a Backend-For-Frontend: it forwards every browser request server-to-server, so
+  the API sees the *proxy's* IP for all browser traffic, not each individual visitor's. This collapses
+  every browser-driven caller onto ONE shared bucket per limiter, regardless of how many distinct real
+  visitors are hitting it — already true since I2 shipped, not a V2-J regression, but worth stating
+  plainly rather than leaving implicit.
+- **The Uvicorn/Render layer is INFERRED, not proven.** This session has no direct access to the real
+  Render dashboard or its network configuration. It is standard for a platform like Render to sit a
+  request through its own edge/load-balancer before an app's Uvicorn process ever sees it, and Render is
+  documented to set `X-Forwarded-For` there — but this codebase does not independently verify that for
+  this specific deployment, and `request.client.host` as FastAPI/Uvicorn resolves it depends on how (or
+  whether) `--proxy-headers`/`--forwarded-allow-ips` are configured on the Uvicorn process, which this
+  session did not inspect. Treat "the API sees the proxy's IP, and the proxy's IP is the only thing
+  worth rate-limiting on today" as the safe, conservative reading until a future session confirms the
+  Uvicorn layer's exact trust configuration against the real deployment.
+- **No blindly trusted `X-Forwarded-For`.** Nothing in this codebase reads `X-Forwarded-For` (or any
+  other client-supplied header) to determine the rate-limit key — `_client_key()` (in each router that
+  defines one) uses `request.client.host` only, which is whatever the ASGI server resolved as the
+  peer address. A malicious client cannot forge a header to evade or frame another caller under today's
+  code, precisely because no header is trusted for this purpose at all. The deferred design (below) must
+  preserve this property: if it ever does read a forwarded-for style header, it must do so only from a
+  layer proven to be trustworthy (the platform's own edge, never an arbitrary hop) — never take the
+  client's word for its own IP.
+- **Deferred secure BFF-side design.** Not implemented in v2.0.0. The shape sketched for a future session:
+  move rate limiting into the Next.js proxy itself (which DOES see each real visitor's IP, since it's the
+  first hop after the platform edge), keyed on a header the platform itself sets and the proxy can trust
+  (verified against Render's actual documented behavior, not assumed) — and reject any request lacking
+  that trusted header once verified, rather than falling back to a single shared bucket silently. This
+  was explicitly named in-scope for V2-J's folded-in I2 backlog and explicitly deferred again here: doing
+  it correctly requires verifying Render's real edge behavior against a live deployment, which this
+  session does not have credentials/access to do, and a *wrong* trust decision here (trusting a header an
+  attacker can set) is worse than today's coarser-but-safe shared-bucket behavior.
+- **Production rate-limit saturation experiment** (deliberately NOT performed during this implementation
+  session, per the V2-J task brief) — a future session with real deployment access should exercise each
+  limiter against the live Render/Neon stack to confirm the shared-bucket behavior above matches what's
+  actually observed, before relying on it as a security control rather than an abuse-shape mitigation.
+
+## V2-J — release/rollback sequence for `v2.0.0`
+
+Recorded here so the eventual integration session (not this one — this session does not merge, migrate,
+tag, or deploy anything) has a concrete checklist rather than reconstructing it under pressure:
+
+1. Confirm the single integration PR `feature/v2-contact-enrichment -> master` is green on every required
+   CI job (Backend SQLite, Backend Postgres + migration drift, Frontend lint/typecheck/test/build, API
+   Docker build) — the same bar every per-checkpoint PR into `feature/v2-contact-enrichment` already
+   cleared, now against `master`.
+2. **Migration-before-serve.** `alembic upgrade head` against the real Neon `production` database MUST
+   complete successfully BEFORE the new API image is allowed to serve traffic — this is the same
+   ordering V1's own deployment already required (see "Migration strategy" above); V2-J does not relax
+   it, and no V2-J commit ships a migration of its own (there is no schema change in this checkpoint) —
+   the requirement is restated here only because the *next* session's migration (V2-B through V2-I's
+   accumulated schema, if it hasn't already been applied to `production`) must still follow it.
+3. Deploy the API, then the frontend (the frontend's same-origin proxy depends on the API being reachable
+   and correctly versioned; the reverse ordering risks the frontend serving before the API it proxies to
+   is ready).
+4. Verify with `scripts/prod_smoke.py --base-url <production-url> --i-understand-this-targets-a-real-
+   deployment` — all four checks (health, ready, a real Demo run, and V2-J's `/evaluation` shape check)
+   green.
+5. Tag `v2.0.0` on the exact commit that was actually deployed (not the merge commit's parent, not a
+   later commit) — only after step 4 passes.
+6. **Rollback**, if any of the above fails after partial completion: redeploy the previous known-good API
+   image/commit (Render supports redeploying a prior build); the schema migration in step 2 is additive
+   only (V2-B through V2-I never drop/retype a v1 column or table — see CLAUDE.md's invariants), so a
+   rollback to the pre-V2 API image continues to work against the post-migration schema unmodified. Never
+   attempt an Alembic downgrade against `production` as part of a rollback — the additive-schema
+   guarantee already makes that unnecessary, and a downgrade is a strictly riskier operation than simply
+   redeploying an older, compatible image.
