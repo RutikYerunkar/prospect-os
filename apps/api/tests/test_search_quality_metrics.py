@@ -8,6 +8,8 @@ from groundwork.evaluation.metrics import compute_run_evaluation
 from groundwork.models.enums import Mode
 from groundwork.providers.demo.fixtures import load_fixture_pack
 from groundwork.providers.registry import build_provider_bundle
+from groundwork.repositories.actions import ActionRepository
+from groundwork.repositories.approvals import ApprovalRepository
 from groundwork.repositories.plays import PlayRepository
 
 
@@ -27,7 +29,9 @@ async def test_search_quality_metrics_computed_from_real_run(session_factory) ->
         max_concurrent_prospects=3, run_wall_clock_timeout_s=60,
     )
 
-    evaluation = await compute_run_evaluation(run_id, repos)
+    evaluation = await compute_run_evaluation(
+        run_id, repos, actions=ActionRepository(session_factory), approvals=ApprovalRepository(session_factory)
+    )
     sq = evaluation["search_quality"]
 
     assert sq["result_occurrences"] > 0
@@ -50,7 +54,9 @@ async def test_search_quality_metrics_null_for_run_with_no_prospects(session_fac
     play_id = await plays.create(name="empty", objective_text="t", icp_spec={}, mode="demo")
     run_id = await repos.runs.create(play_id=play_id, mode="demo", seed=1)
 
-    evaluation = await compute_run_evaluation(run_id, repos)
+    evaluation = await compute_run_evaluation(
+        run_id, repos, actions=ActionRepository(session_factory), approvals=ApprovalRepository(session_factory)
+    )
     sq = evaluation["search_quality"]
     assert sq["result_occurrences"] == 0
     assert sq["sources_retrieved_unique"] == 0

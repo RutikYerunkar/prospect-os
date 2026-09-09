@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
 
 # Checkpoint I1 Phase 10B — PR CI only. Every job runs entirely against
 # local/ephemeral resources (SQLite, a throwaway Postgres service

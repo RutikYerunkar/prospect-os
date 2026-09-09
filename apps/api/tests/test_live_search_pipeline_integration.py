@@ -35,6 +35,8 @@ _PLACEHOLDER_COMPANY = CompanySeed(
     industry="unknown", size_band="unknown", employee_count=0, hq_country="unknown",
 )
 from groundwork.providers.base import LLMOperation, LLMResult, ProviderBundle
+from groundwork.repositories.actions import ActionRepository
+from groundwork.repositories.approvals import ApprovalRepository
 from groundwork.repositories.plays import PlayRepository
 from tests.search_live_helpers import make_search_provider, search_response, search_result
 
@@ -121,7 +123,9 @@ async def test_full_live_run_produces_real_prospect_with_live_fetch_evidence(ses
     company_row = await repos.companies.get(await _company_id_for_prospect(repos, outcome.prospect_id))
     assert company_row.origin == "live_fetch"
 
-    evaluation = await compute_run_evaluation(run_id, repos)
+    evaluation = await compute_run_evaluation(
+        run_id, repos, actions=ActionRepository(session_factory), approvals=ApprovalRepository(session_factory)
+    )
     sq = evaluation["search_quality"]
     assert sq["result_occurrences"] >= 1
     assert sq["sources_used_as_evidence"] >= 1

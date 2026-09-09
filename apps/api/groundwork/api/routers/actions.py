@@ -607,6 +607,13 @@ async def execute_action(
 
     approval = await approvals.latest_for_proposal(proposal.id)
     if approval is None or approval.decision != "APPROVED" or approval.action_proposal_id != proposal.id:
+        await actions.record_event(
+            prospect_id=proposal.prospect_id,
+            type="execution_blocked",
+            actor=body.actor,
+            action_proposal_id=proposal.id,
+            payload={"blocked_reasons": ["not_approved"]},
+        )
         raise ConflictError("this proposal has no APPROVED action approval", code="NOT_APPROVED")
 
     if (
@@ -614,6 +621,13 @@ async def execute_action(
         or proposal.hash_version != HASH_VERSION
         or approval.hash_version != HASH_VERSION
     ):
+        await actions.record_event(
+            prospect_id=proposal.prospect_id,
+            type="execution_blocked",
+            actor=body.actor,
+            action_proposal_id=proposal.id,
+            payload={"blocked_reasons": ["approval_superseded"]},
+        )
         raise ConflictError("the approval no longer matches the current hash version", code="APPROVAL_SUPERSEDED")
 
     connected_sender: str | None = None
@@ -626,8 +640,22 @@ async def execute_action(
         # independently distinguishable, exactly as the frozen "all five
         # Live gates independently reject" test matrix requires).
         if not connected_sender:
+            await actions.record_event(
+                prospect_id=proposal.prospect_id,
+                type="execution_blocked",
+                actor=body.actor,
+                action_proposal_id=proposal.id,
+                payload={"blocked_reasons": ["sender_not_connected"]},
+            )
             raise ConflictError("no send identity is currently connected", code="SENDER_NOT_CONNECTED")
         if not hmac.compare_digest(connected_sender, proposal.sender_identifier or ""):
+            await actions.record_event(
+                prospect_id=proposal.prospect_id,
+                type="execution_blocked",
+                actor=body.actor,
+                action_proposal_id=proposal.id,
+                payload={"blocked_reasons": ["sender_changed"]},
+            )
             raise ConflictError(
                 "the connected sending identity no longer matches this proposal", code="SENDER_CHANGED"
             )
@@ -649,6 +677,13 @@ async def execute_action(
     )
 
     if not hmac.compare_digest(recomputed_hash, approval.content_hash):
+        await actions.record_event(
+            prospect_id=proposal.prospect_id,
+            type="execution_blocked",
+            actor=body.actor,
+            action_proposal_id=proposal.id,
+            payload={"blocked_reasons": ["content_changed"]},
+        )
         raise ConflictError("the draft changed after approval", code="CONTENT_CHANGED")
 
     policy_result = await _evaluate_policy(

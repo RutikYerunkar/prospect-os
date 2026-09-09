@@ -494,6 +494,55 @@ export interface SearchQualityMetrics {
   domain_resolution_method_counts: Record<string, number>;
 }
 
+// V2-J §1 — enrichment metrics, computed on read from `enrichment_calls`/
+// `contact_channels`/`contact_enrichments`. Every rate is `number | null` —
+// `null` means "no denominator," rendered as "—", never coerced to 0%.
+export interface EnrichmentMetrics {
+  attempted: number;
+  matched: number;
+  match_rate: number | null;
+  email_found_rate: number | null;
+  email_verified_rate: number | null;
+  catch_all_rate: number | null;
+  linkedin_resolved_rate: number | null;
+  identity_match_distribution: Record<string, number>;
+  identifier_grammar_rejections: number;
+  provider_error_rate: number | null;
+  not_attempted_budget_count: number;
+  enrichment_attempts_by_status: Record<string, number>;
+  stale_channel_count: number;
+  preserved_last_known_good_count: number;
+  preserved_last_known_good_breakdown: Record<string, number>;
+  p50_enrichment_latency_ms: number | null;
+  p95_enrichment_latency_ms: number | null;
+  enrichment_credits_used: number | null;
+  enrichment_cost_usd: number | null;
+  enrichment_calls: number;
+}
+
+// V2-J §2/§3 — governed action-proposal/execution/reconciliation
+// observability, computed on read from `action_proposals`/
+// `action_executions`/`action_events`/`approvals`. Proposal-time
+// `blocked_reasons` and execution-time `execution_blocked_reasons` are
+// kept strictly separate — never merged into one map.
+export interface ActionMetrics {
+  proposals_by_verdict: Record<string, number>;
+  blocked_reasons: Record<string, number>;
+  execution_blocked_reasons: Record<string, number>;
+  execution_blocked_attempts: number;
+  execution_blocked_proposals: number;
+  content_hash_mismatch_count: number;
+  approval_to_execution_latency_p50_ms: number | null;
+  approval_to_execution_latency_p95_ms: number | null;
+  executions_by_status: Record<string, number>;
+  executions_by_origin: Record<string, number>;
+  uncertain_count: number;
+  reconciliation_outcomes: Record<string, number>;
+  mean_messages_scanned_per_reconcile: number | null;
+  cross_run_recipient_blocks: number;
+  cross_run_recipient_blocked_proposals: number;
+}
+
 export interface RunEvaluation {
   run_id: string;
   volume: VolumeMetrics;
@@ -502,6 +551,8 @@ export interface RunEvaluation {
   guardrails: GuardrailMetric[];
   llm_usage: LLMUsage;
   search_quality: SearchQualityMetrics;
+  enrichment: EnrichmentMetrics;
+  actions: ActionMetrics;
 }
 
 // --- settings ---
