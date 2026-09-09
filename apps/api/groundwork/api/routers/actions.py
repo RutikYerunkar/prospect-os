@@ -878,11 +878,19 @@ async def reconcile_execution(
     is_operator: IsOperatorDep,
 ) -> ActionReconcileResponse:
     """§3.3 bounded reconciliation — operator-gated, one bounded attempt per
-    eligible call, no scheduler/background worker. `NOT_FOUND_WITHIN_BOUNDS`
-    and `LOOKUP_FAILED` NEVER convert to `FAILED` — the execution stays
-    `UNCERTAIN`. Zero-egress triage happens BEFORE any Gmail call: attempts
-    exhausted with the window still open stays `UNCERTAIN` with zero calls;
-    a window that has expired settles to `ABANDONED` with zero calls."""
+    eligible call, no scheduler/background worker. `NOT_FOUND_WITHIN_BOUNDS`,
+    `AMBIGUOUS`, `HISTORY_EXPIRED`, and `LOOKUP_FAILED` NEVER convert to
+    `FAILED` — the execution stays `UNCERTAIN`. Zero-egress triage happens
+    BEFORE any Gmail call: attempts exhausted with the window still open
+    stays `UNCERTAIN` with zero calls; a window that has expired settles to
+    `ABANDONED` with zero calls.
+
+    V2-I-b correction (post-smoke): matching is anchored on the persisted
+    `pre_dispatch_history_id` plus approved Subject/To/From/Date
+    (`domain/reconciliation_match.py`), NOT on `message_id_header` — the
+    real smoke send proved Gmail can omit our generated header from both
+    `Message-ID` and `X-Google-Original-Message-ID`. See
+    `docs/PROGRESS.md`'s V2-I-b entry for the full account."""
     require_operator(is_operator)
     require_allowed_origin(request)
 
@@ -893,8 +901,18 @@ async def reconcile_execution(
         raise ConflictError(
             f"execution status is {execution.status!r}, not UNCERTAIN — nothing to reconcile", code="NOT_UNCERTAIN"
         )
-    if not execution.message_id_header or not execution.dispatched_at:
-        raise ConflictError("execution has no message_id_header/dispatched_at — cannot reconcile", code="NOT_RECONCILABLE")
+    if not execution.pre_dispatch_history_id or not execution.dispatched_at or not execution.settled_at:
+        raise ConflictError(
+            "execution has no pre_dispatch_history_id/dispatched_at/settled_at — cannot reconcile",
+            code="NOT_RECONCILABLE",
+        )
+
+    proposal = await actions.get_proposal(execution.action_proposal_id)
+    if proposal is None:
+        raise UnprocessableEntityError("the proposal for this execution no longer exists")
+    draft = await actions.get_draft(proposal.draft_id)
+    if draft is None:
+        raise UnprocessableEntityError("the draft for this execution's proposal no longer exists")
 
     now = datetime.now(timezone.utc)
     # SQLite drops tzinfo on read (`groundwork/timeutil.py`) — every
@@ -903,7 +921,8 @@ async def reconcile_execution(
     # raises `TypeError: can't compare offset-naive and offset-aware
     # datetimes` instead of ever reaching the intended zero-egress logic.
     dispatched_at = ensure_aware(execution.dispatched_at)
-    assert dispatched_at is not None
+    settled_at = ensure_aware(execution.settled_at)
+    assert dispatched_at is not None and settled_at is not None
     window_deadline = dispatched_at + timedelta(seconds=settings.reconcile_window_s)
 
     # --- zero-egress triage — BEFORE any Gmail call ----------------------
@@ -940,8 +959,15 @@ async def reconcile_execution(
         max_messages=settings.reconcile_max_messages,
         clock_skew_s=settings.reconcile_clock_skew_s,
     )
+    clock_skew = timedelta(seconds=settings.reconcile_clock_skew_s)
     result = await provider.find_sent_message(
-        message_id_header=execution.message_id_header, sent_after=dispatched_at, bounds=bounds
+        pre_dispatch_history_id=execution.pre_dispatch_history_id,
+        expected_subject=draft.subject or "",
+        expected_recipient_identifier=proposal.recipient_identifier or "",
+        expected_sender_identifier=proposal.sender_identifier or "",
+        window_start=dispatched_at - clock_skew,
+        window_end=settled_at + clock_skew,
+        bounds=bounds,
     )
     await actions.insert_send_calls_from_telemetry(execution.id, result.telemetry)
 
@@ -964,7 +990,8 @@ async def reconcile_execution(
             )
         )
 
-    # NOT_FOUND_WITHIN_BOUNDS or LOOKUP_FAILED — never FAILED; bookkeeping only.
+    # NOT_FOUND_WITHIN_BOUNDS, AMBIGUOUS, HISTORY_EXPIRED, or LOOKUP_FAILED —
+    # never FAILED; bookkeeping only, distinctly labeled via result.status.
     updated = await actions.record_reconcile_attempt(
         execution.id, messages_scanned_delta=result.messages_scanned, reconciled_at=now
     )

@@ -689,6 +689,20 @@ class ActionExecutionRow(Base):
     origin: Mapped[str] = mapped_column(String)  # ActionExecutionOrigin
 
     message_id_header: Mapped[str | None] = mapped_column(String, nullable=True)
+    # V2-I-b correction (post-smoke) — the Gmail mailbox history checkpoint
+    # (`users.getProfile`'s own `historyId`), captured and persisted BEFORE
+    # `messages.send` is ever called. The load-bearing reconciliation
+    # anchor: the real smoke send proved Gmail can omit our generated
+    # `message_id_header` from BOTH `Message-ID` and
+    # `X-Google-Original-Message-ID` on the sent message, so reconciliation
+    # no longer depends on it. Stored as `String`, never a 32-bit int —
+    # Gmail's `historyId` is an opaque, unboundedly-growing decimal counter
+    # (serialized as a JSON string by the API itself); this column
+    # preserves it losslessly rather than assuming it fits any fixed-width
+    # integer type. NULL for every execution created before this
+    # correction, and for `DEMO_SIMULATED` executions (which never
+    # reconcile at all).
+    pre_dispatch_history_id: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
     executor_id: Mapped[str | None] = mapped_column(String, nullable=True)

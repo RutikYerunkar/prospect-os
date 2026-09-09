@@ -23,12 +23,28 @@ does NOT by itself make Live sending reachable —
 unconditionally raises `LiveExternalEmailSendDisabled` until that refusal is
 deliberately removed (see docs/PROGRESS.md's refusal-removal gate).
 
-Reconciliation (§3.3) — `find_sent_message()` — uses ONLY
-`messages.list(labelIds=["SENT"])` (never `q`, never `gmail.readonly`) and
-`messages.get(format="metadata", metadataHeaders=[...])`, and deliberately
-does NOT early-stop on `internalDate`: it scans the entire bounded result
-set (up to `bounds.max_pages`/`bounds.max_messages`) regardless of result
-ordering, because Gmail's ordering is not a contract this code depends on.
+Reconciliation (§3.3) — V2-I-b correction, post-smoke. The original design
+compared a candidate message's `Message-ID`/`X-Google-Original-Message-ID`
+headers against our own generated `message_id_header`. The one authorized
+real Gmail smoke disproved that: the actually-sent message carried NEITHER
+header (`format=metadata` on the exact `provider_message_id` returned
+`Message-ID` and `X-Google-Original-Message-ID` both absent; Subject/To/
+From/Date were all present and matched). Reconciliation is now anchored on
+`get_history_checkpoint()`'s `historyId` (`users.getProfile`, captured and
+persisted BEFORE `messages.send`) and `find_sent_message()`'s
+`users.history.list(startHistoryId=..., labelId="SENT",
+historyTypes=["messageAdded"])` scan, with candidates matched via
+`domain/reconciliation_match.py::candidate_matches` against the approved
+Subject/recipient/sender and a dispatch/settle time window — never against
+the generated Message-ID. `message_id_header` is still generated and
+persisted (historical/audit compatibility only); nothing in this module's
+reconciliation path reads it any more. Both calls use ONLY `gmail.metadata`-
+scoped operations (never `q`, never `gmail.readonly`, never `format=full`/
+`raw`) and, like the original scan, deliberately do NOT early-stop on the
+first match — ALL bounded candidates are evaluated before deciding, because
+"exactly one candidate matches" (`FOUND`) must be distinguished from "more
+than one candidate matches" (`AMBIGUOUS`), which a first-match short-circuit
+could never detect.
 """
 
 from __future__ import annotations
@@ -38,7 +54,7 @@ from datetime import datetime, timezone
 import httpx
 
 from groundwork.domain.contact_identity import InvalidEmailIdentity, normalize_email_identity
-from groundwork.domain.message_id import message_id_matches
+from groundwork.domain.reconciliation_match import candidate_matches
 from groundwork.domain.send_classifier import DispatchPhase, classify_send_outcome
 from groundwork.models.enums import SendOutcome
 from groundwork.providers.live.gmail_mime import build_raw_message
@@ -54,7 +70,9 @@ from groundwork.providers.send_base import (
 )
 
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
-GMAIL_MESSAGES_LIST_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+# V2-I-b correction (post-smoke): reconciliation no longer calls
+# messages.list — see GMAIL_HISTORY_LIST_URL below.
+GMAIL_HISTORY_LIST_URL = "https://gmail.googleapis.com/gmail/v1/users/me/history"
 
 
 def _gmail_message_url(message_id: str) -> str:
@@ -221,10 +239,38 @@ class GmailSendProvider:
             ],
         )
 
-    # --- reconciliation (§3.3) -------------------------------------------
+    # --- pre-dispatch history checkpoint (V2-I-b correction) -------------
+
+    async def get_history_checkpoint(self) -> str | None:
+        """`users.getProfile`'s own `historyId` — the SAME call
+        `GoogleOAuthRuntime.get_profile` already makes for the connect
+        flow's account-email resolution, already covered by
+        `gmail.metadata` (no new scope). Never raises: any transport/auth/
+        shape failure returns `None`, and the caller
+        (`dispatch_live_email_send`) fails closed rather than dispatching
+        without a confirmed, persisted checkpoint."""
+        try:
+            access_token = await self._oauth_runtime.refresh_access_token(refresh_token=self._refresh_token)
+            profile = await self._oauth_runtime.get_profile(access_token=access_token)
+        except GoogleOAuthError:
+            return None
+        history_id = profile.get("historyId")
+        if not isinstance(history_id, str) or not history_id:
+            return None
+        return history_id
+
+    # --- reconciliation (§3.3, V2-I-b correction) -------------------------
 
     async def find_sent_message(
-        self, *, message_id_header: str, sent_after: datetime, bounds: ReconcileBounds
+        self,
+        *,
+        pre_dispatch_history_id: str,
+        expected_subject: str,
+        expected_recipient_identifier: str,
+        expected_sender_identifier: str,
+        window_start: datetime,
+        window_end: datetime,
+        bounds: ReconcileBounds,
     ) -> ReconcileResult:
         started = datetime.now(timezone.utc)
         try:
@@ -237,18 +283,28 @@ class GmailSendProvider:
             )
 
         telemetry: list[SendAttemptTelemetry] = []
-        messages_scanned = 0
+        candidate_ids: list[str] = []
         page_token: str | None = None
         pages = 0
 
-        while pages < bounds.max_pages and messages_scanned < bounds.max_messages:
+        # --- users.history.list: collect candidate message ids from SENT
+        # messageAdded entries after the checkpoint. A 404 here is Gmail's
+        # documented "startHistoryId is outside the retention window"
+        # signal — distinct from every other failure, never silently
+        # folded into LOOKUP_FAILED. ---------------------------------------
+        while pages < bounds.max_pages and len(candidate_ids) < bounds.max_messages:
             list_started = datetime.now(timezone.utc)
-            params: dict[str, str | int] = {"labelIds": "SENT", "maxResults": bounds.page_size}
+            params: dict[str, str | int | list[str]] = {
+                "startHistoryId": pre_dispatch_history_id,
+                "labelId": "SENT",
+                "historyTypes": ["messageAdded"],
+                "maxResults": bounds.page_size,
+            }
             if page_token:
                 params["pageToken"] = page_token
             try:
                 list_response = await self._client.get(
-                    GMAIL_MESSAGES_LIST_URL,
+                    GMAIL_HISTORY_LIST_URL,
                     params=params,
                     headers={"Authorization": f"Bearer {access_token}"},
                     timeout=self._call_deadline_s,
@@ -258,70 +314,99 @@ class GmailSendProvider:
                     self._reconcile_telemetry(list_started, error_type=type(exc).__name__, error_message=str(exc))
                 )
                 return ReconcileResult(
-                    status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=messages_scanned, telemetry=telemetry
+                    status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=0, telemetry=telemetry
                 )
             pages += 1
             telemetry.append(self._reconcile_telemetry(list_started, http_status=list_response.status_code))
+            if list_response.status_code == 404:
+                return ReconcileResult(status=ReconcileStatus.HISTORY_EXPIRED, messages_scanned=0, telemetry=telemetry)
             if list_response.status_code != 200:
-                return ReconcileResult(
-                    status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=messages_scanned, telemetry=telemetry
-                )
+                return ReconcileResult(status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=0, telemetry=telemetry)
             try:
                 list_body = list_response.json()
             except ValueError:
-                return ReconcileResult(
-                    status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=messages_scanned, telemetry=telemetry
-                )
-            ids = [m.get("id") for m in (list_body.get("messages") or []) if isinstance(m, dict) and m.get("id")]
+                return ReconcileResult(status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=0, telemetry=telemetry)
+
+            for entry in list_body.get("history") or []:
+                if not isinstance(entry, dict):
+                    continue
+                for added in entry.get("messagesAdded") or []:
+                    if not isinstance(added, dict):
+                        continue
+                    message = added.get("message")
+                    if isinstance(message, dict) and isinstance(message.get("id"), str):
+                        mid = message["id"]
+                        if mid not in candidate_ids:
+                            candidate_ids.append(mid)
             page_token = list_body.get("nextPageToken")
-
-            for message_id in ids:
-                if messages_scanned >= bounds.max_messages:
-                    break
-                get_started = datetime.now(timezone.utc)
-                try:
-                    get_response = await self._client.get(
-                        _gmail_message_url(message_id),
-                        params={"format": "metadata", "metadataHeaders": ["Message-ID", "X-Google-Original-Message-ID", "Date"]},
-                        headers={"Authorization": f"Bearer {access_token}"},
-                        timeout=self._call_deadline_s,
-                    )
-                except httpx.HTTPError as exc:
-                    telemetry.append(
-                        self._reconcile_telemetry(get_started, error_type=type(exc).__name__, error_message=str(exc))
-                    )
-                    return ReconcileResult(
-                        status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=messages_scanned, telemetry=telemetry
-                    )
-                messages_scanned += 1
-                telemetry.append(self._reconcile_telemetry(get_started, http_status=get_response.status_code))
-                if get_response.status_code != 200:
-                    continue
-                try:
-                    get_body = get_response.json()
-                except ValueError:
-                    continue
-                headers = {
-                    h.get("name"): h.get("value")
-                    for h in (get_body.get("payload") or {}).get("headers", [])
-                    if isinstance(h, dict)
-                }
-                if message_id_matches(
-                    message_id_header,
-                    message_id=headers.get("Message-ID"),
-                    x_google_original_message_id=headers.get("X-Google-Original-Message-ID"),
-                ):
-                    return ReconcileResult(
-                        status=ReconcileStatus.FOUND,
-                        provider_message_id=message_id,
-                        messages_scanned=messages_scanned,
-                        scanned_past_dispatch=True,
-                        telemetry=telemetry,
-                    )
-
             if not page_token:
                 break
 
+        candidate_ids = candidate_ids[: bounds.max_messages]
+
+        # --- messages.get(format=metadata) per candidate, ALL bounded
+        # candidates evaluated (never short-circuit on the first match) —
+        # "exactly one matches" (FOUND) must be distinguishable from "more
+        # than one matches" (AMBIGUOUS). ------------------------------------
+        matches: list[str] = []
+        messages_scanned = 0
+        for message_id in candidate_ids:
+            get_started = datetime.now(timezone.utc)
+            try:
+                get_response = await self._client.get(
+                    _gmail_message_url(message_id),
+                    params={"format": "metadata", "metadataHeaders": ["Subject", "To", "From", "Date"]},
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=self._call_deadline_s,
+                )
+            except httpx.HTTPError as exc:
+                telemetry.append(
+                    self._reconcile_telemetry(get_started, error_type=type(exc).__name__, error_message=str(exc))
+                )
+                return ReconcileResult(
+                    status=ReconcileStatus.LOOKUP_FAILED, messages_scanned=messages_scanned, telemetry=telemetry
+                )
+            messages_scanned += 1
+            telemetry.append(self._reconcile_telemetry(get_started, http_status=get_response.status_code))
+            if get_response.status_code != 200:
+                continue
+            try:
+                get_body = get_response.json()
+            except ValueError:
+                continue
+            headers = {
+                h.get("name"): h.get("value")
+                for h in (get_body.get("payload") or {}).get("headers", [])
+                if isinstance(h, dict)
+            }
+            if candidate_matches(
+                expected_subject=expected_subject,
+                expected_recipient_identifier=expected_recipient_identifier,
+                expected_sender_identifier=expected_sender_identifier,
+                candidate_subject=headers.get("Subject"),
+                candidate_to=headers.get("To"),
+                candidate_from=headers.get("From"),
+                candidate_date=headers.get("Date"),
+                window_start=window_start,
+                window_end=window_end,
+            ):
+                matches.append(message_id)
+
+        if len(matches) == 1:
+            return ReconcileResult(
+                status=ReconcileStatus.FOUND,
+                provider_message_id=matches[0],
+                messages_scanned=messages_scanned,
+                scanned_past_dispatch=True,
+                telemetry=telemetry,
+            )
+        if len(matches) > 1:
+            return ReconcileResult(
+                status=ReconcileStatus.AMBIGUOUS,
+                messages_scanned=messages_scanned,
+                scanned_past_dispatch=messages_scanned > 0,
+                telemetry=telemetry,
+            )
         return ReconcileResult(
             status=ReconcileStatus.NOT_FOUND_WITHIN_BOUNDS,
             messages_scanned=messages_scanned,

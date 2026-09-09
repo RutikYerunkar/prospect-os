@@ -172,13 +172,37 @@ class EmailSendProvider(Protocol):
         """V2-H (Demo)/V2-I (Live) scope — not called anywhere in V2-G."""
         ...
 
+    async def get_history_checkpoint(self) -> str | None:
+        """V2-I-b correction (post-smoke) — a pre-dispatch Gmail mailbox
+        history checkpoint (`users.getProfile`'s own `historyId`), captured
+        and persisted BEFORE `send()` is ever called
+        (`api/live_send_orchestration.py::dispatch_live_email_send`).
+        `None` on any failure (never raises) — the caller fails closed and
+        does not dispatch. Meaningless for `DemoEmailSendProvider`, which
+        never reaches this call site at all (Demo dispatch never goes
+        through `dispatch_live_email_send`)."""
+        ...
+
     async def find_sent_message(
-        self, *, message_id_header: str, sent_after: datetime, bounds: ReconcileBounds
+        self,
+        *,
+        pre_dispatch_history_id: str,
+        expected_subject: str,
+        expected_recipient_identifier: str,
+        expected_sender_identifier: str,
+        window_start: datetime,
+        window_end: datetime,
+        bounds: ReconcileBounds,
     ) -> ReconcileResult:
-        """V2-I scope (§3.3 bounded reconciliation) — not called anywhere
-        in V2-G. `NOT_FOUND_WITHIN_BOUNDS` rather than `None` is the point:
-        the type refuses to let a caller read "we didn't find it" as "it
-        wasn't sent.\""""
+        """§3.3 bounded reconciliation — V2-I-b correction (post-smoke):
+        anchored on `pre_dispatch_history_id` (`users.history.list`) plus
+        approved-metadata matching (`domain/reconciliation_match.py`), NOT
+        on Gmail preserving our generated `message_id_header` — the real
+        smoke send proved it does not reliably do so.
+        `NOT_FOUND_WITHIN_BOUNDS`/`AMBIGUOUS` rather than `None` is the
+        point: the type refuses to let a caller read "no candidate
+        matched" or "more than one candidate matched" as "it wasn't
+        sent.\""""
         ...
 
 
@@ -198,9 +222,10 @@ class DemoEmailSendProvider:
     members — those are exercised by `domain/action_policy.py`'s pure unit
     tests and, for a real provider, by V2-I.
 
-    `find_sent_message()` still raises `NotImplementedError` — reconciliation
-    is meaningless for a synchronous, always-immediately-settled send; V2-H
-    never calls it.
+    `get_history_checkpoint()`/`find_sent_message()` still raise
+    `NotImplementedError` — reconciliation is meaningless for a
+    synchronous, always-immediately-settled send; Demo dispatch never
+    calls either (it never goes through `dispatch_live_email_send`).
     """
 
     name = "demo"
@@ -230,10 +255,26 @@ class DemoEmailSendProvider:
             ],
         )
 
+    async def get_history_checkpoint(self) -> str | None:
+        raise NotImplementedError(
+            "no history checkpoint concept exists for DemoEmailSendProvider's synchronous, "
+            "always-immediately-settled send — never called (Demo dispatch never goes through "
+            "dispatch_live_email_send)"
+        )
+
     async def find_sent_message(
-        self, *, message_id_header: str, sent_after: datetime, bounds: ReconcileBounds
+        self,
+        *,
+        pre_dispatch_history_id: str,
+        expected_subject: str,
+        expected_recipient_identifier: str,
+        expected_sender_identifier: str,
+        window_start: datetime,
+        window_end: datetime,
+        bounds: ReconcileBounds,
     ) -> ReconcileResult:
         raise NotImplementedError(
             "reconciliation is meaningless for DemoEmailSendProvider's synchronous, "
-            "always-immediately-settled send — never called in V2-H"
+            "always-immediately-settled send — never called (Demo dispatch never goes through "
+            "dispatch_live_email_send)"
         )

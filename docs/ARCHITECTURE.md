@@ -550,7 +550,7 @@ that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no se
   set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
   checkpoint — there is deliberately no clear/override endpoint.
 
-### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal removed, real dispatch reachable
+### V2-I-b — real Live Gmail execution, reconciliation, audit; refusal removed, one real smoke performed, reconciliation corrected post-smoke
 
 A real `GmailSendProvider` and the full dispatch/reconciliation/allowance/audit path now exist, fully
 implemented and independently tested, AND wired into the real dispatch path —
@@ -588,12 +588,17 @@ final state. See `docs/PROGRESS.md`'s "What V2-I-b added" for the full three-sta
   unchanged from V2-H/V2-I-a/V2-I-b's earlier phases; only the refusal step was removed, and only from this
   one call site.
 - **Dispatch ordering is the crash-recovery guarantee, not a convenience.** `CLAIMED` (write-ahead,
-  carrying the generated Message-ID) commits BEFORE the allowance reservation, which commits BEFORE the
-  guarded `IN_FLIGHT` transition, which commits BEFORE the one Gmail HTTP call. A process crash at any
-  point before `IN_FLIGHT` leaves a row the stale-claim sweep (`POST .../recover`) can safely resolve
-  without ever having dispatched; a crash after `IN_FLIGHT` but before settling leaves a row that
-  reconciliation (`POST .../reconcile`) or, eventually, `recover` can resolve to `UNCERTAIN` — never
-  re-dispatched, never guessed.
+  carrying the generated Message-ID) commits BEFORE the pre-dispatch Gmail mailbox history checkpoint
+  (`get_history_checkpoint()`/`users.getProfile`) is acquired and persisted, which commits BEFORE the
+  allowance reservation, which commits BEFORE the guarded `IN_FLIGHT` transition, which commits BEFORE the
+  one Gmail HTTP call. The checkpoint sits between `CLAIMED` and the allowance deliberately: it needs a real
+  execution id to persist against (so it can't come before `CLAIMED`), and a transient checkpoint-acquisition
+  failure must never burn one of the day's limited Live sends (so it must come before the allowance is
+  touched) — it settles `FAILED`/`PROVEN_NOT_DISPATCHED` immediately on failure, exactly like an allowance
+  denial does, reaching Gmail no further. A process crash at any point before `IN_FLIGHT` leaves a row the
+  stale-claim sweep (`POST .../recover`) can safely resolve without ever having dispatched; a crash after
+  `IN_FLIGHT` but before settling leaves a row that reconciliation (`POST .../reconcile`) or, eventually,
+  `recover` can resolve to `UNCERTAIN` — never re-dispatched, never guessed.
 - **The allowance is a belt-and-braces pair, exactly like §3.5B's own precedent.** `domain/action_policy.
   py` clause 14 is a pre-check (denies with a clear `send_allowance_exhausted` reason before any write);
   `LiveSendAllowanceRepository.try_reserve()`'s guarded transaction is the actual guarantee (a narrow race
@@ -607,9 +612,25 @@ final state. See `docs/PROGRESS.md`'s "What V2-I-b added" for the full three-sta
   invisible before V2-I-b, because Live could never previously reach `SUCCEEDED`/`UNCERTAIN` to retry
   against. Fixed by `exclude_proposal_id` on `recipient_conflict()` — see `docs/PROGRESS.md`'s "What
   V2-I-b added" for the full account.
-- **Reconciliation never expands the OAuth scope.** `messages.list(labelIds=["SENT"])` + bounded
-  `messages.get(format="metadata", ...)` — never `q`, never `gmail.readonly` — confirming V2-G's own hard
-  gate finding (metadata-only reconciliation is viable) held through real implementation.
+- **Reconciliation never expands the OAuth scope, and — since the post-smoke correction — no longer
+  depends on Gmail preserving our generated Message-ID.** The one authorized real Gmail smoke succeeded,
+  and a read-only follow-up diagnostic fetching that exact sent message by its `provider_message_id` found
+  `Message-ID` and `X-Google-Original-Message-ID` BOTH absent from Gmail's `format=metadata` response —
+  Subject/To/From/Date were present and matched. The original design's core assumption (Gmail preserves a
+  caller-supplied Message-ID) was disproven on the one real message this session is authorized to have
+  sent. Reconciliation was rebuilt on `users.history.list(startHistoryId=<pre-dispatch checkpoint>,
+  labelId="SENT", historyTypes=["messageAdded"])` + `messages.get(format="metadata",
+  metadataHeaders=[Subject,To,From,Date])` — still `gmail.metadata`-scoped only, still never `q`, still
+  never body/`full`/`raw`, never `gmail.readonly`. A new pure module, `domain/reconciliation_match.py`,
+  decides matches: canonicalized Subject equality (RFC-2047-aware, not naive raw-string comparison),
+  normalized To/From identity match, and Date within the dispatch/settle window (the same clock-skew
+  tolerance as before). ALL bounded candidates are evaluated before deciding — a first-match short-circuit
+  would be unable to distinguish `FOUND` (exactly one match) from the new `AMBIGUOUS` status (more than
+  one) — and a `404` from `history.list` (Gmail's "checkpoint too old" signal) is a new, distinct
+  `HISTORY_EXPIRED` status. Both new statuses, like `NOT_FOUND_WITHIN_BOUNDS`/`LOOKUP_FAILED` before them,
+  stay `UNCERTAIN` — never `FAILED`, never a guess. `message_id_header` is still generated and persisted
+  for historical/audit compatibility; nothing in the reconciliation path reads it any more. See
+  `docs/PROGRESS.md`'s "V2-I-b reconciliation correction" for the full account.
 - **`ABANDONED` is honest, not a euphemism for "probably not sent."** The audit copy states plainly that
   reaching `ABANDONED` is not evidence the message wasn't sent — Groundwork simply stopped checking. The
   recipient identity stays blocked permanently; there is no resend anywhere in this codebase.

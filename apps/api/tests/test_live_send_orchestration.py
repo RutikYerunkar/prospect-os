@@ -102,7 +102,10 @@ async def test_dispatch_ordering_claimed_before_allowance_before_in_flight_befor
     proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
     actions = ActionRepository(session_factory)
     allowance = LiveSendAllowanceRepository(session_factory)
-    provider, transport = make_provider(send_steps=[(200, {"id": "gmail-msg-1"})])
+    provider, transport = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        send_steps=[(200, {"id": "gmail-msg-1"})],
+    )
 
     async with session_factory() as session:
         from sqlalchemy import select
@@ -140,7 +143,10 @@ async def test_request_idempotency_duplicate_call_never_dispatches_twice(session
     proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
     actions = ActionRepository(session_factory)
     allowance = LiveSendAllowanceRepository(session_factory)
-    provider, transport = make_provider(send_steps=[(200, {"id": "gmail-msg-2"})])
+    provider, transport = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        send_steps=[(200, {"id": "gmail-msg-2"})],
+    )
 
     from sqlalchemy import select
 
@@ -194,7 +200,10 @@ async def test_ambiguous_outcome_settles_uncertain_never_auto_resent(session_fac
     proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
     actions = ActionRepository(session_factory)
     allowance = LiveSendAllowanceRepository(session_factory)
-    provider, transport = make_provider(send_steps=[(503, {"error": "backend error"})])
+    provider, transport = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        send_steps=[(503, {"error": "backend error"})],
+    )
 
     from sqlalchemy import select
 
@@ -220,7 +229,10 @@ async def test_definitive_rejection_settles_failed_and_frees_recipient(session_f
     proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
     actions = ActionRepository(session_factory)
     allowance = LiveSendAllowanceRepository(session_factory)
-    provider, _ = make_provider(send_steps=[(400, {"error": "malformed"})])
+    provider, _ = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        send_steps=[(400, {"error": "malformed"})],
+    )
 
     from sqlalchemy import select
 
@@ -240,3 +252,137 @@ async def test_definitive_rejection_settles_failed_and_frees_recipient(session_f
     # confirm no lingering CLAIMED/IN_FLIGHT row blocks a retry proposal.
     conflict = await actions.recipient_conflict(proposal_dict["recipient_identity_key"])
     assert conflict.value == "NONE"
+
+
+# --- V2-I-b correction (post-smoke): pre-dispatch history checkpoint -------
+
+
+async def test_checkpoint_captured_and_persisted_before_send(session_factory):
+    proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
+    actions = ActionRepository(session_factory)
+    allowance = LiveSendAllowanceRepository(session_factory)
+    provider, transport = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        profile_steps=[(200, {"historyId": "999888777"})],
+        send_steps=[(200, {"id": "gmail-msg-checkpoint"})],
+    )
+
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        proposal_row = (
+            await session.execute(select(ActionProposalRow).where(ActionProposalRow.id == proposal_dict["id"]))
+        ).scalar_one()
+        approval_row = (await session.execute(select(ApprovalRow).where(ApprovalRow.id == approval_id))).scalar_one()
+
+    settled = await dispatch_live_email_send(
+        actions=actions, allowance=allowance, provider=provider, proposal=proposal_row, approval=approval_row,
+        draft=draft, idempotency_key=f"idem-{uuid.uuid4()}", live_max_sends_per_day=50,
+    )
+    assert settled.status == "SUCCEEDED"
+    assert settled.pre_dispatch_history_id == "999888777"
+    # The checkpoint (profile GET) happened before the one send call.
+    profile_calls = [r for r in transport.requests if str(r.url).endswith("/profile")]
+    send_calls = [r for r in transport.requests if "messages/send" in str(r.url)]
+    assert len(profile_calls) == 1
+    assert len(send_calls) == 1
+    assert transport.requests.index(profile_calls[0]) < transport.requests.index(send_calls[0])
+
+
+async def test_checkpoint_acquisition_failure_makes_zero_send_calls(session_factory):
+    proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
+    actions = ActionRepository(session_factory)
+    allowance = LiveSendAllowanceRepository(session_factory)
+    provider, transport = make_provider(
+        profile_steps=[(500, {"error": "server error"})],
+        send_steps=[(200, {"id": "should-not-be-used"})],
+    )
+
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        proposal_row = (
+            await session.execute(select(ActionProposalRow).where(ActionProposalRow.id == proposal_dict["id"]))
+        ).scalar_one()
+        approval_row = (await session.execute(select(ApprovalRow).where(ApprovalRow.id == approval_id))).scalar_one()
+
+    settled = await dispatch_live_email_send(
+        actions=actions, allowance=allowance, provider=provider, proposal=proposal_row, approval=approval_row,
+        draft=draft, idempotency_key=f"idem-{uuid.uuid4()}", live_max_sends_per_day=50,
+    )
+    assert settled.status == "FAILED"
+    assert settled.outcome_class == "PROVEN_NOT_DISPATCHED"
+    assert settled.last_error_type == "HISTORY_CHECKPOINT_UNAVAILABLE"
+    assert settled.pre_dispatch_history_id is None
+    send_calls = [r for r in transport.requests if "messages/send" in str(r.url)]
+    assert len(send_calls) == 0  # zero messages.send calls
+    # The allowance was never touched either — a checkpoint failure must
+    # never burn a scarce daily send slot.
+    assert await allowance.count_reservations_since(now=datetime.now(timezone.utc), window_s=86400.0) == 0
+
+
+async def test_checkpoint_persistence_failure_makes_zero_send_calls(session_factory, monkeypatch):
+    """Simulates the extremely-unlikely persistence race (row no longer
+    CLAIMED by the time the checkpoint write runs) by monkeypatching
+    `record_pre_dispatch_history_checkpoint` to return `None`, exactly as
+    it would on a guarded-update miss."""
+    proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
+    actions = ActionRepository(session_factory)
+    allowance = LiveSendAllowanceRepository(session_factory)
+    provider, transport = make_provider(
+        profile_steps=[(200, {"historyId": "1"})],
+        send_steps=[(200, {"id": "should-not-be-used"})],
+    )
+
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        proposal_row = (
+            await session.execute(select(ActionProposalRow).where(ActionProposalRow.id == proposal_dict["id"]))
+        ).scalar_one()
+        approval_row = (await session.execute(select(ApprovalRow).where(ApprovalRow.id == approval_id))).scalar_one()
+
+    async def _fake_record(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(actions, "record_pre_dispatch_history_checkpoint", _fake_record)
+
+    settled = await dispatch_live_email_send(
+        actions=actions, allowance=allowance, provider=provider, proposal=proposal_row, approval=approval_row,
+        draft=draft, idempotency_key=f"idem-{uuid.uuid4()}", live_max_sends_per_day=50,
+    )
+    assert settled.status == "CLAIMED"  # never advanced — persistence never confirmed
+    send_calls = [r for r in transport.requests if "messages/send" in str(r.url)]
+    assert len(send_calls) == 0
+    assert await allowance.count_reservations_since(now=datetime.now(timezone.utc), window_s=86400.0) == 0
+
+
+async def test_successful_send_path_remains_exactly_one_send_call(session_factory):
+    """Restates the full-path guarantee explicitly in checkpoint terms:
+    two provider calls total (checkpoint + send), never more."""
+    proposal_dict, approval_id, draft = await _seed_proposal(session_factory)
+    actions = ActionRepository(session_factory)
+    allowance = LiveSendAllowanceRepository(session_factory)
+    provider, transport = make_provider(
+        token_steps=[(200, {"access_token": "tok"}), (200, {"access_token": "tok"})],
+        profile_steps=[(200, {"historyId": "42"})],
+        send_steps=[(200, {"id": "gmail-msg-single"})],
+    )
+
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        proposal_row = (
+            await session.execute(select(ActionProposalRow).where(ActionProposalRow.id == proposal_dict["id"]))
+        ).scalar_one()
+        approval_row = (await session.execute(select(ApprovalRow).where(ApprovalRow.id == approval_id))).scalar_one()
+
+    settled = await dispatch_live_email_send(
+        actions=actions, allowance=allowance, provider=provider, proposal=proposal_row, approval=approval_row,
+        draft=draft, idempotency_key=f"idem-{uuid.uuid4()}", live_max_sends_per_day=50,
+    )
+    assert settled.status == "SUCCEEDED"
+    send_calls = [r for r in transport.requests if "messages/send" in str(r.url)]
+    profile_calls = [r for r in transport.requests if str(r.url).endswith("/profile")]
+    assert len(send_calls) == 1
+    assert len(profile_calls) == 1

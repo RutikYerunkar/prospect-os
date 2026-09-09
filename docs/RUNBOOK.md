@@ -141,7 +141,7 @@ operator as a test user with awareness of the 7-day limit) before relying on a l
   `SESSION_SIGNING_KEY` (either alone hard-disables it) via whatever mechanism your host uses to change
   environment variables, then restart the process.
 
-## Live `EMAIL_SEND` — the structural refusal is gone; real dispatch is reachable (V2-I-b, final state)
+## Live `EMAIL_SEND` — the structural refusal is gone; real dispatch is reachable (V2-I-b, post-smoke correction)
 
 `LiveExternalEmailSendDisabled` is no longer on the real dispatch path. **Gate-order history:** an earlier
 state of the V2-I-b checkpoint briefly removed this refusal on the reasoning that a documented "Postgres
@@ -157,7 +157,10 @@ three-state account.
    returns `None` (never a fixture fallback) on a missing/undecryptable credential, which
    `execute_action` turns into `409 GMAIL_NOT_CONNECTED` with no execution row ever created.
 3. `api/live_send_orchestration.py::dispatch_live_email_send` — the real dispatch ordering (CLAIMED ->
-   allowance reservation -> guarded IN_FLIGHT -> the one Gmail HTTP call -> classify -> settle).
+   pre-dispatch Gmail history checkpoint acquired+persisted -> allowance reservation -> guarded IN_FLIGHT ->
+   the one Gmail HTTP call -> classify -> settle). The checkpoint step (V2-I-b correction, post-smoke) fails
+   closed — settles `FAILED`/`PROVEN_NOT_DISPATCHED`, touches no allowance, calls Gmail no further — if
+   acquisition or persistence fails.
 4. The rolling-24h send allowance (`LIVE_MAX_SENDS_PER_DAY`, default 50) — DB-backed, correct across
    processes; a `409` with `send_allowance_exhausted` in `blocked_reasons` at the policy pre-check, or a
    denied reservation at the transaction itself for a narrower race — both block before any Gmail call.
@@ -191,10 +194,28 @@ settle to `ABANDONED` once the window closes (also zero-egress — no Gmail call
 expired). `ABANDONED` is terminal and still blocks the recipient identity; there is no resend anywhere in
 this codebase, ever.
 
-**No real Gmail send has occurred in this codebase's automated work.** The one authorized real-Gmail smoke
-test (a single real send to an operator-controlled inbox) has not yet been performed and requires further
-explicit user authorization before it happens — removing the structural refusal is a distinct step from
-authorizing that smoke, and completing the former does not imply the latter.
+**Reconciliation is historyId-anchored, not Message-ID-anchored (V2-I-b correction, post-smoke).** The one
+authorized real Gmail smoke succeeded, and a read-only follow-up diagnostic against that exact sent message
+found `Message-ID` and `X-Google-Original-Message-ID` BOTH absent from Gmail's `format=metadata` response —
+Subject/To/From/Date were present and matched. The original design assumed Gmail preserves a caller-supplied
+Message-ID; that assumption is disproven. `GmailSendProvider.find_sent_message` now takes the persisted
+`pre_dispatch_history_id` plus the approved Subject/recipient/sender and a dispatch/settle time window,
+calls `users.history.list(startHistoryId=..., labelId="SENT", historyTypes=["messageAdded"])` for candidate
+ids, then `messages.get(format="metadata", metadataHeaders=[Subject,To,From,Date])` per candidate — still
+only `gmail.metadata`-scoped operations, still never `q`, still never body/`full`/`raw`. A candidate matches
+only if Subject (canonicalized, RFC-2047-aware), To, From, and Date ALL match; every bounded candidate is
+evaluated before deciding (never a first-match short-circuit), so `FOUND` (exactly one match) is
+distinguishable from the new `ReconcileStatus.AMBIGUOUS` (more than one match — stays `UNCERTAIN`, never
+guesses). A `404` from `history.list` (checkpoint outside Gmail's retention window) is the new
+`ReconcileStatus.HISTORY_EXPIRED` — also stays `UNCERTAIN`. `message_id_header` is still generated and
+persisted for historical/audit compatibility; the reconciliation path no longer reads it. See
+`docs/PROGRESS.md`'s "V2-I-b reconciliation correction" entry for the full account — no real sender/
+recipient address, provider message id, raw Message-ID value, token, or secret is recorded there.
+
+**No second real Gmail send has occurred or been authorized.** The one authorized real-Gmail smoke (a
+single real send to an operator-controlled inbox) has been performed, under explicit separate
+authorization and a strict one-send budget, and succeeded. Any further real send requires its own new,
+separate, explicit authorization.
 
 A `CLAIMED`/`IN_FLIGHT` execution stuck past `EXECUTION_STALE_LEASE_S` (default 300s — a process crashed
 mid-dispatch) is recovered via `POST /api/actions/executions/{id}/recover` (operator-gated): a stale

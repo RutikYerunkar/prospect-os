@@ -1,7 +1,7 @@
 """Scripted `httpx.MockTransport`-style fake for Gmail's `messages.send` /
-`messages.list` / `messages.get` endpoints — mirrors
-`tests/gmail_oauth_helpers.py::ScriptedGoogleTransport`. No automated test
-may make a real Gmail API call."""
+`users.getProfile` / `users.history.list` / `messages.get` endpoints —
+mirrors `tests/gmail_oauth_helpers.py::ScriptedGoogleTransport`. No
+automated test may make a real Gmail API call."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from typing import Any, Callable
 
 import httpx
 
-from groundwork.providers.live.gmail_send import GMAIL_MESSAGES_LIST_URL, GMAIL_SEND_URL
+from groundwork.providers.live.gmail_send import GMAIL_HISTORY_LIST_URL, GMAIL_SEND_URL
 from groundwork.providers.live.gmail_send import GmailSendProvider
-from groundwork.providers.live.google_oauth_runtime import GOOGLE_TOKEN_URL
+from groundwork.providers.live.google_oauth_runtime import GOOGLE_PROFILE_URL, GOOGLE_TOKEN_URL
 
 
 class ScriptedGmailTransport(httpx.AsyncBaseTransport):
@@ -20,10 +20,12 @@ class ScriptedGmailTransport(httpx.AsyncBaseTransport):
         *,
         token_steps: list[tuple[int, dict] | Exception] | None = None,
         send_steps: list[tuple[int, dict] | Exception] | None = None,
+        profile_steps: list[tuple[int, dict] | Exception] | None = None,
         handler: Callable[[httpx.Request], httpx.Response] | None = None,
     ) -> None:
         self._token_queue: list[tuple[int, dict] | Exception] = list(token_steps or [(200, {"access_token": "tok"})])
         self._send_queue: list[tuple[int, dict] | Exception] = list(send_steps or [])
+        self._profile_queue: list[tuple[int, dict] | Exception] = list(profile_steps or [(200, {"historyId": "1000"})])
         self.handler = handler
         self.requests: list[httpx.Request] = []
 
@@ -36,6 +38,8 @@ class ScriptedGmailTransport(httpx.AsyncBaseTransport):
             step = self._token_queue.pop(0)
         elif url == GMAIL_SEND_URL:
             step = self._send_queue.pop(0)
+        elif url == GOOGLE_PROFILE_URL:
+            step = self._profile_queue.pop(0)
         else:
             raise AssertionError(f"unscripted URL: {url}")
         if isinstance(step, Exception):
@@ -48,11 +52,14 @@ def make_provider(
     *,
     token_steps: list[tuple[int, dict] | Exception] | None = None,
     send_steps: list[tuple[int, dict] | Exception] | None = None,
+    profile_steps: list[tuple[int, dict] | Exception] | None = None,
     handler: Callable[[httpx.Request], httpx.Response] | None = None,
     connected_account_email: str = "operator@example.com",
     call_deadline_s: float = 5.0,
 ) -> tuple[GmailSendProvider, ScriptedGmailTransport]:
-    transport = ScriptedGmailTransport(token_steps=token_steps, send_steps=send_steps, handler=handler)
+    transport = ScriptedGmailTransport(
+        token_steps=token_steps, send_steps=send_steps, profile_steps=profile_steps, handler=handler
+    )
     client = httpx.AsyncClient(transport=transport)
 
     class _FakeOAuthRuntime:
@@ -73,6 +80,29 @@ def make_provider(
                 raise GoogleOAuthError("missing access_token")
             return token
 
+        async def get_profile(self, *, access_token: str) -> dict[str, Any]:
+            try:
+                response = await self.client.get(GOOGLE_PROFILE_URL, headers={"Authorization": f"Bearer {access_token}"})
+            except httpx.HTTPError as exc:
+                from groundwork.providers.live.google_oauth_runtime import GoogleOAuthError
+
+                raise GoogleOAuthError(f"getProfile transport failure: {exc}") from exc
+            if response.status_code != 200:
+                from groundwork.providers.live.google_oauth_runtime import GoogleOAuthError
+
+                raise GoogleOAuthError(f"getProfile failed: HTTP {response.status_code}")
+            try:
+                body = response.json()
+            except ValueError as exc:
+                from groundwork.providers.live.google_oauth_runtime import GoogleOAuthError
+
+                raise GoogleOAuthError("getProfile returned a non-JSON body") from exc
+            if not isinstance(body, dict):
+                from groundwork.providers.live.google_oauth_runtime import GoogleOAuthError
+
+                raise GoogleOAuthError("getProfile returned a non-object body")
+            return body
+
     runtime = _FakeOAuthRuntime(client)
     provider = GmailSendProvider(
         client=client,
@@ -82,3 +112,6 @@ def make_provider(
         call_deadline_s=call_deadline_s,
     )
     return provider, transport
+
+
+__all__ = ["GMAIL_HISTORY_LIST_URL", "ScriptedGmailTransport", "make_provider"]

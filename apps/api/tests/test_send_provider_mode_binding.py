@@ -112,7 +112,20 @@ class TestDemoEmailSendProviderSend:
         provider = DemoEmailSendProvider()
         with pytest.raises(NotImplementedError):
             await provider.find_sent_message(
-                message_id_header="<x@groundwork.invalid>",
-                sent_after=datetime.now(timezone.utc),
+                pre_dispatch_history_id="1000",
+                expected_subject="Hi",
+                expected_recipient_identifier="prospect@example.com",
+                expected_sender_identifier="demo-sender@groundwork.invalid",
+                window_start=datetime.now(timezone.utc),
+                window_end=datetime.now(timezone.utc),
                 bounds=None,  # type: ignore[arg-type]
             )
+
+    async def test_get_history_checkpoint_not_called_in_v2h_raises_not_implemented(self):
+        """V2-I-b correction (post-smoke) — the pre-dispatch history
+        checkpoint concept is meaningless for Demo's synchronous,
+        always-settled send; Demo dispatch never goes through
+        `dispatch_live_email_send` at all."""
+        provider = DemoEmailSendProvider()
+        with pytest.raises(NotImplementedError):
+            await provider.get_history_checkpoint()

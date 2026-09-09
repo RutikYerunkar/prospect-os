@@ -10,14 +10,37 @@ one call to `dispatch_live_email_send`), not a rewrite.
 Dispatch ordering (load-bearing for crash recovery — do not reorder):
 
 1. `CLAIMED` committed (write-ahead, carrying our own generated Message-ID).
-2. Allowance reservation committed (the rolling-24h guard, Phase 5).
-3. Guarded `IN_FLIGHT` update, `dispatched_at` set, committed.
-4. ONLY THEN the external Gmail HTTP call.
-5. Classify (§3.4) and settle.
+2. Pre-dispatch Gmail mailbox history checkpoint acquired
+   (`provider.get_history_checkpoint()`, `users.getProfile`) and persisted
+   to this execution row (V2-I-b correction, post-smoke — see
+   `docs/PROGRESS.md`). Fails closed — settles `FAILED`/
+   `PROVEN_NOT_DISPATCHED`, reserves no allowance, calls Gmail no further —
+   if acquisition returns `None` or persistence doesn't affect exactly one
+   row.
+3. Allowance reservation committed (the rolling-24h guard, Phase 5) — only
+   after a checkpoint is confirmed persisted, so a checkpoint-acquisition
+   failure never consumes one of the day's limited Live sends.
+4. Guarded `IN_FLIGHT` update, `dispatched_at` set, committed.
+5. ONLY THEN the external Gmail HTTP call.
+6. Classify (§3.4) and settle.
 
-If step 3's guarded update doesn't affect exactly one row, dispatch is
-skipped entirely — a process that crashed between CLAIMED and here is
-recovered by the stale-claim sweep (Phase 9), never re-dispatched here.
+If step 2's or step 4's guarded update doesn't affect exactly one row,
+dispatch is skipped entirely — a process that crashed between CLAIMED and
+here is recovered by the stale-claim sweep (Phase 9), never re-dispatched
+here. Placing the checkpoint immediately after CLAIMED (rather than after
+the allowance reservation) is deliberate: it is tied to a real execution id
+as soon as one exists, and a transient checkpoint-acquisition failure never
+burns a scarce daily allowance slot on an attempt that could never have
+reached Gmail anyway.
+
+Why reconciliation no longer depends on `message_id_header`: the one
+authorized real Gmail smoke sent a message that Gmail returned with NEITHER
+`Message-ID` nor `X-Google-Original-Message-ID` carrying our generated
+header. `message_id_header` is still generated and persisted here
+(historical/audit compatibility), but `find_sent_message` (called from
+`api/routers/actions.py::reconcile_execution`) matches on the persisted
+`pre_dispatch_history_id` plus approved Subject/To/From/Date instead — see
+`groundwork/domain/reconciliation_match.py`.
 """
 
 from __future__ import annotations
@@ -74,6 +97,34 @@ async def dispatch_live_email_send(
         # A duplicate execute request (request idempotency, §3.5A) — the
         # EXISTING row, whatever its current state, never a second attempt.
         return row
+
+    # V2-I-b correction (post-smoke): the pre-dispatch history checkpoint,
+    # BEFORE the allowance is touched and BEFORE any Gmail call. Fails
+    # closed — settles FAILED/PROVEN_NOT_DISPATCHED, never dispatches —
+    # on acquisition failure or a persistence race.
+    pre_dispatch_history_id = await provider.get_history_checkpoint()
+    if pre_dispatch_history_id is None:
+        return await actions.settle_execution_failed(
+            row.id,
+            provider=None,
+            dispatched=False,
+            outcome_class=SendOutcome.PROVEN_NOT_DISPATCHED.value,
+            settled_at=datetime.now(timezone.utc),
+            last_error_type="HISTORY_CHECKPOINT_UNAVAILABLE",
+            last_error_message="could not acquire a Gmail mailbox history checkpoint before dispatch",
+        )
+
+    checkpointed = await actions.record_pre_dispatch_history_checkpoint(
+        row.id, pre_dispatch_history_id=pre_dispatch_history_id
+    )
+    if checkpointed is None:
+        # Row is no longer CLAIMED (e.g. a concurrent recovery) — fail
+        # closed exactly like the transition_to_in_flight race below:
+        # return whatever the current state is, never dispatch without a
+        # confirmed persisted checkpoint.
+        current = await actions.get_execution(row.id)
+        assert current is not None
+        return current
 
     reservation_outcome = await allowance.try_reserve(
         row.id, now=now, window_s=allowance_window_s, limit=live_max_sends_per_day

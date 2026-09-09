@@ -96,6 +96,10 @@ def _gmail_send_handler(*, send_status: int, send_body: dict):
         url = str(request.url)
         if "oauth2.googleapis.com/token" in url:
             return httpx.Response(200, json={"access_token": "test-access-token"})
+        if url.split("?")[0].endswith("/profile"):
+            # V2-I-b correction (post-smoke) — the pre-dispatch history
+            # checkpoint (users.getProfile), called BEFORE messages.send.
+            return httpx.Response(200, json={"historyId": "1000", "emailAddress": OPERATOR_EMAIL}, request=request)
         if "messages/send" in url:
             return httpx.Response(send_status, json=send_body, request=request)
         raise AssertionError(f"unexpected Gmail call: {url}")

@@ -31,19 +31,22 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-G — Gmail OAuth (connection only, no sending)** | *this commit* (branch `claude/v2-g-gmail-oauth`) | Operator-owned, encrypted, revocable Gmail connection — sends nothing. No migration: `gmail_connections`/`oauth_states` already existed from V2-B, untouched. Exact scope set `gmail.send` + `gmail.metadata` only (no `readonly`/`openid`/`email`/`profile`, never Google's userinfo endpoint). New pure `api/gmail_state_binding.py` binds OAuth `state` to the exact initiating operator-session cookie value via `HMAC-SHA256(SESSION_SIGNING_KEY, STATE_BINDING_VERSION|state_id|cookie_value)` — only `state_id`/`pkce_verifier`/timestamps persist, never the binding tag or the cookie itself; verification tries current then `SESSION_SIGNING_KEY_OLD`, mirroring `operator_auth.verify_session_cookie`'s own rotation order (no change to `operator_auth.py` itself). Callback implements the exact security-critical order: parse state (malformed→400, no DB touch) → require+verify operator session (missing/invalid→401, no DB touch) → verify state/session binding (mismatch→403, state NOT consumed, callback-failure limiter incremented) → consume `state_id` via ONE guarded `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now` (`rowcount != 1`→409) → only now inspect Google's `error` param (an allow-listed `access_denied` passes through, everything else sanitizes to `unknown`, never the raw Google error text) → exchange code (PKCE S256) → `users.getProfile` for `emailAddress` (missing→fail closed, no persistence) → Fernet-encrypt the refresh token (new `token_crypto.py`, `TOKEN_ENCRYPTION_KEY`/`_OLD` mirroring `SESSION_SIGNING_KEY`'s rotation) → persist → redirect `/settings?gmail=connected`. New `providers/live/google_oauth_runtime.py::GoogleOAuthRuntime` — deployment-scoped (never in `ProviderBundle`), process-scoped `httpx.AsyncClient`, one flat transport-retry loop bounded at 1, never retries a definitive 4xx. New `providers/send_base.py::EmailSendProvider` Protocol (frozen shape: `name`, `supports_message_id_lookup`, `connected_account_identifier()`, `send()`, `find_sent_message()`) with `DemoEmailSendProvider` implementing ONLY the identity method (`demo-sender@groundwork.invalid`, zero network); `send()`/`find_sent_message()` raise `NotImplementedError` — V2-H/V2-I scope, never called here. `GmailConnectionRepository.connected_account_identifier()` returns `normalize_email_identity(google_account_email)` for the real connection — an identifier, never a credential; `None` before first connect and again after disconnect. Four operator-gated routes under `/api/gmail` (`GET connection`, `POST connect`, `GET callback`, `DELETE connection` — disconnect always deletes the local row regardless of whether Google's revoke call succeeds). `GET /api/settings/providers` additively exposes a `gmail` block, fully populated only for an operator. New `/settings` page (four states: non-operator / operator+not-configured / operator+not-connected / operator+connected) plus a `Settings` nav link; a presentational `GmailSettingsPanel` component carries the render logic, tested via `renderToStaticMarkup`. **Hard gate (§3.3): SATISFIED / VERIFIED** — the real-account half was run by the user themselves, manually, against their own real consented Gmail test account (never by an automated session); all three findings (`users.getProfile`, `messages.list(labelIds=["SENT"])`, `messages.get(format="metadata", metadataHeaders=[...])`) came back PERMITTED under `gmail.metadata` alone — see "Current checkpoint" above for the exact reported observations. `scripts/gmail_scope_probe.py` + `make gmail-scope-probe` remain manual-only, never run automatically. A real frontend hydration bug in `/settings` (found during the user's own manual OAuth validation) was fixed in a follow-up commit (`f297142`) and manually revalidated — see "Current checkpoint" above. Canonical Demo byte-identical (verified via `make demo`: PASS 2/NEEDS_REVIEW 2/REJECTED 1/DUPLICATE 1/FAILED 1, Northwind 92/Sable 79/Riverbend 35/Ferrous 58, `demo_pack.yaml` untouched). Zero real Google/OpenAI/Tavily/Apollo/Hunter calls anywhere in this session. See "What V2-G added" below. |
 | **V2-H — Action proposal + human approval (Demo executor only)** | branch `claude/v2-h-action-approval`, merged via PR #21 | `ActionProposal`/`ActionExecution`/`ActionEvent` governance path: `draft -> explicit action proposal -> immutable hash/sender binding -> human approval/rejection -> Demo execution -> immutable action audit trail`. Real Gmail sending stays entirely out of scope: Live `EMAIL_SEND` structurally terminates at a dedicated, unconditional `LiveExternalEmailSendDisabled` refusal (D1), reached only AFTER all other Live gates and a fully passing fresh policy evaluation (D4) — proving the refusal is structural, not a policy verdict. `domain/action_policy.py::evaluate()` (14 clauses at this point) is pure and DB-free; `api/routers/actions.py` wires the five write endpoints (`propose`/`approve`/`reject`/`execute`) plus reads. **This checkpoint deliberately did NOT implement the `claimed_email`/legal-restriction suppression semantics carried forward from V2-DH** — see its own D1 disposition below and "Immediate next task" at the foot of this section (as it stood before V2-I-a). See full narrative under "What V2-H added" below (this doc's table row was not updated at the time V2-H merged — recorded now, at V2-I-a, filling that gap explicitly rather than leaving the table silently one checkpoint behind the narrative). |
 | **V2-I-a — Legal/privacy send-suppression prerequisite** | `d185c95` (branch `claude/v2-i-a-send-suppression`, merged to `feature/v2-contact-enrichment` via PR #22) | Closes the BLOCKING `claimed_email` suppression requirement carried forward from V2-DH through V2-H, under the provider-neutral name `LEGAL_OR_PRIVACY_RESTRICTION`. Hunter's HTTP 451 is now `EnrichmentAttemptStatus.LEGAL_RESTRICTION` / a dedicated `EnrichmentLegalRestriction` exception (was `INVALID_RESPONSE`, indistinguishable from 404/422, until this checkpoint) — routed by `engine/enrichment.py::call_enrichment` to a new `ContactEnrichmentRepository.record_legal_restriction`, which preserves the EMAIL channel's prior identifier/state/observed_at byte-for-byte, writes LOCAL suppression metadata onto `contact_channels`, and — when a real identifier was already on record — upserts a GLOBAL `email_suppressions` row keyed by the existing `normalize_email_identity`. One additive Alembic revision (`94f688f37818`). New `domain/action_policy.py` clause 15 (`recipient_suppressed`) blocks `EMAIL_SEND` in BOTH `DEMO_SIMULATED` and `LIVE_EXTERNAL` origins (unlike clause 12), with no override, evaluated fresh at both proposal-creation and execute time. `LiveExternalEmailSendDisabled`'s message was narrowed to stop claiming the suppression prerequisite is unresolved (it no longer is) while remaining exactly as unconditional and load-bearing as before — Live `EMAIL_SEND` remains structurally impossible; only the *reason stated* changed, not the refusal itself. Frontend: `ContactPanel` renders a provider-neutral suppression note under Email verification; `ActionApprovalPanel` gained `recipient_suppressed` blocked-reason copy. No Gmail send provider, no reconciliation, no live-send allowance, and no suppression-clear/override endpoint were added — all explicitly out of scope, deferred to V2-I-b. Canonical Demo byte-identical. Zero provider/network calls anywhere in this session. See "What V2-I-a added" below. |
-| **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed from the real dispatch path; real smoke still not performed)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Fixed a real pre-existing bug found while wiring this in: `providers/send_base.py` had its own LOCAL `SendOutcome`/`ReconcileStatus` StrEnum classes, distinct from `models/enums.py`'s canonical ones — pydantic was silently coercing across the two on every `SendResult`/`ReconcileResult` construction, breaking `is`-identity comparisons; unified onto `models/enums.py`. Also fixed a real ordering bug the new end-to-end tests caught: policy clause 12's `recipient_conflict` check ran BEFORE the request-idempotency check, so a duplicate execute of an ALREADY-SUCCEEDED Live proposal was wrongly blocked with `already_sent_to_recipient` instead of returning the existing execution (§3.5A) — fixed by excluding the current proposal's own rows from the conflict query (`ActionRepository.recipient_conflict(..., exclude_proposal_id=...)`). **`LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states in this checkpoint: removed (incorrectly, on a documented-not-passed Postgres gap), restored (after the user caught the gate-order violation and required a CI-verification-only PR), then removed again — this time correctly — only after PR #23's CI came back green on all four required checks (SQLite, Postgres + migration drift, frontend, API Docker build) and the user gave explicit, separate authorization for exactly this change.** `resolve_send_provider(Mode.LIVE)` itself is untouched and still unconditionally raises `LiveExternalEmailSendDisabled` — it is simply no longer on the real dispatch path; `execute_action`'s `LIVE_EXTERNAL` branch now calls `build_gmail_send_provider`/`dispatch_live_email_send` directly. See "What V2-I-b added" below for the full three-state account, the final safety-control inventory, and the updated test matrix. Canonical Demo byte-identical throughout. **No real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made anywhere in this checkpoint — the one authorized real-Gmail smoke test has still not been performed and requires further explicit user authorization.** |
+| **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed, one real smoke performed, reconciliation corrected post-smoke)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`, retained for historical/audit compatibility only — see below), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->history-checkpoint->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Two real pre-existing bugs fixed while wiring this in (enum-class unification; a policy-ordering bug where `recipient_conflict` blocked an idempotent retry before the idempotency check ran). `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states — removed (incorrectly, on a documented-not-passed Postgres gap), restored, then removed again correctly only after PR #23's CI came back green on all four required checks and the user's explicit separate authorization. **The one authorized real-Gmail smoke was then performed and succeeded — and its own read-only follow-up diagnostic proved Gmail omits our generated Message-ID from the sent message's headers, disproving the original §3.3 reconciliation design's core assumption.** Reconciliation was rebuilt on a Gmail mailbox `historyId` checkpoint (captured pre-dispatch, persisted before `messages.send`) plus approved-metadata matching (Subject/To/From/Date, via a new pure `domain/reconciliation_match.py`) instead of the generated Message-ID — see "V2-I-b reconciliation correction — the real smoke's finding and the fix" below for the full account, including the corrected dispatch ordering, the new `pre_dispatch_history_id` column/migration, the new `AMBIGUOUS`/`HISTORY_EXPIRED` reconcile outcomes, and the complete updated test matrix. Canonical Demo byte-identical throughout. No real sender/recipient address, provider message id, raw Message-ID value, token, or secret is recorded anywhere in this document or the tests. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made or authorized. |
 
 ---
 
 ## Current checkpoint
 
 **V2-I-b — Live Gmail execution + reconciliation + audit — the structural refusal has been removed from
-the real dispatch path. Real Live `EMAIL_SEND` is now reachable through the actual API, gated by the full
-set of real safety controls (below), not by `LiveExternalEmailSendDisabled`. The one authorized real-Gmail
-smoke test has NOT been performed and awaits further explicit user authorization.** Supersedes the section
-below, which describes V2-I-a. The V2-I-a text below (through "What V2-I-a added") is **historical** and
-remains accurate for V2-I-a itself; this checkpoint's own narrative is under "What V2-I-b added" immediately
-below.
+the real dispatch path. Real Live `EMAIL_SEND` is reachable through the actual API, gated by the full set
+of real safety controls (below), not by `LiveExternalEmailSendDisabled`. The one authorized real-Gmail
+smoke has been performed successfully, and its own follow-up read-only diagnostic exposed a real gap in
+the original §3.3 reconciliation design (Gmail does not reliably preserve a generated Message-ID) — that
+gap has since been corrected; see "V2-I-b reconciliation correction — the real smoke's finding and the
+fix" below for the full account.** Supersedes the section below, which describes V2-I-a. The V2-I-a text
+below (through "What V2-I-a added") is **historical** and remains accurate for V2-I-a itself; this
+checkpoint's own narrative is under "What V2-I-b added" and the reconciliation-correction section
+immediately below.
 
 **Three-state history, recorded explicitly per `CLAUDE.md`'s "flag rather than silently resolve"
 instruction:**
@@ -409,11 +412,113 @@ NOT merged. See the end-of-task report for this session for the exact four check
 commit — this document is updated once, here, rather than re-editing per CI poll; the report is the
 authoritative record of the CI run triggered by this specific push.
 
-**What remains outstanding: the single authorized real-Gmail smoke test.** Everything above proves the
-implementation is correct against scripted transports and CI-verified against a real Postgres + migration
-check. No real Gmail API call, and no real email, has been made anywhere in this checkpoint's automated or
-manual work. That one real send requires its own further, explicit, separate user authorization before it
-happens — this document records readiness, not permission.
+**The single authorized real-Gmail smoke has since been performed, under the user's explicit, separate
+authorization, with a strict one-send budget.** It surfaced a real production gap in this checkpoint's
+original reconciliation design, which has since been corrected — see "V2-I-b reconciliation correction —
+the real smoke's finding and the fix" immediately below for the full account: what the smoke found, why it
+mattered, the corrected architecture, and its own independent verification. No second real send has
+occurred or been authorized since.
+
+---
+
+## V2-I-b reconciliation correction — the real smoke's finding and the fix
+
+**What the real smoke found.** One real, consented Gmail send succeeded end-to-end through the real
+governed path (propose → approve → execute → all five Live gates → fresh policy → allowance reservation →
+dispatch → `SUCCEEDED`/`ACCEPTED`), with `provider_message_id` persisted from Gmail's own `200` response. A
+follow-up READ-ONLY diagnostic then fetched that exact Gmail message directly by its `provider_message_id`
+(`GET .../messages/{id}?format=metadata`, requesting only `Subject`/`To`/`From`/`Date`/`Message-ID`/
+`X-Google-Original-Message-ID` — no body, no other headers, zero writes) and found: the `Message-ID` and
+`X-Google-Original-Message-ID` headers were **both absent** from Gmail's response — our own generated
+`message_id_header` (`domain/message_id.py`) matched neither, because neither was present to match against.
+`Subject`, `To`, `From`, and `Date` were all present and matched the approved proposal/draft exactly. No
+second real send was performed or authorized; every fact below beyond that one diagnostic observation was
+established through scripted/mocked transports only. Per this checkpoint's own explicit no-PII recording
+rule: no real sender/recipient address, no real provider message id, no raw Message-ID value, no token, and
+no secret is recorded anywhere in this document, the commit, or the tests.
+
+**Why this mattered.** The reconciliation design accepted into this checkpoint (§3.3) was built on the
+assumption that Gmail preserves a caller-supplied `Message-ID` under one of two headers. The real send
+disproved that assumption directly, on the one message this session is authorized to have ever sent. A
+design built on a disproven assumption cannot be trusted for §3.3's whole purpose — resolving genuine
+post-dispatch ambiguity (`UNCERTAIN`) without ever guessing or resending — so reconciliation was rebuilt
+before this checkpoint could be considered mergeable, per the user's explicit instruction that PR #23 stay
+unmerged until the correction was complete and CI green.
+
+**The corrected architecture — historyId-anchored, not Message-ID-anchored.**
+- **Pre-dispatch checkpoint.** `GmailSendProvider.get_history_checkpoint()` calls `users.getProfile`
+  (already-scoped under `gmail.metadata` — the exact call `GoogleOAuthRuntime.get_profile` already made for
+  the connect flow's account-email resolution; no new OAuth scope) and returns its `historyId`. Placed in
+  `api/live_send_orchestration.py::dispatch_live_email_send` immediately after `CLAIMED` commits and BEFORE
+  the allowance reservation: tied to a real execution id as soon as one exists, and a transient checkpoint
+  failure never burns one of the day's limited Live sends (it settles `FAILED`/`PROVEN_NOT_DISPATCHED`
+  immediately, touching no allowance, reaching Gmail no further). Persisted via a new guarded,
+  `CLAIMED`-only repository update (`ActionRepository.record_pre_dispatch_history_checkpoint`, mirroring
+  `transition_to_in_flight`'s own crash-recovery discipline one step earlier) to a new column,
+  `action_executions.pre_dispatch_history_id` — `String`, never a fixed-width integer, since Gmail
+  serializes `historyId` as an opaque, unboundedly-growing decimal string. One additive Alembic migration
+  (`336c199f2d05`), NULL for every execution created before this correction.
+- **Reconciliation.** `GmailSendProvider.find_sent_message` no longer takes `message_id_header`/
+  `sent_after`; it takes `pre_dispatch_history_id` plus the approved Subject/recipient/sender and a
+  dispatch/settle time window. It calls `users.history.list(startHistoryId=..., labelId="SENT",
+  historyTypes=["messageAdded"])` (still `gmail.metadata`-scoped, still never `q`) to collect candidate
+  message ids, then `messages.get(format="metadata", metadataHeaders=[Subject,To,From,Date])` per candidate
+  — never `Message-ID`/`X-Google-Original-Message-ID` at all, and never body/`full`/`raw`. A NEW pure module,
+  `domain/reconciliation_match.py::candidate_matches`, decides per-candidate: canonicalized Subject equality
+  (`canonicalize_subject` RFC-2047-decodes and whitespace-normalizes — deliberately not naive raw-string
+  equality, since Gmail may return an encoded-word Subject even for a plain-text approved draft), To/From
+  normalize (via the existing `domain/contact_identity.py::normalize_email_identity`) to the approved
+  recipient/sender identity, and Date parses and falls within `[dispatched_at - clock_skew, settled_at +
+  clock_skew]` (the SAME `reconcile_clock_skew_s` setting already governed the old design's tolerance).
+  **All bounded candidates are evaluated before deciding — never a first-match short-circuit** — because
+  `FOUND` (exactly one match) must be distinguishable from the new `AMBIGUOUS` status (more than one match):
+  zero matches stays `UNCERTAIN`/`NOT_FOUND_WITHIN_BOUNDS`; exactly one match settles `SUCCEEDED`/`FOUND`;
+  more than one match stays `UNCERTAIN`/`AMBIGUOUS` — never guesses which one. A `404` from `history.list`
+  (Gmail's documented "`startHistoryId` outside the retention window" signal) is a new, distinct
+  `ReconcileStatus.HISTORY_EXPIRED` — also never `FAILED`, always `UNCERTAIN`. `message_id_header` is still
+  generated and persisted (historical/audit compatibility only); nothing in the reconciliation path reads it
+  any more. `provider_message_id` is still never used AS the reconciliation mechanism (it exists only when
+  the original send response was actually received — reconciliation exists for exactly the case where it
+  wasn't) — it is used only as a post-FOUND cross-check that the matched history candidate's own Gmail id
+  equals it, when both are available.
+- **Reachability guard.** `reconcile_execution`'s `NOT_RECONCILABLE` guard now requires
+  `pre_dispatch_history_id`/`dispatched_at`/`settled_at`, not `message_id_header`/`dispatched_at` — an
+  execution created before this correction (no checkpoint) honestly reports `NOT_RECONCILABLE` rather than
+  attempting a lookup with no anchor.
+
+**Files changed:** `groundwork/models/tables.py` (new column), `groundwork/models/enums.py`
+(`ReconcileStatus.AMBIGUOUS`/`HISTORY_EXPIRED`), `groundwork/domain/reconciliation_match.py` (new, pure),
+`groundwork/providers/send_base.py` (`EmailSendProvider` Protocol + `DemoEmailSendProvider`),
+`groundwork/providers/live/gmail_send.py` (`get_history_checkpoint`, rewritten `find_sent_message`),
+`groundwork/repositories/actions.py` (`record_pre_dispatch_history_checkpoint`),
+`groundwork/api/live_send_orchestration.py` (new ordering step), `groundwork/api/routers/actions.py`
+(`reconcile_execution` rewired), `alembic/versions/336c199f2d05_v2i_b_history_checkpoint_reconciliation.py`
+(new migration). Test files: `tests/test_reconciliation_match.py` (new, pure domain unit tests),
+`tests/test_gmail_send_provider.py` (`TestHistoryCheckpoint` new class; `TestReconciliation` rewritten for
+the new signature, including a dedicated regression test asserting reconciliation succeeds even when BOTH
+`Message-ID` and `X-Google-Original-Message-ID` are absent from the candidate's metadata — documenting the
+real smoke's own finding directly); `tests/test_live_send_orchestration.py` (four new checkpoint-ordering
+tests: captured-and-persisted-before-send, acquisition-failure-zero-sends, persistence-failure-zero-sends,
+successful-path-exactly-one-send); `tests/test_reconciliation_and_recovery.py` (all existing endpoint tests
+ported to the new signature; new tests for `AMBIGUOUS`, `HISTORY_EXPIRED`, missing-checkpoint
+`NOT_RECONCILABLE`, `SUCCEEDED`-cannot-be-reconciled, and idempotent-repeated-reconcile); `tests/
+test_send_provider_mode_binding.py` (Demo provider's `NotImplementedError` tests updated for both new/
+changed method signatures); `tests/live_gmail_send_helpers.py` and `tests/test_live_dispatch_reachable.py`
+(scripted transports extended to serve `users.getProfile`, since dispatch now makes that call before every
+send). No repository file outside `apps/api/` was touched; no frontend file was touched.
+
+**Local verification (no real network/provider call anywhere):** full backend suite green; targeted new/
+changed reconciliation test files green; `alembic upgrade head` + `alembic check` on a fresh scratch SQLite
+DB — zero drift, both directions (`upgrade`/`downgrade`) verified; canonical Demo byte-identical
+(`PASS 2/NEEDS_REVIEW 2/REJECTED 1/DUPLICATE 1/FAILED 1`, exact same scores as every prior checkpoint —
+Demo dispatch never touches any of this code); frontend `lint`/`typecheck`/`test`/`build` all clean (no
+frontend file changed). Exact counts and the commit/CI record are in the corrective commit and this
+session's own report — not re-stated here to avoid this document drifting from the authoritative numbers on
+a future edit.
+
+**Status:** this correction is committed and pushed to `claude/v2-i-b-gmail-execution`; PR #23 remains
+unmerged pending CI on this specific commit. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been
+made or authorized since the one smoke send this section documents.
 
 ---
 

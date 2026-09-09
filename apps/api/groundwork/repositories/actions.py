@@ -395,6 +395,29 @@ class ActionRepository:
             result = await session.execute(select(ActionExecutionRow).where(ActionExecutionRow.id == execution_id))
             return result.scalar_one_or_none()
 
+    async def record_pre_dispatch_history_checkpoint(
+        self, execution_id: str, *, pre_dispatch_history_id: str
+    ) -> ActionExecutionRow | None:
+        """V2-I-b correction (post-smoke) — the guarded `CLAIMED`-only
+        update that persists the Gmail mailbox history checkpoint BEFORE
+        any Gmail HTTP call is made, one step before the allowance
+        reservation. `rowcount != 1` (already transitioned away from
+        CLAIMED, or the row doesn't exist) means the caller MUST NOT
+        reserve an allowance slot or dispatch — mirrors
+        `transition_to_in_flight`'s own crash-recovery discipline exactly,
+        one step earlier in the ordering."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(ActionExecutionRow)
+                .where(ActionExecutionRow.id == execution_id, ActionExecutionRow.status == ActionExecutionStatus.CLAIMED.value)
+                .values(pre_dispatch_history_id=pre_dispatch_history_id)
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.commit()
+        return await self.get_execution(execution_id)
+
     async def transition_to_in_flight(
         self, execution_id: str, *, dispatched_at: datetime
     ) -> ActionExecutionRow | None:
