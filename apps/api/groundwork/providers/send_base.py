@@ -119,28 +119,28 @@ class ReconcileResult(BaseModel):
 class LiveExternalEmailSendDisabled(Exception):
     """V2-H, Critical Decision D1 — a dedicated, typed, structural refusal
     for `EMAIL_SEND` + `LIVE_EXTERNAL`. Deliberately NOT `ProviderNotConfigured`
-    (`providers/base.py`) and deliberately independent of whether any send
-    provider is registered: a real `GmailSendProvider` existing must never
-    silently make Live sending executable just because a provider object now
-    exists. `resolve_send_provider` (`providers/send_registry.py`) raises it
-    unconditionally for `Mode.LIVE`, and `api/routers/actions.py::
-    execute_action`'s `LIVE_EXTERNAL` branch calls that function FIRST —
-    before `api/gmail_provider_factory.py::build_gmail_send_provider` or
-    `api/live_send_orchestration.py::dispatch_live_email_send` are ever
-    reached — so this exception is the one and only thing that makes Live
-    email sending unreachable, regardless of how complete or correct the
-    rest of the implementation is.
+    (`providers/base.py`).
 
-    Status as of V2-I-b (gate-order correction — see `docs/PROGRESS.md`): a
-    real `GmailSendProvider` and the full dispatch/reconciliation/allowance/
-    audit path now exist, fully implemented and independently unit-tested,
-    but this refusal remains load-bearing and unconditional — it stays in
-    force until the accepted plan's full verification checklist (full
-    SQLite, full Postgres + migration drift verified in CI, canonical Demo,
-    the complete safety-test matrix) passes AND a human deliberately
-    authorizes removing it, in its own dedicated, reviewed step. A
-    documented "could not verify" gap (e.g. no local Postgres) is explicitly
-    NOT sufficient grounds to remove it — only a passed check is.
+    History: through V2-H/V2-I-a, and for part of V2-I-b, `resolve_send_
+    provider(Mode.LIVE)` (`providers/send_registry.py`) raised this
+    unconditionally, and `api/routers/actions.py::execute_action` called
+    that function for `LIVE_EXTERNAL` `EMAIL_SEND` — making this the one and
+    only thing that made Live email sending unreachable.
+
+    V2-I-b status (final): removed from the real dispatch path ONLY after
+    the accepted plan's full verification checklist actually PASSED in CI —
+    full SQLite, full Postgres + migration drift, canonical Demo, and the
+    complete safety-test matrix — and only on the user's explicit, separate
+    authorization for that specific change (see `docs/PROGRESS.md`'s V2-I-b
+    entry and PR #23 for the record). `execute_action`'s `LIVE_EXTERNAL`
+    branch now dispatches via `api/gmail_provider_factory.py::
+    build_gmail_send_provider` + `api/live_send_orchestration.py::
+    dispatch_live_email_send` instead — never through `resolve_send_provider`.
+    This class and `resolve_send_provider(Mode.LIVE)`'s unconditional raise
+    are BOTH unchanged and still present — `resolve_send_provider` remains
+    Demo-only and still raises this for `Mode.LIVE` if anything calls it
+    that way (see that module's docstring); it simply is not on the real
+    Live dispatch path any more.
     """
 
     code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
@@ -149,11 +149,9 @@ class LiveExternalEmailSendDisabled(Exception):
         super().__init__(
             message
             or (
-                "Live external email sending is disabled: a real GmailSendProvider exists (V2-I-b), but "
-                "this refusal remains the deliberate, load-bearing, unconditional gate on real Live "
-                "dispatch until the full accepted-plan verification checklist passes in CI (including "
-                "Postgres + migration drift) and a human explicitly authorizes removing it. Registering "
-                "or configuring a provider can never lift it on its own."
+                "resolve_send_provider(Mode.LIVE) is a defensive-only guard — a real GmailSendProvider "
+                "exists and real Live dispatch is reachable (V2-I-b, CI-verified), but it goes through "
+                "api/gmail_provider_factory.py::build_gmail_send_provider, never through this function."
             )
         )
 

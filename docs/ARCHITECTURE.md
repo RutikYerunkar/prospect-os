@@ -550,34 +550,43 @@ that gap, and only that gap — no `GmailSendProvider`, no reconciliation, no se
   set, cannot be cleared by a later successful observation, a reproposal, or any code path in this
   checkpoint — there is deliberately no clear/override endpoint.
 
-### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal implemented-but-retained
+### V2-I-b — real Live Gmail execution, reconciliation, audit; the refusal removed, real dispatch reachable
 
 A real `GmailSendProvider` and the full dispatch/reconciliation/allowance/audit path now exist, fully
-implemented and independently tested — but `LiveExternalEmailSendDisabled` remains the load-bearing,
-unconditional gate on real Live dispatch. **Gate-order correction, recorded explicitly:** an earlier state
-of this checkpoint removed the refusal on the reasoning that a documented Postgres-verification gap (no
-Docker/Postgres reachable in the implementation environment) was an acceptable substitute for a passed
-Postgres check. It was not, and the user reverted it — the accepted plan requires full SQLite, full
-Postgres + migration drift (verified in CI), canonical Demo, and the complete safety-test matrix to
-actually **pass**, not merely be attempted-and-explained-away, before this refusal may be removed. See
-`docs/PROGRESS.md`'s "What V2-I-b added" for the full account, including the new regression test proving a
-fully working Gmail connection cannot bypass the restored refusal.
+implemented and independently tested, AND wired into the real dispatch path —
+`LiveExternalEmailSendDisabled` is no longer on it. **Gate-order correction, recorded explicitly:** an
+earlier state of this checkpoint removed the refusal on the reasoning that a documented Postgres-
+verification gap (no Docker/Postgres reachable in the implementation environment) was an acceptable
+substitute for a passed Postgres check. It was not, and the user reverted it, requiring instead a
+CI-verification-only PR (#23) before any second attempt. That PR's CI came back green on all four required
+checks (`backend-sqlite`, `backend-postgres` + migration drift, `frontend`, `api-docker-build`), and the
+user then gave explicit, separate authorization to remove the refusal a second time — which is the current,
+final state. See `docs/PROGRESS.md`'s "What V2-I-b added" for the full three-state account.
 
-- **A different seam than `resolve_send_provider`, ready but not wired to fire.** `resolve_send_provider
-  (mode)` is a synchronous, mode-keyed function — correct for `Mode.DEMO` (a stateless, zero-egress
-  provider, constructable with no arguments), but structurally unable to construct a real Live provider,
-  which needs async DB access (the connected account + its decrypted refresh token via
-  `GmailConnectionRepository`/`token_crypto`). The real construction path exists as a purpose-built async
-  pair — `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the
-  token, constructs `GmailSendProvider`; `None` on no-usable-credential) then `api/live_send_
-  orchestration.py::dispatch_live_email_send` (the dispatch ordering itself) — fully implemented and
-  independently unit-tested (never through the router, exactly how it was built and verified before any
-  wiring existed). `execute_action`'s `LIVE_EXTERNAL` branch calls `resolve_send_provider(Mode.LIVE)`
-  FIRST — its unconditional raise — BEFORE that async pair is ever reached, so the pair stays implemented
-  but unreachable until the refusal is deliberately removed in its own future, separately-reviewed step.
-  Proposal-creation sender capture still goes through `_resolve_email_sender` (which reads
-  `GmailConnectionRepository` directly, not `resolve_send_provider`, for `LIVE_EXTERNAL` — unchanged since
-  V2-H) — that part of the design was never gated and remains as-is.
+- **A different seam than `resolve_send_provider` — now the one actually wired to fire.**
+  `resolve_send_provider(mode)` is a synchronous, mode-keyed function — correct for `Mode.DEMO` (a
+  stateless, zero-egress provider, constructable with no arguments), but structurally unable to construct a
+  real Live provider, which needs async DB access (the connected account + its decrypted refresh token via
+  `GmailConnectionRepository`/`token_crypto`). The real construction path is a purpose-built async pair —
+  `api/gmail_provider_factory.py::build_gmail_send_provider` (resolves the connection, decrypts the token,
+  constructs `GmailSendProvider`; `None` on no-usable-credential — never a fixture fallback) then
+  `api/live_send_orchestration.py::dispatch_live_email_send` (the dispatch ordering itself). `execute_
+  action`'s `LIVE_EXTERNAL` branch now calls this async pair directly; `resolve_send_provider(Mode.LIVE)`
+  is never called on this path anymore — it remains defined, unchanged, and still unconditionally raises
+  `LiveExternalEmailSendDisabled` if anything calls it with `Mode.LIVE`, kept as a defensive-only guard
+  against a future accidental miswire, not as the thing doing the gating. Proposal-creation sender capture
+  still goes through `_resolve_email_sender` (which reads `GmailConnectionRepository` directly, not
+  `resolve_send_provider`, for `LIVE_EXTERNAL` — unchanged since V2-H).
+- **What actually gates real dispatch now that the refusal doesn't.** In `execute_action`'s documented,
+  load-bearing enforcement order: capability gate -> approval exists -> `hash_version` equality -> fresh
+  sender re-resolution -> fresh content-hash recomputation -> hash comparison -> a FRESH
+  `domain/action_policy.py::evaluate()` (all 15 clauses, including `recipient_suppressed` — local AND
+  global — and `send_allowance_exhausted`) -> request idempotency -> `build_gmail_send_provider` returning
+  a working provider (never `None` — a missing/undecryptable credential still degrades honestly to `409
+  GMAIL_NOT_CONNECTED` with no execution row ever created) -> `dispatch_live_email_send`'s own ordering
+  (CLAIMED -> allowance reservation -> guarded IN_FLIGHT -> the one Gmail HTTP call). Every one of these is
+  unchanged from V2-H/V2-I-a/V2-I-b's earlier phases; only the refusal step was removed, and only from this
+  one call site.
 - **Dispatch ordering is the crash-recovery guarantee, not a convenience.** `CLAIMED` (write-ahead,
   carrying the generated Message-ID) commits BEFORE the allowance reservation, which commits BEFORE the
   guarded `IN_FLIGHT` transition, which commits BEFORE the one Gmail HTTP call. A process crash at any
