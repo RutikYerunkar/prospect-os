@@ -184,15 +184,36 @@ C above, "LIVE_PROVIDER + valid LinkedIn /in/ URL: real anchor") — not manuall
 doing so would require either a live-mode run with a real Hunter/Apollo LinkedIn match or hand-crafted
 database state, and the task brief scoped manual verification to Demo only.
 
-**One pre-existing, out-of-scope observation (not fixed here — explicitly not this checkpoint's file
-list).** `ActionAuditPanel.tsx`'s execution-status copy map (`SUCCEEDED → "Gmail accepted this message"`)
-is channel-agnostic and renders that exact Gmail-specific sentence under a SUCCEEDED LinkedIn execution
-too, which is misleading (a LinkedIn `COPY_AND_OPEN` execution never touches Gmail — see invariant A
-above). Noticed during the manual UI walkthrough. `ActionAuditPanel.tsx` is not in this checkpoint's
-authorized file list (Gmail/V2-I functionality is explicitly out of scope), so it was left unchanged;
-flagging here per this document's own "if something looks missing but isn't in the current checkpoint's
-file list, check before building it" discipline (`CLAUDE.md` § Scope discipline) rather than silently
-fixing or silently ignoring it.
+**Follow-up fix (same branch, `claude/v2-i-c-linkedin-closure`, applied before this PR was considered
+merge-ready): the `ActionAuditPanel.tsx` copy issue below was fixed, not left open.** It was originally
+flagged as a pre-existing, out-of-scope observation and deliberately left unchanged in the first pass of
+this checkpoint (Gmail/V2-I functionality was read as out of authorized scope); the user then explicitly
+authorized this narrow follow-up ("fix the one correctness issue you flagged... this is a narrow V2-I-c
+follow-up, not a scope expansion") before treating the PR as mergeable. `ActionAuditPanel.tsx`'s
+`outcomeCopy()` — previously a single channel-agnostic `status -> string` map — now takes an optional
+second `actionType` parameter and branches on it: `EMAIL_SEND` (the default when omitted, so every
+pre-existing call site and test is unaffected) keeps the exact original `EMAIL_OUTCOME_COPY` map
+byte-for-byte (`SUCCEEDED -> "Gmail accepted this message"`, etc.); `LINKEDIN_COPY_AND_OPEN` reads from a
+new, separate `LINKEDIN_OUTCOME_COPY` map — currently just `SUCCEEDED -> "LinkedIn copy/open action
+completed — no message was sent and no external site was contacted"`, the only status this action type can
+actually reach today (its `execute` branch settles `SUCCEEDED` synchronously in one step — see
+`api/routers/actions.py`'s `LINKEDIN_COPY_AND_OPEN` branch — never async, so `FAILED`/`UNCERTAIN`/
+`ABANDONED` are unreachable; no entry for those is deliberate, falling through to `null` rather than
+inventing untested prose for a state that can't occur). The call site
+(`const copy = execution ? outcomeCopy(execution.status, proposal.action_type) : null;`) reads
+`proposal.action_type`, which the `/audit` endpoint's `ActionAuditResponse.proposal` (a full
+`ActionProposalResponse`) already returned — **no backend change was needed or made.** Six new tests in
+`ActionAuditPanel.test.tsx` prove: `EMAIL_SEND` (explicit) keeps the exact required Gmail-accepted copy;
+`LINKEDIN_COPY_AND_OPEN` SUCCEEDED copy never contains "gmail" (case-insensitive); never claims send/
+dispatch/delivery/network-request activity; never claims LinkedIn itself was contacted; never claims the
+profile was opened (opening is a separate, operator-clicked `ActionApprovalPanel` affordance, not part of
+what `execute` did); differs from the `EMAIL_SEND` copy; and omitting `actionType` entirely still defaults
+to the original Gmail copy (backward compatibility for every pre-existing call site). Verification for this
+follow-up: `pnpm lint`/`pnpm typecheck`/`pnpm build` all clean; `pnpm test` — 122/122 passed (116 baseline +
+6 new, zero regressions); the two most relevant backend suites
+(`test_linkedin_action_path.py`+`test_action_audit_trail.py`, 13 tests) re-run and green — the full backend
+suite was not re-run since zero backend source changed. Zero provider/network calls; no real LinkedIn URL
+opened; `master` untouched; V2-J not started.
 
 **Verification.** Pre-edit measured baseline (this session, this branch, before any edit): backend
 `1163 passed, 1 skipped` in 411.56s; frontend `10 files / 111 tests passed`; frontend lint/typecheck/build
@@ -6083,11 +6104,15 @@ anywhere in this session's implementation or tests.
   internal state, no data fetching) — it exists specifically so a test can drive the anchor-vs-fallback
   branch without needing `ActionCard`'s own `useEffect`-populated `proposal` state, which `vitest.config.
   mts`'s plain-Node environment (no jsdom, no `@testing-library/react`) and this file's exclusive use of
-  `renderToStaticMarkup` can never exercise. `ActionAuditPanel.tsx`'s channel-agnostic
-  `SUCCEEDED → "Gmail accepted this message"` copy (see "What V2-I-c added" above, "One pre-existing,
-  out-of-scope observation") was deliberately NOT touched by this checkpoint — it is misleading for a
-  LinkedIn execution but is Gmail/V2-I-adjacent surface outside V2-I-c's authorized file list; do not treat
-  its continued presence as an oversight of this checkpoint. `tests/test_linkedin_action_path.py`'s direct
+  `renderToStaticMarkup` can never exercise. `ActionAuditPanel.tsx`'s `outcomeCopy()` is now
+  action-type-aware (see "What V2-I-c added" above, "Follow-up fix") — its `EMAIL_OUTCOME_COPY` map
+  (`SUCCEEDED → "Gmail accepted this message"`, etc.) must stay `EMAIL_SEND`-only and byte-identical to its
+  original wording; its separate `LINKEDIN_OUTCOME_COPY` map must never gain a Gmail-wording entry, never
+  claim send/dispatch/network activity, and never claim the profile was opened (that's a distinct,
+  operator-clicked `ActionApprovalPanel` affordance, not part of `execute`'s own outcome) — the same
+  provenance-honesty discipline `LinkedInOpenAction`'s fallback copy above already establishes. Omitting
+  `actionType` from `outcomeCopy()` must keep defaulting to the `EMAIL_SEND` map — every pre-existing call
+  site relies on that default. `tests/test_linkedin_action_path.py`'s direct
   module-attribute patch/restore of `groundwork.api.routers.actions.resolve_send_provider`/
   `build_gmail_send_provider` (`_patch_forbid_send_provider_resolvers`/`_restore_send_provider_resolvers`)
   is deliberately NOT done via the `monkeypatch` fixture in the tests that also need a REAL send later in

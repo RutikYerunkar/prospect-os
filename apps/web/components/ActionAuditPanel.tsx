@@ -4,10 +4,22 @@
  * V2-I-b Phase 10 — the immutable action audit trail, plus operator-only
  * reconcile/recover controls for a LIVE_EXTERNAL execution.
  *
- * Exact required copy (never paraphrased, never "delivered" for SUCCEEDED):
+ * Exact required copy for `EMAIL_SEND` (never paraphrased, never "delivered"
+ * for SUCCEEDED):
  * - SUCCEEDED  -> "Gmail accepted this message"
  * - UNCERTAIN  -> "acceptance not established — Groundwork will not resend"
  * - ABANDONED  -> "stopped checking; this is not evidence the message was not sent"
+ *
+ * `LINKEDIN_COPY_AND_OPEN` (V2-I-c) is a DIFFERENT execution shape — always
+ * local/governed completion (`provider=None`, `dispatched=False`, zero
+ * `action_send_calls`, no LinkedIn API/client ever touched — see
+ * `docs/PROGRESS.md`'s "What V2-I-c added") — so it gets its own,
+ * provenance-honest copy, keyed off `proposal.action_type`, never the
+ * `EMAIL_SEND`/Gmail wording above. It must never claim Gmail was involved,
+ * never claim a message was sent, never claim LinkedIn itself was
+ * contacted, and never claim the profile was opened (opening is a separate,
+ * operator-clicked UI affordance in `ActionApprovalPanel`, not part of what
+ * `execute` itself did).
  *
  * Never renders a raw Gmail provider payload, an OAuth token, or raw MIME —
  * only the already-derived, safe fields the audit API returns. There is no
@@ -21,11 +33,22 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { reasonCopy } from "@/components/ActionApprovalPanel";
 
-const OUTCOME_COPY: Record<string, string> = {
+const EMAIL_OUTCOME_COPY: Record<string, string> = {
   SUCCEEDED: "Gmail accepted this message",
   UNCERTAIN: "acceptance not established — Groundwork will not resend",
   ABANDONED: "stopped checking; this is not evidence the message was not sent",
   FAILED: "provably not dispatched, or definitively rejected before delivery could be attempted",
+};
+
+// V2-I-c — LINKEDIN_COPY_AND_OPEN always settles SUCCEEDED synchronously
+// (`insert_claimed_execution` -> `settle_execution_succeeded` in one step,
+// no async dispatch — see `api/routers/actions.py`'s `LINKEDIN_COPY_AND_OPEN`
+// branch), so FAILED/UNCERTAIN/ABANDONED are not reachable for it today.
+// No entry for those here is deliberate: falling through to `null` (no
+// special copy) is safer than inventing untested prose for a state this
+// action type cannot currently reach.
+const LINKEDIN_OUTCOME_COPY: Record<string, string> = {
+  SUCCEEDED: "LinkedIn copy/open action completed — no message was sent and no external site was contacted",
 };
 
 const STATUS_TONE: Record<string, BadgeTone> = {
@@ -37,8 +60,11 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   ABANDONED: "rose",
 };
 
-export function outcomeCopy(status: string): string | null {
-  return OUTCOME_COPY[status] ?? null;
+export function outcomeCopy(status: string, actionType?: string): string | null {
+  if (actionType === "LINKEDIN_COPY_AND_OPEN") {
+    return LINKEDIN_OUTCOME_COPY[status] ?? null;
+  }
+  return EMAIL_OUTCOME_COPY[status] ?? null;
 }
 
 export function ActionAuditPanel({ proposalId }: { proposalId: string }) {
@@ -114,7 +140,7 @@ export function ActionAuditPanel({ proposalId }: { proposalId: string }) {
   const { proposal, events, send_calls: sendCalls } = audit;
   const execution = proposal.execution;
   const isLive = execution?.origin === "LIVE_EXTERNAL";
-  const copy = execution ? outcomeCopy(execution.status) : null;
+  const copy = execution ? outcomeCopy(execution.status, proposal.action_type) : null;
 
   return (
     <div className="flex flex-col gap-3 rounded border border-zinc-800 bg-zinc-950/60 p-3 text-xs">
