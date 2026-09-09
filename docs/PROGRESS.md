@@ -32,21 +32,21 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-H — Action proposal + human approval (Demo executor only)** | branch `claude/v2-h-action-approval`, merged via PR #21 | `ActionProposal`/`ActionExecution`/`ActionEvent` governance path: `draft -> explicit action proposal -> immutable hash/sender binding -> human approval/rejection -> Demo execution -> immutable action audit trail`. Real Gmail sending stays entirely out of scope: Live `EMAIL_SEND` structurally terminates at a dedicated, unconditional `LiveExternalEmailSendDisabled` refusal (D1), reached only AFTER all other Live gates and a fully passing fresh policy evaluation (D4) — proving the refusal is structural, not a policy verdict. `domain/action_policy.py::evaluate()` (14 clauses at this point) is pure and DB-free; `api/routers/actions.py` wires the five write endpoints (`propose`/`approve`/`reject`/`execute`) plus reads. **This checkpoint deliberately did NOT implement the `claimed_email`/legal-restriction suppression semantics carried forward from V2-DH** — see its own D1 disposition below and "Immediate next task" at the foot of this section (as it stood before V2-I-a). See full narrative under "What V2-H added" below (this doc's table row was not updated at the time V2-H merged — recorded now, at V2-I-a, filling that gap explicitly rather than leaving the table silently one checkpoint behind the narrative). |
 | **V2-I-a — Legal/privacy send-suppression prerequisite** | `d185c95` (branch `claude/v2-i-a-send-suppression`, merged to `feature/v2-contact-enrichment` via PR #22) | Closes the BLOCKING `claimed_email` suppression requirement carried forward from V2-DH through V2-H, under the provider-neutral name `LEGAL_OR_PRIVACY_RESTRICTION`. Hunter's HTTP 451 is now `EnrichmentAttemptStatus.LEGAL_RESTRICTION` / a dedicated `EnrichmentLegalRestriction` exception (was `INVALID_RESPONSE`, indistinguishable from 404/422, until this checkpoint) — routed by `engine/enrichment.py::call_enrichment` to a new `ContactEnrichmentRepository.record_legal_restriction`, which preserves the EMAIL channel's prior identifier/state/observed_at byte-for-byte, writes LOCAL suppression metadata onto `contact_channels`, and — when a real identifier was already on record — upserts a GLOBAL `email_suppressions` row keyed by the existing `normalize_email_identity`. One additive Alembic revision (`94f688f37818`). New `domain/action_policy.py` clause 15 (`recipient_suppressed`) blocks `EMAIL_SEND` in BOTH `DEMO_SIMULATED` and `LIVE_EXTERNAL` origins (unlike clause 12), with no override, evaluated fresh at both proposal-creation and execute time. `LiveExternalEmailSendDisabled`'s message was narrowed to stop claiming the suppression prerequisite is unresolved (it no longer is) while remaining exactly as unconditional and load-bearing as before — Live `EMAIL_SEND` remains structurally impossible; only the *reason stated* changed, not the refusal itself. Frontend: `ContactPanel` renders a provider-neutral suppression note under Email verification; `ActionApprovalPanel` gained `recipient_suppressed` blocked-reason copy. No Gmail send provider, no reconciliation, no live-send allowance, and no suppression-clear/override endpoint were added — all explicitly out of scope, deferred to V2-I-b. Canonical Demo byte-identical. Zero provider/network calls anywhere in this session. See "What V2-I-a added" below. |
 | **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed, one real smoke performed, reconciliation corrected post-smoke)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`, retained for historical/audit compatibility only — see below), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->history-checkpoint->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Two real pre-existing bugs fixed while wiring this in (enum-class unification; a policy-ordering bug where `recipient_conflict` blocked an idempotent retry before the idempotency check ran). `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states — removed (incorrectly, on a documented-not-passed Postgres gap), restored, then removed again correctly only after PR #23's CI came back green on all four required checks and the user's explicit separate authorization. **The one authorized real-Gmail smoke was then performed and succeeded — and its own read-only follow-up diagnostic proved Gmail omits our generated Message-ID from the sent message's headers, disproving the original §3.3 reconciliation design's core assumption.** Reconciliation was rebuilt on a Gmail mailbox `historyId` checkpoint (captured pre-dispatch, persisted before `messages.send`) plus approved-metadata matching (Subject/To/From/Date, via a new pure `domain/reconciliation_match.py`) instead of the generated Message-ID — see "V2-I-b reconciliation correction — the real smoke's finding and the fix" below for the full account, including the corrected dispatch ordering, the new `pre_dispatch_history_id` column/migration, the new `AMBIGUOUS`/`HISTORY_EXPIRED` reconcile outcomes, and the complete updated test matrix. Canonical Demo byte-identical throughout. No real sender/recipient address, provider message id, raw Message-ID value, token, or secret is recorded anywhere in this document or the tests. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made or authorized. |
+| **V2-I-c — LinkedIn action-path closure** | *this commit* (branch `claude/v2-i-c-linkedin-closure`) | `ActionApprovalPanel`'s LinkedIn "Open" now reuses `lib/linkedinSafety.ts::isSafeLinkedInHref` (the same defense-in-depth check `ContactPanel`/V2-E already applies — never a second URL parser) against the LinkedIn contact-channel row's own `origin`/`discovery_state`/`identifier`: when it returns true, "Open" renders a real `<a target="_blank" rel="noreferrer noopener">` to the validated identifier; when false, the existing inline fallback panel renders instead, now with `origin`-aware copy — `DEMO_FIXTURE` keeps the original "simulated profile · demo fixture / no network request was made" wording verbatim, while a `LIVE_PROVIDER` channel that still didn't pass the safety check gets distinct, provenance-honest copy that never claims "demo fixture" or "no network request was made" about a real provider observation. The anchor-vs-fallback decision was extracted into an exported `LinkedInOpenAction` component so it's directly testable with explicit props (the existing test file has no jsdom/testing-library — `renderToStaticMarkup` never runs `useEffect`, so the real `ActionApprovalPanel`'s async `proposal` state can never be driven from a test). Eight new dedicated backend tests (`tests/test_linkedin_action_path.py`) prove, through the real API rather than pure kwargs: `LINKEDIN_COPY_AND_OPEN` executes with `provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None`/zero `action_send_calls`; no send-provider or Gmail-provider resolver is ever called (proven by monkeypatching both to raise); a Live LinkedIn execute consumes no live recipient identity and a later Live `EMAIL_SEND` to the same person still dispatches; a prior successful Live `EMAIL_SEND` to the recipient does NOT block a sibling LinkedIn proposal (clause 12 is `EMAIL_SEND`-only); a real legal/privacy suppression on the EMAIL channel does not affect the sibling LinkedIn proposal (clause 15 is `EMAIL_SEND`-only, complementing the existing pure-function coverage in `test_suppression_policy.py`); duplicate execute is idempotent; and weak/mismatch/unknown LinkedIn identity is blocked with no override. All eight passed on the first run against the existing backend — **no genuine backend defect was found, so no groundwork backend source was changed.** Five new frontend tests cover the four required scenarios (DEMO_FIXTURE zero-href, LIVE_PROVIDER valid-URL real anchor, LIVE_PROVIDER malformed-URL fallback, LIVE_PROVIDER fallback never says "demo fixture") plus a no-channel-row default case. Manual Demo-mode UI walkthrough (propose → approve → execute → Copy → Open) performed via a headless-Chromium Playwright script, confirmed: "Open profile" renders as a `<button>` (never a link) for `DEMO_FIXTURE`, zero `href` anywhere on the page, zero navigation. Canonical Demo untouched (no backend production code changed). Zero provider/network calls. No real LinkedIn URL was ever opened. Gmail/V2-I, reconciliation, suppression, allowance, contact identity grammar/matching, the review check count, the action-policy clause set, `fixtures/demo_pack.yaml`, schema/Alembic, and `master` are all untouched. See "What V2-I-c added" below. |
 
 ---
 
 ## Current checkpoint
 
-**V2-I-b — Live Gmail execution + reconciliation + audit — the structural refusal has been removed from
-the real dispatch path. Real Live `EMAIL_SEND` is reachable through the actual API, gated by the full set
-of real safety controls (below), not by `LiveExternalEmailSendDisabled`. The one authorized real-Gmail
-smoke has been performed successfully, and its own follow-up read-only diagnostic exposed a real gap in
-the original §3.3 reconciliation design (Gmail does not reliably preserve a generated Message-ID) — that
-gap has since been corrected; see "V2-I-b reconciliation correction — the real smoke's finding and the
-fix" below for the full account.** Supersedes the section below, which describes V2-I-a. The V2-I-a text
-below (through "What V2-I-a added") is **historical** and remains accurate for V2-I-a itself; this
-checkpoint's own narrative is under "What V2-I-b added" and the reconciliation-correction section
-immediately below.
+**V2-I-c — LinkedIn action-path closure.** COPY_AND_OPEN only — no LinkedIn scraping, automation, auto-DM,
+OAuth, credentials, unofficial API, or `LINKEDIN_SEND` action anywhere (unchanged v2 invariant). Closes the
+one remaining gap in `ActionApprovalPanel`'s LinkedIn "Open" behavior (it previously always showed the
+inline simulated panel, even for a real, safety-checked `LIVE_PROVIDER` LinkedIn URL that `ContactPanel`
+would already render as a real link) and adds the dedicated backend/frontend LinkedIn action-path test
+coverage the frozen plan calls for but no prior checkpoint had written as its own file. Supersedes the
+section below, which describes V2-I-b. The V2-I-b text below (through "What V2-I-b added" and the
+reconciliation-correction section) is **historical** and remains accurate for V2-I-b itself; this
+checkpoint's own narrative is under "What V2-I-c added" immediately below.
 
 **Three-state history, recorded explicitly per `CLAUDE.md`'s "flag rather than silently resolve"
 instruction:**
@@ -78,6 +78,164 @@ instruction:**
    opposite direction: a working credential reaches Gmail only after every other real safety control has
    passed. See "What V2-I-b added" below for the full safety-control inventory that now does the gating
    work the refusal used to, and the updated test matrix.
+
+### What V2-I-c added
+
+**Scope, exactly as authorized:** (1) fix `ActionApprovalPanel`'s LinkedIn "Open" behavior to reuse the
+existing `lib/linkedinSafety.ts::isSafeLinkedInHref` check rather than always showing the inline simulated
+panel; (2) add dedicated backend LinkedIn action-path tests; (3) add/update frontend `ActionApprovalPanel`
+tests; (4) correct this document's stale "Next task" and document this checkpoint. No production backend
+source was touched — the eight new backend tests all passed against the existing implementation on the
+first run, so per the task brief's explicit "if these tests expose a genuine backend defect, STOP and
+report it before changing groundwork backend source" instruction, nothing needed changing (the backend
+LinkedIn invariants — null provenance, no send-provider touch, no recipient-identity consumption, clause
+12/15 independence, idempotency, weak/mismatch/unknown-blocked-with-no-override — were already correctly
+implemented as of V2-H/V2-I-a; this checkpoint proves them through the real API rather than leaving them
+implied).
+
+**Frontend fix (`apps/web/components/ActionApprovalPanel.tsx`).** Before this checkpoint, a SUCCEEDED
+LinkedIn execution's "Open profile" button always toggled an inline `LinkedInSimulatedProfilePanel` — even
+for a prospect whose LinkedIn contact channel was a real, `RESOLVED`, `STRONG_MATCH` `LIVE_PROVIDER`
+identifier that `ContactPanel` (V2-E) already renders as a real, safety-checked `<a>`. That was the one
+remaining LinkedIn action-path inconsistency the frozen plan's Part 13 closure step exists to fix. The fix
+finds the prospect's own `linkedin` row in `contact_channels` and calls the SAME `isSafeLinkedInHref`
+helper `ContactPanel` already calls (`channel/origin/discoveryState/identifier` in, `boolean` out) — never
+a second URL parser, never a new safety path. When it returns `true`, "Open profile" is now a real
+`<a href={identifier} target="_blank" rel="noreferrer noopener">`; when `false` (the `DEMO_FIXTURE` case,
+or a `LIVE_PROVIDER` channel that isn't yet `RESOLVED`/isn't a valid canonical LinkedIn URL), the original
+toggle-button-reveals-inline-panel behavior is preserved, but the panel's copy is now `origin`-aware:
+`DEMO_FIXTURE` keeps the exact original text ("Simulated LinkedIn profile · demo fixture" / "No network
+request was made and no external page was opened"); `LIVE_PROVIDER` gets distinct copy ("LinkedIn profile
+— not shown as a link" / "This LinkedIn identifier did not pass the safe-link check...") that never claims
+"demo fixture" or "no network request was made" about a channel that really is a live provider observation
+— the same provenance-honesty discipline V2-I-a's suppression copy already established elsewhere in this
+same component. The anchor-vs-fallback decision itself was extracted into a new exported
+`LinkedInOpenAction({ prospect, linkedInChannel, openPanel, copied, onCopy, onToggleOpenPanel })` component
+— a pure prop-driven extraction of what was inline JSX inside `ActionCard`, no behavior change — purely so
+it can be rendered and tested with explicit props: `apps/web/vitest.config.mts` runs in a plain Node
+environment (no jsdom, no `@testing-library/react`), and every existing test in this file uses
+`renderToStaticMarkup`, which never executes `useEffect` — so a test that only had `ActionApprovalPanel`
+itself to drive could never populate the real component's async `proposal`/`execution` state and could
+therefore never reach this branch at all. This mirrors the codebase's own existing pattern of exporting a
+pure piece of a component file for direct testability (`reasonCopy`, already exported from this same file
+for the same reason).
+
+**Backend tests (`apps/api/tests/test_linkedin_action_path.py`, 8 new tests, all passing against the
+UNCHANGED backend).** Through the real API (`tests/action_helpers.py`'s `run_demo_play_to_completion` +
+`propose`/`approve`/`execute`, the same helpers `test_action_policy_integration.py`/
+`test_action_authorization.py`/`test_live_dispatch_reachable.py` already use), not pure `evaluate()` kwargs:
+- **A.** A Demo LinkedIn execute settles `SUCCEEDED` with `execution.provider is None`,
+  `execution.dispatched is False`, `execution.provider_message_id is None`; the persisted
+  `ActionExecutionRow` has `sender_identifier is None` and `recipient_identity_key is None`; the audit
+  endpoint's `send_calls` list is empty. `resolve_send_provider`/`build_gmail_send_provider` are directly
+  patched (not via `monkeypatch`, whose undo is scoped to test teardown rather than mid-test — see the
+  test file's own `_patch_forbid_send_provider_resolvers`/`_restore_send_provider_resolvers`) to raise if
+  called at all, proving D6/D2 structurally rather than merely observing no send happened to occur.
+- **B.** A duplicate execute of the same approved LinkedIn proposal returns the SAME execution id, creates
+  no second `ActionExecutionRow`, and the audit trail's `send_calls` stays empty across both calls.
+- **C.** In Live mode (operator session + a real Fernet-encrypted Gmail connection), a LinkedIn execute
+  still never touches either send-provider resolver; afterward,
+  `ActionRepository.recipient_conflict(<the same prospect's own normalized email identity>)` is `NONE` — no
+  live recipient identity was reserved — and a SUBSEQUENT real Live `EMAIL_SEND` for that same person (via
+  `tests/gmail_oauth_helpers.py::make_runtime` + a scripted Gmail transport, mirroring
+  `test_live_dispatch_reachable.py`) still dispatches and settles `SUCCEEDED`, proving the earlier LinkedIn
+  action never blocked it.
+- **D.** The reverse ordering: after a real Live `EMAIL_SEND` to a recipient actually `SUCCEEDED` (so
+  `recipient_conflict` for that identity is genuinely `SUCCEEDED`, and a second, content-different email
+  draft to the same recipient IS correctly `BLOCKED` with `already_sent_to_recipient` — clause 12 proven to
+  still work), a sibling LinkedIn proposal for the SAME prospect remains `ELIGIBLE` — clause 12 is
+  `EMAIL_SEND`-only and structurally never reads LinkedIn state at all.
+- **E.** After a real legal/privacy restriction (`ContactEnrichmentRepository.record_legal_restriction`,
+  the same V2-I-a path Hunter's HTTP 451 uses) is reported against a prospect's OWN email channel — which
+  correctly `BLOCK`s a fresh email proposal with `recipient_suppressed` — the sibling LinkedIn proposal for
+  that SAME prospect stays `ELIGIBLE`, executes, and settles `SUCCEEDED`. This is the real-API-wired
+  complement to the pure-function coverage already in `test_suppression_policy.py::
+  test_recipient_suppressed_never_appears_for_linkedin_copy_and_open`.
+- **F.** Parametrized over `WEAK_MATCH`/`MISMATCH`/`UNKNOWN` `LinkedInIdentityState` (directly mutating the
+  `contact_channels` row, mirroring how other tests mutate `ReviewResultRow`/`OutreachDraftRow` mid-test):
+  the LinkedIn proposal is `BLOCKED` with `linkedin_identity_not_strong`, and — proving no override exists
+  anywhere — `POST .../approve` on it 409s `PROPOSAL_BLOCKED`.
+
+**Frontend tests (`apps/web/components/ActionApprovalPanel.test.tsx`, 5 new tests via the new
+`LinkedInOpenAction` export).** A `channel()` fixture helper (mirroring `ContactPanel.test.tsx`'s own) plus:
+`DEMO_FIXTURE` + `demo://...` → zero `<a `/`href=`, "Simulated LinkedIn profile · demo fixture" and "No
+network request was made" both present; `LIVE_PROVIDER` + `RESOLVED` + a valid canonical
+`https://www.linkedin.com/in/...` URL → a real anchor with the exact `href`, `target="_blank"`,
+`rel="noreferrer noopener"`, and the fallback panel copy absent; `LIVE_PROVIDER` + a non-LinkedIn URL →
+zero `<a `/`href=`, the provenance-honest "not shown as a link" copy present; `LIVE_PROVIDER` +
+`NOT_FOUND` (unsafe for an unrelated reason — never `RESOLVED`) → the fallback copy contains neither "demo
+fixture" nor "no network request was made" (case-insensitively); no LinkedIn channel row at all → the
+toggle button renders, never a link (the pre-existing default the original 111-test baseline already
+exercised implicitly, now exercised directly). All 111 pre-existing frontend tests remain unchanged and
+green; the suite is 116/116 after this checkpoint.
+
+**Manual UI verification (Demo Mode only, per the task brief).** No project skill for launching this app
+existed yet, so a one-off headless-Chromium Playwright script (not committed — scratch verification only,
+matching the "manual walkthrough" checkpoint-verification pattern used since Checkpoint F) drove: New Play
+→ Run Agents → wait for terminal → open Northwind Labs → LinkedIn action card → Propose → Approve →
+Execute → Copy message → Open profile. Confirmed by DOM inspection and a full-page screenshot: the "Open
+profile" control is a `<button>` (not a link) for this `DEMO_FIXTURE` prospect; `document.querySelectorAll
+("a[href]")` across the ENTIRE page returns zero results referencing the `demo://linkedin/priya-natarajan`
+identifier or any `linkedin.com` URL; the browser's own navigation log shows zero navigation away from
+`localhost:3000` at any point in the flow; the revealed panel shows the exact original demo-fixture copy.
+**No real LinkedIn URL was opened or even constructed as a navigable target anywhere in this session.**
+`LIVE_PROVIDER` real-anchor behavior is, per the task brief, component-test-only for this checkpoint (test
+C above, "LIVE_PROVIDER + valid LinkedIn /in/ URL: real anchor") — not manually clicked in a browser, since
+doing so would require either a live-mode run with a real Hunter/Apollo LinkedIn match or hand-crafted
+database state, and the task brief scoped manual verification to Demo only.
+
+**Follow-up fix (same branch, `claude/v2-i-c-linkedin-closure`, applied before this PR was considered
+merge-ready): the `ActionAuditPanel.tsx` copy issue below was fixed, not left open.** It was originally
+flagged as a pre-existing, out-of-scope observation and deliberately left unchanged in the first pass of
+this checkpoint (Gmail/V2-I functionality was read as out of authorized scope); the user then explicitly
+authorized this narrow follow-up ("fix the one correctness issue you flagged... this is a narrow V2-I-c
+follow-up, not a scope expansion") before treating the PR as mergeable. `ActionAuditPanel.tsx`'s
+`outcomeCopy()` — previously a single channel-agnostic `status -> string` map — now takes an optional
+second `actionType` parameter and branches on it: `EMAIL_SEND` (the default when omitted, so every
+pre-existing call site and test is unaffected) keeps the exact original `EMAIL_OUTCOME_COPY` map
+byte-for-byte (`SUCCEEDED -> "Gmail accepted this message"`, etc.); `LINKEDIN_COPY_AND_OPEN` reads from a
+new, separate `LINKEDIN_OUTCOME_COPY` map — currently just `SUCCEEDED -> "LinkedIn copy/open action
+completed — no message was sent and no external site was contacted"`, the only status this action type can
+actually reach today (its `execute` branch settles `SUCCEEDED` synchronously in one step — see
+`api/routers/actions.py`'s `LINKEDIN_COPY_AND_OPEN` branch — never async, so `FAILED`/`UNCERTAIN`/
+`ABANDONED` are unreachable; no entry for those is deliberate, falling through to `null` rather than
+inventing untested prose for a state that can't occur). The call site
+(`const copy = execution ? outcomeCopy(execution.status, proposal.action_type) : null;`) reads
+`proposal.action_type`, which the `/audit` endpoint's `ActionAuditResponse.proposal` (a full
+`ActionProposalResponse`) already returned — **no backend change was needed or made.** Six new tests in
+`ActionAuditPanel.test.tsx` prove: `EMAIL_SEND` (explicit) keeps the exact required Gmail-accepted copy;
+`LINKEDIN_COPY_AND_OPEN` SUCCEEDED copy never contains "gmail" (case-insensitive); never claims send/
+dispatch/delivery/network-request activity; never claims LinkedIn itself was contacted; never claims the
+profile was opened (opening is a separate, operator-clicked `ActionApprovalPanel` affordance, not part of
+what `execute` did); differs from the `EMAIL_SEND` copy; and omitting `actionType` entirely still defaults
+to the original Gmail copy (backward compatibility for every pre-existing call site). Verification for this
+follow-up: `pnpm lint`/`pnpm typecheck`/`pnpm build` all clean; `pnpm test` — 122/122 passed (116 baseline +
+6 new, zero regressions); the two most relevant backend suites
+(`test_linkedin_action_path.py`+`test_action_audit_trail.py`, 13 tests) re-run and green — the full backend
+suite was not re-run since zero backend source changed. Zero provider/network calls; no real LinkedIn URL
+opened; `master` untouched; V2-J not started.
+
+**Verification.** Pre-edit measured baseline (this session, this branch, before any edit): backend
+`1163 passed, 1 skipped` in 411.56s; frontend `10 files / 111 tests passed`; frontend lint/typecheck/build
+all clean; `ruff check apps/api` — 27 pre-existing findings (19 `F401`, 5 `E402`, 3 `F841`, all pre-existing
+and outside this checkpoint's file list — untouched); canonical Demo — `PASS 2/NEEDS_REVIEW 2/REJECTED 1/
+DUPLICATE 1/FAILED 1`, Northwind 92/Sable 79/Riverbend 35/Ferrous 58 (matches the documented reference
+exactly). Post-edit: backend `1171 passed, 1 skipped` (the 8 new tests; zero regressions, skip count
+unchanged) in the full SQLite suite; frontend `10 files / 116 tests passed` (the 5 new tests; zero
+regressions); frontend lint/typecheck/build all clean; `ruff check apps/api/tests/test_linkedin_action_path.py`
+— zero findings (the pre-existing 27 elsewhere are unchanged, not newly introduced); canonical Demo
+re-run — byte-identical to the pre-edit baseline (same distribution, same four scores; no backend
+production code was changed in this checkpoint, so this is expected, not merely hoped for). Postgres +
+migration drift: **not run** — this remote session has no reachable Docker daemon (`docker ps` fails with
+"cannot connect to the Docker daemon"), the same environment limitation V2-I-b's own history documents
+(the "documented Postgres-verification gap" the user correctly rejected as a substitute for a *passed*
+Postgres check, for a refusal-removal decision). This checkpoint makes no such removal and touches zero
+schema/Alembic, so the risk profile is materially different, but the gap is disclosed here exactly as
+`CLAUDE.md` requires rather than silently assumed away — a future session (or CI on the PR) should confirm
+Postgres/migration-drift stays green. Zero external provider/network calls anywhere in this session's
+implementation, tests, or manual verification. No real LinkedIn URL was opened. No Gmail/V2-I production
+code was changed. `master` was never touched (not fetched, not checked out, not written to). V2-J was not
+started.
 
 ### What V2-I-b added
 
@@ -5502,40 +5660,32 @@ No PR was created this session, per the task's explicit instruction to stop befo
 
 ## Next task
 
-**Immediate next task: V2-I — Live Gmail execution + reconciliation + audit** (`claude/v2-i-gmail-
-execution`), per `docs/V2_IMPLEMENTATION_PLAN.md` Part 13 §V2-I. V2-H (action proposal + human approval,
-Demo executor only) is now COMPLETE — see "Current checkpoint"/"What V2-H added" above; do not re-open it
-or begin any V2-I work in the same session unless the user explicitly authorizes rolling into the next
-checkpoint.
+**Immediate next task: V2-J — the single integration PR into `master`**, per the v2 section of
+`docs/V2_IMPLEMENTATION_PLAN.md`/`CLAUDE.md`'s own invariant ("`master` remains untouched until the single
+V2-J integration PR; Render keeps deploying `master` only"). V2-A through V2-I-c are ALL now complete and
+merged (or, for V2-I-c itself, PR'd) into `feature/v2-contact-enrichment` — see the "Completed checkpoints"
+table above. V2-J was explicitly NOT started in this (V2-I-c) session, per that session's own task brief;
+do not begin it without the user's explicit authorization to roll into the next checkpoint.
 
-**The BLOCKING `claimed_email` suppression requirement is STILL UNRESOLVED** — V2-H deliberately did NOT
-implement it (see D1 above); it remains the hard prerequisite V2-I must design and implement BEFORE
-`LiveExternalEmailSendDisabled` may be removed/replaced and any `GmailSendProvider` may be wired up for
-real sending. Do not treat V2-H's structural refusal as a substitute for that suppression design — it is
-a safety backstop, not the fix.
-
-**V2-H's own two documented Part 4/9 divergences (D1's dedicated refusal in place of `ProviderNotConfigured`,
-and D2's separate `resolve_send_provider` resolver in place of a `ProviderBundle.send` field) should be
-treated as the load-bearing design for V2-I to extend, not re-litigate** — see `docs/ARCHITECTURE.md`'s
-"V2-H" subsection for the full rationale.
-
-**Historical note (superseded by the above — kept for continuity):** the paragraphs below this point were
-written at the end of V2-G, when the immediate next task was still V2-H. V2-H is now complete (see "What
-V2-H added" above); the still-open items they name (the `claimed_email` blocker, the completed Hunter/
-Apollo smokes, the I2/v1 backlog folded into V2-J) remain accurately open and are not restated above.
+**Historical note (superseded by the above — kept for continuity):** the paragraphs immediately below this
+point were written at the end of V2-G, when the immediate next task was still V2-H, and were never updated
+as V2-H through V2-I-c completed in turn — this is exactly the "stale Next task" this V2-I-c session's own
+task brief asked to correct. V2-H, V2-I-a, V2-I-b, and V2-I-c are now ALL complete (see the "Completed
+checkpoints" table and each checkpoint's own "What ... added" section above, including V2-I-a's closure of
+the `claimed_email`/`LEGAL_OR_PRIVACY_RESTRICTION` suppression requirement this section used to describe as
+still-blocking). The still-open items the paragraphs below name that remain genuinely open (the completed
+Hunter/Apollo smoke status, the I2/v1 backlog folded into V2-J) are accurate as historical record and are
+not restated above; anything about V2-H/V2-I/`claimed_email` being still-open below is superseded and must
+not be treated as current state.
 
 **The §3.3 hard gate is now SATISFIED / VERIFIED** — the user personally ran `make gmail-scope-probe`
 against their own real, consented Gmail test account and all three findings (`users.getProfile`,
 `messages.list(labelIds=["SENT"])`, `messages.get(format="metadata", metadataHeaders=[...])`) came back
-PERMITTED under `gmail.metadata` alone; see "Current checkpoint"/"What V2-G added" above for the exact
-observations. `scripts/gmail_scope_probe.py`/`make gmail-scope-probe` remain manual-only and must never
-be run automatically by any future session regardless — this status came from the user's own hands, not
-from documentation or inference, and any *future* re-verification (e.g. after a scope change) must be
-run the same way.
-
-**Before V2-G/V2-F reaches V2-H/V2-I, the BLOCKING `claimed_email` suppression
-requirement recorded above must be designed and implemented before any external `EMAIL_SEND` path is
-enabled — this is a hard prerequisite for that later checkpoint, not optional polish.
+PERMITTED under `gmail.metadata` alone; see "What V2-G added" above for the exact observations.
+`scripts/gmail_scope_probe.py`/`make gmail-scope-probe` remain manual-only and must never be run
+automatically by any future session regardless — this status came from the user's own hands, not from
+documentation or inference, and any *future* re-verification (e.g. after a scope change) must be run the
+same way.
 
 **Real Hunter smoke: COMPLETE.** Both the zero-cost `--use-test-api-key` probe and the real, billed smoke
 (one real person) have been run — by the user, manually, with explicit approval, outside any automated
@@ -5940,3 +6090,34 @@ anywhere in this session's implementation or tests.
   allow-list rather than ever reflecting the raw query string — that allow-list is intentionally
   independent of (though currently identical to) the backend's own `_ALLOWED_GOOGLE_ERROR_REASONS`, so a
   future change to either one is a deliberate, visible diff rather than a silent divergence.
+- **V2-I-c's own do-not-touch:** `ActionApprovalPanel.tsx`'s `LinkedInOpenAction` must keep calling
+  `lib/linkedinSafety.ts::isSafeLinkedInHref` — the SAME function `ContactPanel` (V2-E) already calls —
+  never a second URL parser or a second link-safety path; the two components' safety verdicts must always
+  agree for the same channel row. The `DEMO_FIXTURE` fallback copy ("Simulated LinkedIn profile · demo
+  fixture" / "No network request was made and no external page was opened") must stay byte-identical to
+  its pre-V2-I-c wording — it is asserted verbatim in `ActionApprovalPanel.test.tsx`. The `LIVE_PROVIDER`
+  fallback copy must never contain the strings "demo fixture" or "no network request was made" (checked
+  case-insensitively in the same test file) — that is the entire point of making the copy `origin`-aware;
+  collapsing the two branches back into one shared string would silently reintroduce a live provider
+  observation being described as a demo simulation. `LinkedInOpenAction` must stay a pure, prop-driven
+  export (`prospect`/`linkedInChannel`/`openPanel`/`copied`/`onCopy`/`onToggleOpenPanel` in, JSX out, no
+  internal state, no data fetching) — it exists specifically so a test can drive the anchor-vs-fallback
+  branch without needing `ActionCard`'s own `useEffect`-populated `proposal` state, which `vitest.config.
+  mts`'s plain-Node environment (no jsdom, no `@testing-library/react`) and this file's exclusive use of
+  `renderToStaticMarkup` can never exercise. `ActionAuditPanel.tsx`'s `outcomeCopy()` is now
+  action-type-aware (see "What V2-I-c added" above, "Follow-up fix") — its `EMAIL_OUTCOME_COPY` map
+  (`SUCCEEDED → "Gmail accepted this message"`, etc.) must stay `EMAIL_SEND`-only and byte-identical to its
+  original wording; its separate `LINKEDIN_OUTCOME_COPY` map must never gain a Gmail-wording entry, never
+  claim send/dispatch/network activity, and never claim the profile was opened (that's a distinct,
+  operator-clicked `ActionApprovalPanel` affordance, not part of `execute`'s own outcome) — the same
+  provenance-honesty discipline `LinkedInOpenAction`'s fallback copy above already establishes. Omitting
+  `actionType` from `outcomeCopy()` must keep defaulting to the `EMAIL_SEND` map — every pre-existing call
+  site relies on that default. `tests/test_linkedin_action_path.py`'s direct
+  module-attribute patch/restore of `groundwork.api.routers.actions.resolve_send_provider`/
+  `build_gmail_send_provider` (`_patch_forbid_send_provider_resolvers`/`_restore_send_provider_resolvers`)
+  is deliberately NOT done via the `monkeypatch` fixture in the tests that also need a REAL send later in
+  the same test function — `monkeypatch`'s undo is scoped to test teardown, not to a chosen point mid-test,
+  so using it there would leave the real send blocked too. No groundwork backend production source was
+  changed by this checkpoint — the eight new backend tests proved the existing LinkedIn action-path
+  invariants already held; do not read the mere existence of this test file as evidence that a backend bug
+  was found and fixed here.

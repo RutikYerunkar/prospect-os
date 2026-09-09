@@ -634,3 +634,57 @@ final state. See `docs/PROGRESS.md`'s "What V2-I-b added" for the full three-sta
 - **`ABANDONED` is honest, not a euphemism for "probably not sent."** The audit copy states plainly that
   reaching `ABANDONED` is not evidence the message wasn't sent — Groundwork simply stopped checking. The
   recipient identity stays blocked permanently; there is no resend anywhere in this codebase.
+
+### V2-I-c — LinkedIn action-path closure
+
+COPY_AND_OPEN only, unchanged from every earlier checkpoint's own statement of this invariant: there is no
+`LINKEDIN_SEND` action anywhere in `models/enums.py::ActionType` (exactly two members,
+`EMAIL_SEND`/`LINKEDIN_COPY_AND_OPEN`), no scraping, no automation, no auto-DM, no LinkedIn OAuth or
+credentials, no unofficial API. V2-I-c closes the one remaining LinkedIn-specific gap the frozen plan's
+Part 13 closure step calls for — a UI inconsistency, not a backend gap — and adds the dedicated
+action-path test coverage that had not yet been written as its own file (LinkedIn's invariants had been
+proven incidentally, one test at a time, across `test_action_policy.py`, `test_action_policy_integration.py`,
+`test_suppression_policy.py`, and `test_audit_trail.py`, but never as one deliberate suite).
+
+**The gap.** `ContactPanel` (V2-E) already renders a real, safety-checked `<a>` for a `LIVE_PROVIDER`
+LinkedIn identifier that is `RESOLVED` and passes `lib/linkedinSafety.ts::isSafeLinkedInHref`. Until
+V2-I-c, `ActionApprovalPanel`'s own "Open profile" control for a SUCCEEDED LinkedIn execution never
+consulted that same check at all — it always toggled the inline simulated-profile panel, even for a
+prospect whose LinkedIn channel was exactly the kind of real, verified identifier `ContactPanel` would
+already have linked. Two independent surfaces disagreeing about whether the SAME identifier is safe to
+link is itself a defense-in-depth failure mode (V2-E's whole design rests on there being exactly one
+answer to "is this identifier safe," computed the same way everywhere it's asked).
+
+**The fix, and why it doesn't add a second safety path.** `ActionApprovalPanel` now finds the prospect's
+own `linkedin` row in `contact_channels` and calls `isSafeLinkedInHref` — the identical function
+`ContactPanel` calls, imported from the identical module, with the identical four inputs
+(`channel`/`origin`/`discoveryState`/`identifier`). There is still exactly one LinkedIn link-safety
+decision in this codebase; `ActionApprovalPanel` now asks it too, rather than never asking. When it
+returns `true`: a real `<a target="_blank" rel="noreferrer noopener">`. When `false`: the original
+toggle-reveals-inline-panel UX is unchanged, but the panel's copy is now `origin`-aware — `DEMO_FIXTURE`
+keeps its original wording byte-for-byte; `LIVE_PROVIDER` (a channel that is real but didn't pass the
+check — not yet `RESOLVED`, or a malformed/non-LinkedIn URL) gets distinct, provenance-honest copy that
+never claims "demo fixture" or "no network request was made" about a real provider observation — the same
+discipline V2-I-a's `recipient_suppressed` copy already established for this exact component (provider-
+neutral, never asserting something false about *how* the state came to be).
+
+**Backend: tests only, zero production-code change.** The eight dedicated tests this checkpoint adds
+(`tests/test_linkedin_action_path.py`) prove, through the real API, invariants that were already true as
+of V2-H/V2-I-a but had never been asserted together in one place: `LINKEDIN_COPY_AND_OPEN` executes with
+`provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None` and zero
+`action_send_calls`; neither send-provider resolver (`resolve_send_provider` for Demo,
+`build_gmail_send_provider` for Live) is ever called (D6/D2, proven structurally by patching both to
+raise); a LinkedIn execute in Live mode consumes no live recipient identity — `domain/action_policy.py`'s
+clause 12 (`recipient_conflict`) and clause 15 (`recipient_suppressed`) are structurally scoped to
+`action_type is ActionType.EMAIL_SEND` (see `evaluate()`'s own `if`/`else` split), so a LinkedIn proposal
+for a prospect whose email is independently suppressed or already-sent-to is provably unaffected; and a
+weak/mismatch/unknown LinkedIn identity match state is `BLOCKED` with no approve-time override, exactly
+like every other blocked verdict in this system (D7). All eight passed against the UNCHANGED backend on
+first run — per this checkpoint's own task brief ("if these tests expose a genuine backend defect, STOP
+and report it before changing groundwork backend source"), that meant nothing needed changing, not that
+the tests were skipped or weakened to pass.
+
+See `docs/PROGRESS.md`'s "What V2-I-c added" for the full file list, the exact test matrix, the manual
+Demo-mode UI verification (headless-Chromium, DOM-inspected, zero navigation), and one pre-existing,
+out-of-scope observation (`ActionAuditPanel.tsx`'s channel-agnostic "Gmail accepted this message" copy
+also rendering under a LinkedIn execution) noted but deliberately not fixed here.

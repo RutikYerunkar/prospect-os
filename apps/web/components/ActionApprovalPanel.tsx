@@ -12,11 +12,19 @@
  * no button, query parameter, or hidden affordance that approves/executes a
  * blocked proposal; the server independently refuses it regardless.
  *
- * LinkedIn in Demo: "Copy" performs a real clipboard write of the draft;
- * "Open" reveals an inline simulated-profile panel built from data already
- * on this page (the prospect's own grounded contact/company facts) — never
- * an external navigation, and never a `demo://` value in an `<a href>`
- * anywhere (the same `EvidenceCard`/`ContactPanel` origin-gate precedent).
+ * LinkedIn "Open" (V2-I-c): reuses `lib/linkedinSafety.ts::isSafeLinkedInHref`
+ * against the LinkedIn contact-channel row's own `origin`/`discovery_state`/
+ * `identifier` — the SAME defense-in-depth check `ContactPanel` already
+ * applies (never a second URL parser). When it returns true, "Open" is a
+ * real `<a target="_blank" rel="noreferrer noopener">` to the validated
+ * identifier. When it returns false, "Open" reveals an inline fallback
+ * panel instead — never an external navigation, and never a `demo://` (or
+ * any other unsafe) value in an `<a href>` anywhere. A `DEMO_FIXTURE`
+ * channel keeps the original "simulated profile, no network request"
+ * copy; a `LIVE_PROVIDER` channel that still didn't pass the safety check
+ * (not yet `RESOLVED`, or a malformed/non-LinkedIn URL) gets distinct,
+ * provenance-honest copy — it must never claim "demo fixture" or "no
+ * network request was made" about a real provider observation.
  */
 
 import { useEffect, useState } from "react";
@@ -28,7 +36,8 @@ import {
   proposeAction,
   rejectAction,
 } from "@/lib/api";
-import type { ActionProposal, OutreachDraft, ProspectAggregate } from "@/lib/types";
+import { isSafeLinkedInHref } from "@/lib/linkedinSafety";
+import type { ActionProposal, ContactChannel, OutreachDraft, ProspectAggregate } from "@/lib/types";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ActionAuditPanel } from "@/components/ActionAuditPanel";
@@ -73,20 +82,88 @@ export function reasonCopy(reason: string): string {
   return BLOCKED_REASON_COPY[reason] ?? reason;
 }
 
-function LinkedInSimulatedProfilePanel({ prospect }: { prospect: ProspectAggregate }) {
+function LinkedInFallbackProfilePanel({
+  prospect,
+  isLiveProvider,
+}: {
+  prospect: ProspectAggregate;
+  isLiveProvider: boolean;
+}) {
   const name = prospect.contact?.full_name ?? "Unknown";
   const title = prospect.contact?.title ?? "Unknown title";
   const company = (prospect.company.display_name as string | undefined) ?? "Unknown company";
   return (
     <div className="mt-2 rounded border border-zinc-700 bg-zinc-900/80 p-3 text-xs text-zinc-300">
-      <p className="text-[10px] uppercase tracking-wide text-zinc-500">Simulated LinkedIn profile · demo fixture</p>
+      <p className="text-[10px] uppercase tracking-wide text-zinc-500">
+        {isLiveProvider ? "LinkedIn profile — not shown as a link" : "Simulated LinkedIn profile · demo fixture"}
+      </p>
       <p className="mt-1 font-medium text-zinc-100">{name}</p>
       <p className="text-zinc-400">
         {title} at {company}
       </p>
       <p className="mt-1.5 text-[11px] text-zinc-600">
-        No network request was made and no external page was opened — this is a local, simulated rendering only.
+        {isLiveProvider
+          ? "This LinkedIn identifier did not pass the safe-link check, so it is not offered as a clickable link — see the Contact panel for its current resolution state."
+          : "No network request was made and no external page was opened — this is a local, simulated rendering only."}
       </p>
+    </div>
+  );
+}
+
+/**
+ * Extracted from `ActionCard` (V2-I-c) so the anchor-vs-fallback decision
+ * can be rendered and tested with explicit props — `renderToStaticMarkup`
+ * never runs `useEffect`, so a test driving `ActionCard` itself can never
+ * populate `proposal`/`openPanel` state to reach this branch at all.
+ */
+export function LinkedInOpenAction({
+  prospect,
+  linkedInChannel,
+  openPanel,
+  copied,
+  onCopy,
+  onToggleOpenPanel,
+}: {
+  prospect: ProspectAggregate;
+  linkedInChannel: ContactChannel | null;
+  openPanel: boolean;
+  copied: boolean;
+  onCopy: () => void;
+  onToggleOpenPanel: () => void;
+}) {
+  const linkedInHref = isSafeLinkedInHref({
+    channel: linkedInChannel?.channel,
+    origin: linkedInChannel?.origin,
+    discoveryState: linkedInChannel?.discovery_state,
+    identifier: linkedInChannel?.identifier,
+  })
+    ? linkedInChannel?.identifier
+    : null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <Button variant="secondary" onClick={onCopy}>
+          {copied ? "Copied!" : "Copy message"}
+        </Button>
+        {linkedInHref ? (
+          <a
+            href={linkedInHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-indigo-400 hover:text-indigo-300"
+          >
+            Open profile ↗
+          </a>
+        ) : (
+          <Button variant="secondary" onClick={onToggleOpenPanel}>
+            {openPanel ? "Close profile" : "Open profile"}
+          </Button>
+        )}
+      </div>
+      {!linkedInHref && openPanel && (
+        <LinkedInFallbackProfilePanel prospect={prospect} isLiveProvider={linkedInChannel?.origin === "LIVE_PROVIDER"} />
+      )}
     </div>
   );
 }
@@ -183,6 +260,7 @@ function ActionCard({ draft, prospect }: { draft: OutreachDraft; prospect: Prosp
   const blocked = proposal?.policy_verdict === "BLOCKED";
   const approvalState = proposal?.approval?.state ?? "PENDING";
   const executionStatus = proposal?.execution?.status ?? null;
+  const linkedInChannel = prospect.contact_channels.find((c) => c.channel === "linkedin") ?? null;
 
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
@@ -264,17 +342,14 @@ function ActionCard({ draft, prospect }: { draft: OutreachDraft; prospect: Prosp
           )}
 
           {executionStatus === "SUCCEEDED" && isLinkedIn && (
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" onClick={handleCopy}>
-                  {copied ? "Copied!" : "Copy message"}
-                </Button>
-                <Button variant="secondary" onClick={() => setOpenPanel((v) => !v)}>
-                  {openPanel ? "Close profile" : "Open profile"}
-                </Button>
-              </div>
-              {openPanel && <LinkedInSimulatedProfilePanel prospect={prospect} />}
-            </div>
+            <LinkedInOpenAction
+              prospect={prospect}
+              linkedInChannel={linkedInChannel}
+              openPanel={openPanel}
+              copied={copied}
+              onCopy={handleCopy}
+              onToggleOpenPanel={() => setOpenPanel((v) => !v)}
+            />
           )}
 
           {error && <p className="text-rose-400">{error}</p>}
