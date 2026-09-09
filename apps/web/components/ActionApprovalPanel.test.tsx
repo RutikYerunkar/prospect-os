@@ -1,7 +1,33 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActionApprovalPanel, reasonCopy } from "@/components/ActionApprovalPanel";
-import type { OutreachDraft, ProspectAggregate } from "@/lib/types";
+import { ActionApprovalPanel, LinkedInOpenAction, reasonCopy } from "@/components/ActionApprovalPanel";
+import type { ContactChannel, OutreachDraft, ProspectAggregate } from "@/lib/types";
+
+function channel(overrides: Partial<ContactChannel> & { channel: string }): ContactChannel {
+  return {
+    identifier: null,
+    discovery_state: null,
+    verification_state: null,
+    identity_match_state: null,
+    derivation_version: "v1",
+    observed_at: null,
+    last_attempt_at: null,
+    last_attempt_status: null,
+    last_attempt_error_type: null,
+    origin: null,
+    provider: null,
+    stale: null,
+    stale_after_days: null,
+    preserved_state: null,
+    provider_confidence: null,
+    is_catch_all: null,
+    send_suppressed_at: null,
+    send_suppression_reason: null,
+    send_suppression_source: null,
+    send_suppression_provider_code: null,
+    ...overrides,
+  };
+}
 
 function draft(overrides: Partial<OutreachDraft> & { id: string; channel: string }): OutreachDraft {
   return {
@@ -118,5 +144,118 @@ describe("ActionApprovalPanel — V2-I-a recipient_suppressed blocked-reason cop
 
   it("falls back to the raw reason string for an unrecognized code", () => {
     expect(reasonCopy("some_future_reason")).toBe("some_future_reason");
+  });
+});
+
+describe("LinkedInOpenAction — V2-I-c reuses lib/linkedinSafety.ts::isSafeLinkedInHref", () => {
+  const NOOP = () => {};
+
+  it("DEMO_FIXTURE + demo:// identifier: inline simulated panel, zero href", () => {
+    const li = channel({
+      channel: "linkedin",
+      origin: "DEMO_FIXTURE",
+      discovery_state: "RESOLVED",
+      identity_match_state: "STRONG_MATCH",
+      identifier: "demo://linkedin/priya-natarajan",
+    });
+    const html = renderToStaticMarkup(
+      <LinkedInOpenAction
+        prospect={prospect()}
+        linkedInChannel={li}
+        openPanel={true}
+        copied={false}
+        onCopy={NOOP}
+        onToggleOpenPanel={NOOP}
+      />,
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("href=");
+    expect(html).toContain("Simulated LinkedIn profile · demo fixture");
+    expect(html).toContain("No network request was made");
+  });
+
+  it("LIVE_PROVIDER + valid LinkedIn /in/ URL: real anchor, target=_blank, rel=noreferrer noopener", () => {
+    const li = channel({
+      channel: "linkedin",
+      origin: "LIVE_PROVIDER",
+      discovery_state: "RESOLVED",
+      identity_match_state: "STRONG_MATCH",
+      identifier: "https://www.linkedin.com/in/priya-natarajan",
+    });
+    const html = renderToStaticMarkup(
+      <LinkedInOpenAction
+        prospect={prospect()}
+        linkedInChannel={li}
+        openPanel={false}
+        copied={false}
+        onCopy={NOOP}
+        onToggleOpenPanel={NOOP}
+      />,
+    );
+    expect(html).toContain('href="https://www.linkedin.com/in/priya-natarajan"');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noreferrer noopener"');
+    // The fallback panel never renders alongside a real anchor.
+    expect(html).not.toContain("Simulated LinkedIn profile");
+    expect(html).not.toContain("not shown as a link");
+  });
+
+  it("LIVE_PROVIDER + malformed/non-LinkedIn URL: no anchor, fallback panel", () => {
+    const li = channel({
+      channel: "linkedin",
+      origin: "LIVE_PROVIDER",
+      discovery_state: "RESOLVED",
+      identity_match_state: "STRONG_MATCH",
+      identifier: "https://example.com/not-linkedin",
+    });
+    const html = renderToStaticMarkup(
+      <LinkedInOpenAction
+        prospect={prospect()}
+        linkedInChannel={li}
+        openPanel={true}
+        copied={false}
+        onCopy={NOOP}
+        onToggleOpenPanel={NOOP}
+      />,
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("href=");
+    expect(html).toContain("LinkedIn profile — not shown as a link");
+  });
+
+  it('LIVE_PROVIDER fallback never says "demo fixture" or claims no network request was made', () => {
+    const li = channel({
+      channel: "linkedin",
+      origin: "LIVE_PROVIDER",
+      discovery_state: "NOT_FOUND", // not RESOLVED -> unsafe -> fallback panel
+      identifier: null,
+    });
+    const html = renderToStaticMarkup(
+      <LinkedInOpenAction
+        prospect={prospect()}
+        linkedInChannel={li}
+        openPanel={true}
+        copied={false}
+        onCopy={NOOP}
+        onToggleOpenPanel={NOOP}
+      />,
+    );
+    expect(html.toLowerCase()).not.toContain("demo fixture");
+    expect(html.toLowerCase()).not.toContain("no network request was made");
+  });
+
+  it("renders the toggle button (not a link) when no LinkedIn channel row exists at all", () => {
+    const html = renderToStaticMarkup(
+      <LinkedInOpenAction
+        prospect={prospect()}
+        linkedInChannel={null}
+        openPanel={false}
+        copied={false}
+        onCopy={NOOP}
+        onToggleOpenPanel={NOOP}
+      />,
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("Open profile");
   });
 });
