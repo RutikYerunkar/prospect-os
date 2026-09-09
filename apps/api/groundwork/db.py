@@ -56,6 +56,12 @@ async def create_all() -> None:
     head`, run explicitly (see docs/RUNBOOK.md) — never this function."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # V2-I-b: the `live_send_allowance_lock` singleton must exist on every
+    # schema-creation path — local import to avoid a module-load-time
+    # circular import (repositories/* never import `db.py`).
+    from groundwork.repositories.live_send_allowance import ensure_singleton_seeded
+
+    await ensure_singleton_seeded(SessionLocal)
 
 
 async def create_all_if_sqlite() -> bool:

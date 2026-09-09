@@ -603,6 +603,12 @@ export interface ActionExecutionInfo {
   claimed_at: string | null;
   dispatched_at: string | null;
   settled_at: string | null;
+  // V2-I-b — additive audit/reconciliation fields.
+  reconcile_attempts: number;
+  messages_scanned: number;
+  reconciled_at: string | null;
+  last_error_type: string | null;
+  last_error_message: string | null;
 }
 
 export interface ActionProposal {
@@ -625,4 +631,45 @@ export interface ActionProposal {
   created: boolean;
   approval: ActionApprovalInfo | null;
   execution: ActionExecutionInfo | null;
+}
+
+// --- V2-I-b: Live Gmail execution + reconciliation + audit ---
+
+export interface ActionReconcileResult {
+  execution: ActionExecutionInfo;
+  reconcile_status: string;
+  attempts_remaining: number;
+  next_terminalization_at: string | null;
+}
+
+export interface ActionRecoverResult {
+  execution: ActionExecutionInfo;
+  recovered: boolean;
+  reason: string | null;
+}
+
+export interface ActionEvent {
+  id: string;
+  type: string;
+  actor: string;
+  payload: Record<string, unknown>;
+  ts: string;
+}
+
+export interface ActionSendCall {
+  id: string;
+  operation: string;
+  provider: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  latency_ms: number;
+  http_status: number | null;
+  error_type: string | null;
+}
+
+export interface ActionAudit {
+  proposal: ActionProposal;
+  events: ActionEvent[];
+  send_calls: ActionSendCall[];
 }

@@ -258,12 +258,27 @@ class SendOutcome(StrEnum):
 
 class ReconcileStatus(StrEnum):
     """Part 4 / §3.3 — `NOT_FOUND_WITHIN_BOUNDS` is deliberately not `None`:
-    it is not evidence of non-delivery."""
+    it is not evidence of non-delivery.
+
+    V2-I-b correction (post-smoke): `AMBIGUOUS` and `HISTORY_EXPIRED` added.
+    The real smoke send proved Gmail can omit both `Message-ID` and
+    `X-Google-Original-Message-ID` from `format=metadata` after
+    `messages.send` — reconciliation was rebuilt on a `historyId` checkpoint
+    (`users.getProfile`/`users.history.list`) plus approved-metadata
+    matching (Subject/To/From/Date) instead. `AMBIGUOUS` (more than one
+    history candidate matches) and `HISTORY_EXPIRED` (the persisted
+    `startHistoryId` is outside Gmail's retention window) are both, like
+    `NOT_FOUND_WITHIN_BOUNDS`/`LOOKUP_FAILED`, never converted to `FAILED`
+    by the reconcile endpoint — the execution stays `UNCERTAIN`, distinctly
+    labeled so an operator can tell "no match", "more than one match", and
+    "the checkpoint itself expired" apart."""
 
     FOUND = "FOUND"
     NOT_FOUND_WITHIN_BOUNDS = "NOT_FOUND_WITHIN_BOUNDS"
     UNSUPPORTED = "UNSUPPORTED"  # provider cannot reconcile at all
     LOOKUP_FAILED = "LOOKUP_FAILED"  # the reconciliation call itself failed
+    AMBIGUOUS = "AMBIGUOUS"  # more than one history candidate matched — never guess
+    HISTORY_EXPIRED = "HISTORY_EXPIRED"  # startHistoryId outside Gmail's retention window
 
 
 class ApprovalScope(StrEnum):

@@ -207,6 +207,54 @@ class ActionExecutionInfo(BaseModel):
     claimed_at: datetime | None = None
     dispatched_at: datetime | None = None
     settled_at: datetime | None = None
+    # V2-I-b — additive audit/reconciliation fields. Never a raw Gmail
+    # payload, OAuth token, or raw MIME body — see `ActionAuditResponse`.
+    reconcile_attempts: int = 0
+    messages_scanned: int = 0
+    reconciled_at: datetime | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+
+
+class ActionReconcileResponse(BaseModel):
+    """`POST /api/actions/executions/{id}/reconcile` (V2-I-b, Phase 8).
+    `reconcile_status` is what THIS call just established —
+    `"FOUND"` / `"NOT_FOUND_WITHIN_BOUNDS"` / `"LOOKUP_FAILED"` /
+    `"ABANDONED"` / `"ATTEMPTS_EXHAUSTED_WINDOW_OPEN"` — never conflated
+    with `execution.status`, which is the durable execution state."""
+
+    execution: ActionExecutionInfo
+    reconcile_status: str
+    attempts_remaining: int
+    next_terminalization_at: datetime | None = None
+
+
+class ActionRecoverResponse(BaseModel):
+    """`POST /api/actions/executions/{id}/recover` (V2-I-b, Phase 9)."""
+
+    execution: ActionExecutionInfo
+    recovered: bool
+    reason: str | None = None
+
+
+class ActionEventInfo(BaseModel):
+    id: str
+    type: str
+    actor: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    ts: datetime
+
+
+class ActionSendCallInfo(BaseModel):
+    id: str
+    operation: str
+    provider: str
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    latency_ms: float
+    http_status: int | None = None
+    error_type: str | None = None
 
 
 class ActionProposalResponse(BaseModel):
@@ -229,6 +277,16 @@ class ActionProposalResponse(BaseModel):
     created: bool = True
     approval: ActionApprovalInfo | None = None
     execution: ActionExecutionInfo | None = None
+
+
+class ActionAuditResponse(BaseModel):
+    """`GET /api/actions/proposals/{id}/audit` (V2-I-b, Phase 10) — the full,
+    immutable audit trail for one proposal. Never a raw Gmail provider
+    payload, never an OAuth token, never raw MIME."""
+
+    proposal: ActionProposalResponse
+    events: list[ActionEventInfo] = Field(default_factory=list)
+    send_calls: list[ActionSendCallInfo] = Field(default_factory=list)
 
 
 # --- settings ---

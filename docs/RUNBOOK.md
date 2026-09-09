@@ -141,23 +141,87 @@ operator as a test user with awareness of the 7-day limit) before relying on a l
   `SESSION_SIGNING_KEY` (either alone hard-disables it) via whatever mechanism your host uses to change
   environment variables, then restart the process.
 
-## Live `EMAIL_SEND` returns `403 LIVE_EXTERNAL_EMAIL_SEND_DISABLED` (V2-H — expected, not a bug)
+## Live `EMAIL_SEND` — the structural refusal is gone; real dispatch is reachable (V2-I-b, post-smoke correction)
 
-Every Live `POST /api/actions/proposals/{id}/execute` for an `EMAIL_SEND` proposal returns this
-structural refusal, by design, regardless of configuration — see `providers/send_base.py::
-LiveExternalEmailSendDisabled` and `docs/PROGRESS.md`'s "What V2-H added"/D1 for the full rationale. Two
-things this is **not**:
-- **Not a missing-credential problem.** Setting `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (Gmail OAuth
-  connection, V2-G) does not affect this at all — connecting Gmail only lets a Live proposal capture and
-  verify a sender identity; it does not enable sending.
-- **Not something a future config flag will lift.** The refusal is unconditional in code
-  (`providers/send_registry.py::resolve_send_provider(Mode.LIVE)` always raises) specifically so that
-  wiring up a `GmailSendProvider` in V2-I-b can't accidentally make Live sending reachable before a real
-  send provider actually exists. If you're building V2-I-b and need this refusal removed, that removal
-  must be a deliberate, reviewed code change in `providers/send_registry.py` — not a config toggle.
+`LiveExternalEmailSendDisabled` is no longer on the real dispatch path. **Gate-order history:** an earlier
+state of the V2-I-b checkpoint briefly removed this refusal on the reasoning that a documented "Postgres
+unreachable in this environment" gap was an acceptable substitute for a passed Postgres verification. It
+was not; the user reverted it and required a CI-verification-only PR (#23) instead. That PR's CI came back
+green on all four required checks, and the user then gave explicit, separate authorization to remove the
+refusal a second time — this is that final state. See `docs/PROGRESS.md`'s V2-I-b entry for the full
+three-state account.
+
+**What actually gates a real send now** (the refusal no longer does):
+1. `providers/live/gmail_send.py::GmailSendProvider` — the real send/reconcile provider, now reachable.
+2. `api/gmail_provider_factory.py::build_gmail_send_provider` — resolves a working connection async;
+   returns `None` (never a fixture fallback) on a missing/undecryptable credential, which
+   `execute_action` turns into `409 GMAIL_NOT_CONNECTED` with no execution row ever created.
+3. `api/live_send_orchestration.py::dispatch_live_email_send` — the real dispatch ordering (CLAIMED ->
+   pre-dispatch Gmail history checkpoint acquired+persisted -> allowance reservation -> guarded IN_FLIGHT ->
+   the one Gmail HTTP call -> classify -> settle). The checkpoint step (V2-I-b correction, post-smoke) fails
+   closed — settles `FAILED`/`PROVEN_NOT_DISPATCHED`, touches no allowance, calls Gmail no further — if
+   acquisition or persistence fails.
+4. The rolling-24h send allowance (`LIVE_MAX_SENDS_PER_DAY`, default 50) — DB-backed, correct across
+   processes; a `409` with `send_allowance_exhausted` in `blocked_reasons` at the policy pre-check, or a
+   denied reservation at the transaction itself for a narrower race — both block before any Gmail call.
+5. Recipient send-suppression (local `contact_channels` + global `email_suppressions`,
+   `recipient_suppressed`) — see the section below; still blocks both Demo and Live, no override.
+6. The five server-side Live authorization gates unchanged since V2-H (operator session, approval exists,
+   sender unchanged since approval, content unchanged since approval, a fresh policy re-evaluation) — all
+   still enforced, all still independent of the refusal that used to also be there.
+7. Request idempotency (§3.5A) and the recipient-level one-initial-Live-send-per-identity rule (§3.5B) —
+   both unchanged.
+
+`resolve_send_provider(Mode.LIVE)` and the `LiveExternalEmailSendDisabled` exception are still present in
+the codebase, unchanged, and still unconditionally raise if anything calls that function with `Mode.LIVE` —
+they are simply no longer called on the real Live `EMAIL_SEND` dispatch path (`execute_action` now calls
+`build_gmail_send_provider`/`dispatch_live_email_send` directly). This is a defensive-only guard against a
+future accidental miswire, not the thing enforcing safety here — the controls listed above are.
+`test_live_dispatch_reachable.py` proves the successful path reaches Gmail only after every gate above has
+passed, and that suppression/allowance/missing-credential each independently block with zero Gmail calls.
+
 - `DEMO_MAX_ACTIONS_PER_RUN` (default 10, V2-H) caps how many `action_executions` rows one Demo run may
   accumulate — a public-abuse control, independent of the per-client-IP `action_write_rate_limit_*`
   settings (mirrors `public_write_rate_limit_*`'s shape, same per-process caveat as above).
+
+A send settles to one of three terminal-or-pending states (§3.4 taxonomy, `domain/send_classifier.py`):
+`SUCCEEDED` (Gmail returned 200 with a parseable `Message.id`), `FAILED` (provably never dispatched, or a
+definitive 400/401/404 rejection — the ONLY status that frees the recipient identity), or `UNCERTAIN`
+(anything else — every 403/429/5xx, a timeout after dispatch began, an unparseable 200). An `UNCERTAIN`
+execution is never resent automatically; reconcile it (`POST /api/actions/executions/{id}/reconcile`,
+operator-gated) up to `RECONCILE_MAX_ATTEMPTS` times within `RECONCILE_WINDOW_S` of dispatch, or let it
+settle to `ABANDONED` once the window closes (also zero-egress — no Gmail call is made once exhausted or
+expired). `ABANDONED` is terminal and still blocks the recipient identity; there is no resend anywhere in
+this codebase, ever.
+
+**Reconciliation is historyId-anchored, not Message-ID-anchored (V2-I-b correction, post-smoke).** The one
+authorized real Gmail smoke succeeded, and a read-only follow-up diagnostic against that exact sent message
+found `Message-ID` and `X-Google-Original-Message-ID` BOTH absent from Gmail's `format=metadata` response —
+Subject/To/From/Date were present and matched. The original design assumed Gmail preserves a caller-supplied
+Message-ID; that assumption is disproven. `GmailSendProvider.find_sent_message` now takes the persisted
+`pre_dispatch_history_id` plus the approved Subject/recipient/sender and a dispatch/settle time window,
+calls `users.history.list(startHistoryId=..., labelId="SENT", historyTypes=["messageAdded"])` for candidate
+ids, then `messages.get(format="metadata", metadataHeaders=[Subject,To,From,Date])` per candidate — still
+only `gmail.metadata`-scoped operations, still never `q`, still never body/`full`/`raw`. A candidate matches
+only if Subject (canonicalized, RFC-2047-aware), To, From, and Date ALL match; every bounded candidate is
+evaluated before deciding (never a first-match short-circuit), so `FOUND` (exactly one match) is
+distinguishable from the new `ReconcileStatus.AMBIGUOUS` (more than one match — stays `UNCERTAIN`, never
+guesses). A `404` from `history.list` (checkpoint outside Gmail's retention window) is the new
+`ReconcileStatus.HISTORY_EXPIRED` — also stays `UNCERTAIN`. `message_id_header` is still generated and
+persisted for historical/audit compatibility; the reconciliation path no longer reads it. See
+`docs/PROGRESS.md`'s "V2-I-b reconciliation correction" entry for the full account — no real sender/
+recipient address, provider message id, raw Message-ID value, token, or secret is recorded there.
+
+**No second real Gmail send has occurred or been authorized.** The one authorized real-Gmail smoke (a
+single real send to an operator-controlled inbox) has been performed, under explicit separate
+authorization and a strict one-send budget, and succeeded. Any further real send requires its own new,
+separate, explicit authorization.
+
+A `CLAIMED`/`IN_FLIGHT` execution stuck past `EXECUTION_STALE_LEASE_S` (default 300s — a process crashed
+mid-dispatch) is recovered via `POST /api/actions/executions/{id}/recover` (operator-gated): a stale
+`CLAIMED` settles to `FAILED`/`PROVEN_NOT_DISPATCHED` (it's provable nothing was ever sent); a stale
+`IN_FLIGHT` settles to `UNCERTAIN` (it's not provable either way) — never dispatched, never re-dispatched,
+never releases the allowance reservation.
 
 ## Recipient send-suppression (V2-I-a) — what `recipient_suppressed` means
 

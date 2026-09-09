@@ -689,6 +689,20 @@ class ActionExecutionRow(Base):
     origin: Mapped[str] = mapped_column(String)  # ActionExecutionOrigin
 
     message_id_header: Mapped[str | None] = mapped_column(String, nullable=True)
+    # V2-I-b correction (post-smoke) — the Gmail mailbox history checkpoint
+    # (`users.getProfile`'s own `historyId`), captured and persisted BEFORE
+    # `messages.send` is ever called. The load-bearing reconciliation
+    # anchor: the real smoke send proved Gmail can omit our generated
+    # `message_id_header` from BOTH `Message-ID` and
+    # `X-Google-Original-Message-ID` on the sent message, so reconciliation
+    # no longer depends on it. Stored as `String`, never a 32-bit int —
+    # Gmail's `historyId` is an opaque, unboundedly-growing decimal counter
+    # (serialized as a JSON string by the API itself); this column
+    # preserves it losslessly rather than assuming it fits any fixed-width
+    # integer type. NULL for every execution created before this
+    # correction, and for `DEMO_SIMULATED` executions (which never
+    # reconcile at all).
+    pre_dispatch_history_id: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
     executor_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -804,3 +818,37 @@ class OAuthStateRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# =====================================================================
+# V2-I-b — rolling 24h Live send allowance (Phase 5). Exactly two additive
+# tables. `live_send_allowance_lock` carries exactly one seeded row
+# (`id="default"`) whose `version` column is the guard: every reservation
+# attempt starts with a guarded `UPDATE ... SET version = version + 1 WHERE
+# id = 'default'` inside the SAME transaction as the reservation-count
+# read and the reservation insert (see
+# `repositories/live_send_allowance.py`) — this row-level write lock is what
+# makes the count-then-insert correct under concurrency, exactly like
+# `runs.last_event_seq` already guards SSE sequencing. `live_send_
+# reservations` rows are NEVER deleted/released for any outcome — the
+# allowance is consumed the moment a reservation is inserted, permanently.
+# =====================================================================
+
+
+class LiveSendAllowanceLockRow(Base):
+    __tablename__ = "live_send_allowance_lock"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="default")
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class LiveSendReservationRow(Base):
+    """One row per successfully reserved Live send — `execution_id` is
+    unique (one reservation per execution, never released). `reserved_at`
+    is the rolling-window timestamp counted against `LIVE_MAX_SENDS_PER_DAY`
+    — the window is rolling (now - 24h), never reset at UTC midnight."""
+
+    __tablename__ = "live_send_reservations"
+
+    execution_id: Mapped[str] = mapped_column(ForeignKey("action_executions.id"), primary_key=True)
+    reserved_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)

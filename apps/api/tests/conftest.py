@@ -14,6 +14,7 @@ from groundwork.api.routers import actions as actions_router
 from groundwork.api.routers import plays as plays_router
 from groundwork.main import app
 from groundwork.models.tables import Base
+from groundwork.repositories.live_send_allowance import ensure_singleton_seeded
 
 
 def _enable_wal(dbapi_connection, connection_record) -> None:
@@ -49,6 +50,9 @@ async def session_factory():
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(test_engine, expire_on_commit=False)
+    # V2-I-b: every dialect/schema-initialization path must seed the
+    # `live_send_allowance_lock` singleton — this is the test-suite path.
+    await ensure_singleton_seeded(factory)
     yield factory
     await test_engine.dispose()
     for suffix in ("", "-wal", "-shm"):

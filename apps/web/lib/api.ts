@@ -1,5 +1,8 @@
 import type {
+  ActionAudit,
   ActionProposal,
+  ActionReconcileResult,
+  ActionRecoverResult,
   GmailConnectionResponse,
   GmailConnectResponse,
   OperatorLoginRequest,
@@ -218,4 +221,20 @@ export function rejectAction(proposalId: string, reason: string, actor = "demo_u
 
 export function executeAction(proposalId: string, actor = "demo_user"): Promise<ActionProposal> {
   return apiPost<ActionProposal>(`/api/actions/proposals/${proposalId}/execute`, { actor });
+}
+
+// V2-I-b — reconciliation, stale recovery, audit. All three are operator-
+// gated server-side (Live-only concepts); the UI only renders their
+// controls when an operator session and a LIVE_EXTERNAL execution are both
+// present (see `ActionAuditPanel`).
+export function reconcileExecution(executionId: string): Promise<ActionReconcileResult> {
+  return apiPost<ActionReconcileResult>(`/api/actions/executions/${executionId}/reconcile`, {});
+}
+
+export function recoverExecution(executionId: string): Promise<ActionRecoverResult> {
+  return apiPost<ActionRecoverResult>(`/api/actions/executions/${executionId}/recover`, {});
+}
+
+export function getActionAudit(proposalId: string): Promise<ActionAudit> {
+  return apiGet<ActionAudit>(`/api/actions/proposals/${proposalId}/audit`);
 }

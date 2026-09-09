@@ -17,6 +17,14 @@ Gmail itself is deployment-scoped, not run-scoped (see
 Protocol and `DemoEmailSendProvider` are therefore deliberately NOT part of
 `providers.base.ProviderBundle`; `ProviderBundle` stays exactly the three
 fields V2-D/V2-DH already established (`llm`, `search`, `enrichment`).
+
+V2-I-b: `SendOutcome`/`ReconcileStatus` are imported from `models/enums.py`
+— the frozen Part 4 canonical location, and the same classes
+`domain/send_classifier.py` and `models/tables.py::ActionExecutionRow`
+already use — rather than re-declared locally, so a `classify_send_outcome()`
+result can be assigned straight into a `SendResult`/`ReconcileResult` field
+without pydantic silently coercing across two same-named-but-distinct enum
+classes (which would break `is`/exhaustive-match identity checks).
 """
 
 from __future__ import annotations
@@ -27,6 +35,22 @@ from enum import StrEnum
 from typing import Protocol
 
 from pydantic import BaseModel, Field
+
+from groundwork.models.enums import ReconcileStatus, SendOutcome
+
+__all__ = [
+    "SendAttemptStatus",
+    "SendAttemptTelemetry",
+    "SendOutcome",
+    "OutboundEmailMessage",
+    "SendResult",
+    "ReconcileStatus",
+    "ReconcileBounds",
+    "ReconcileResult",
+    "LiveExternalEmailSendDisabled",
+    "EmailSendProvider",
+    "DemoEmailSendProvider",
+]
 
 
 class SendAttemptStatus(StrEnum):
@@ -62,13 +86,6 @@ class SendAttemptTelemetry(BaseModel):
     error_message: str | None = None  # redacted before this is set
 
 
-class SendOutcome(StrEnum):
-    ACCEPTED = "ACCEPTED"
-    PROVEN_NOT_DISPATCHED = "PROVEN_NOT_DISPATCHED"
-    DEFINITIVE_REJECTION = "DEFINITIVE_REJECTION"
-    ACCEPTANCE_UNKNOWN = "ACCEPTANCE_UNKNOWN"
-
-
 class OutboundEmailMessage(BaseModel):
     to: str
     subject: str
@@ -82,13 +99,6 @@ class SendResult(BaseModel):
     provider_thread_id: str | None = None
     dispatched: bool  # was the body written to the transport? sets dispatched_at
     telemetry: list[SendAttemptTelemetry] = Field(default_factory=list)
-
-
-class ReconcileStatus(StrEnum):
-    FOUND = "FOUND"
-    NOT_FOUND_WITHIN_BOUNDS = "NOT_FOUND_WITHIN_BOUNDS"  # NOT evidence of non-delivery
-    UNSUPPORTED = "UNSUPPORTED"  # provider cannot reconcile at all
-    LOOKUP_FAILED = "LOOKUP_FAILED"  # the reconciliation call itself failed
 
 
 class ReconcileBounds(BaseModel):
@@ -109,22 +119,28 @@ class ReconcileResult(BaseModel):
 class LiveExternalEmailSendDisabled(Exception):
     """V2-H, Critical Decision D1 — a dedicated, typed, structural refusal
     for `EMAIL_SEND` + `LIVE_EXTERNAL`. Deliberately NOT `ProviderNotConfigured`
-    (`providers/base.py`) and deliberately independent of whether any send
-    provider is registered: registering a future `GmailSendProvider` (V2-I-b)
-    must never silently make Live sending executable again just because a
-    provider object now exists. This exception is the one and only thing
-    that makes Live email sending unreachable — `resolve_send_provider`
-    (`providers/send_registry.py`) raises it unconditionally for `Mode.LIVE`,
-    before any provider instance, `send()` call, or network dispatch is ever
-    reachable.
+    (`providers/base.py`).
 
-    V2-I-a's legal/privacy send-suppression prerequisite (see
-    `docs/PROGRESS.md`'s V2-I-a entry) is now implemented — the message below
-    no longer names it as an unresolved blocker, since it no longer is one.
-    This refusal itself stays load-bearing and unconditional regardless: it
-    is not about suppression at all, it is about the fact that no real send
-    provider exists yet. It stays in force until V2-I-b *deliberately*
-    removes/replaces it, after implementing a real `GmailSendProvider`.
+    History: through V2-H/V2-I-a, and for part of V2-I-b, `resolve_send_
+    provider(Mode.LIVE)` (`providers/send_registry.py`) raised this
+    unconditionally, and `api/routers/actions.py::execute_action` called
+    that function for `LIVE_EXTERNAL` `EMAIL_SEND` — making this the one and
+    only thing that made Live email sending unreachable.
+
+    V2-I-b status (final): removed from the real dispatch path ONLY after
+    the accepted plan's full verification checklist actually PASSED in CI —
+    full SQLite, full Postgres + migration drift, canonical Demo, and the
+    complete safety-test matrix — and only on the user's explicit, separate
+    authorization for that specific change (see `docs/PROGRESS.md`'s V2-I-b
+    entry and PR #23 for the record). `execute_action`'s `LIVE_EXTERNAL`
+    branch now dispatches via `api/gmail_provider_factory.py::
+    build_gmail_send_provider` + `api/live_send_orchestration.py::
+    dispatch_live_email_send` instead — never through `resolve_send_provider`.
+    This class and `resolve_send_provider(Mode.LIVE)`'s unconditional raise
+    are BOTH unchanged and still present — `resolve_send_provider` remains
+    Demo-only and still raises this for `Mode.LIVE` if anything calls it
+    that way (see that module's docstring); it simply is not on the real
+    Live dispatch path any more.
     """
 
     code = "LIVE_EXTERNAL_EMAIL_SEND_DISABLED"
@@ -133,10 +149,9 @@ class LiveExternalEmailSendDisabled(Exception):
         super().__init__(
             message
             or (
-                "Live external email sending is disabled in this checkpoint: no GmailSendProvider "
-                "exists yet — real Gmail sending is V2-I-b scope. This refusal is unconditional and "
-                "independent of whether any send provider is registered or configured; configuring "
-                "one must never silently lift it — V2-I-b must remove it deliberately."
+                "resolve_send_provider(Mode.LIVE) is a defensive-only guard — a real GmailSendProvider "
+                "exists and real Live dispatch is reachable (V2-I-b, CI-verified), but it goes through "
+                "api/gmail_provider_factory.py::build_gmail_send_provider, never through this function."
             )
         )
 
@@ -157,13 +172,37 @@ class EmailSendProvider(Protocol):
         """V2-H (Demo)/V2-I (Live) scope — not called anywhere in V2-G."""
         ...
 
+    async def get_history_checkpoint(self) -> str | None:
+        """V2-I-b correction (post-smoke) — a pre-dispatch Gmail mailbox
+        history checkpoint (`users.getProfile`'s own `historyId`), captured
+        and persisted BEFORE `send()` is ever called
+        (`api/live_send_orchestration.py::dispatch_live_email_send`).
+        `None` on any failure (never raises) — the caller fails closed and
+        does not dispatch. Meaningless for `DemoEmailSendProvider`, which
+        never reaches this call site at all (Demo dispatch never goes
+        through `dispatch_live_email_send`)."""
+        ...
+
     async def find_sent_message(
-        self, *, message_id_header: str, sent_after: datetime, bounds: ReconcileBounds
+        self,
+        *,
+        pre_dispatch_history_id: str,
+        expected_subject: str,
+        expected_recipient_identifier: str,
+        expected_sender_identifier: str,
+        window_start: datetime,
+        window_end: datetime,
+        bounds: ReconcileBounds,
     ) -> ReconcileResult:
-        """V2-I scope (§3.3 bounded reconciliation) — not called anywhere
-        in V2-G. `NOT_FOUND_WITHIN_BOUNDS` rather than `None` is the point:
-        the type refuses to let a caller read "we didn't find it" as "it
-        wasn't sent.\""""
+        """§3.3 bounded reconciliation — V2-I-b correction (post-smoke):
+        anchored on `pre_dispatch_history_id` (`users.history.list`) plus
+        approved-metadata matching (`domain/reconciliation_match.py`), NOT
+        on Gmail preserving our generated `message_id_header` — the real
+        smoke send proved it does not reliably do so.
+        `NOT_FOUND_WITHIN_BOUNDS`/`AMBIGUOUS` rather than `None` is the
+        point: the type refuses to let a caller read "no candidate
+        matched" or "more than one candidate matched" as "it wasn't
+        sent.\""""
         ...
 
 
@@ -183,9 +222,10 @@ class DemoEmailSendProvider:
     members — those are exercised by `domain/action_policy.py`'s pure unit
     tests and, for a real provider, by V2-I.
 
-    `find_sent_message()` still raises `NotImplementedError` — reconciliation
-    is meaningless for a synchronous, always-immediately-settled send; V2-H
-    never calls it.
+    `get_history_checkpoint()`/`find_sent_message()` still raise
+    `NotImplementedError` — reconciliation is meaningless for a
+    synchronous, always-immediately-settled send; Demo dispatch never
+    calls either (it never goes through `dispatch_live_email_send`).
     """
 
     name = "demo"
@@ -215,10 +255,26 @@ class DemoEmailSendProvider:
             ],
         )
 
+    async def get_history_checkpoint(self) -> str | None:
+        raise NotImplementedError(
+            "no history checkpoint concept exists for DemoEmailSendProvider's synchronous, "
+            "always-immediately-settled send — never called (Demo dispatch never goes through "
+            "dispatch_live_email_send)"
+        )
+
     async def find_sent_message(
-        self, *, message_id_header: str, sent_after: datetime, bounds: ReconcileBounds
+        self,
+        *,
+        pre_dispatch_history_id: str,
+        expected_subject: str,
+        expected_recipient_identifier: str,
+        expected_sender_identifier: str,
+        window_start: datetime,
+        window_end: datetime,
+        bounds: ReconcileBounds,
     ) -> ReconcileResult:
         raise NotImplementedError(
             "reconciliation is meaningless for DemoEmailSendProvider's synchronous, "
-            "always-immediately-settled send — never called in V2-H"
+            "always-immediately-settled send — never called (Demo dispatch never goes through "
+            "dispatch_live_email_send)"
         )

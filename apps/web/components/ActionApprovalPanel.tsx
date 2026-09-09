@@ -31,6 +31,7 @@ import {
 import type { ActionProposal, OutreachDraft, ProspectAggregate } from "@/lib/types";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ActionAuditPanel } from "@/components/ActionAuditPanel";
 
 const POLICY_TONE: Record<string, BadgeTone> = { ELIGIBLE: "emerald", BLOCKED: "rose" };
 const APPROVAL_TONE: Record<string, BadgeTone> = { PENDING: "neutral", APPROVED: "emerald", REJECTED: "rose" };
@@ -277,6 +278,8 @@ function ActionCard({ draft, prospect }: { draft: OutreachDraft; prospect: Prosp
           )}
 
           {error && <p className="text-rose-400">{error}</p>}
+
+          {executionStatus && <ActionAuditPanel proposalId={proposal.id} />}
         </div>
       )}
       {!proposal && error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
