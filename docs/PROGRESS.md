@@ -34,11 +34,147 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed, one real smoke performed, reconciliation corrected post-smoke)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`, retained for historical/audit compatibility only — see below), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->history-checkpoint->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Two real pre-existing bugs fixed while wiring this in (enum-class unification; a policy-ordering bug where `recipient_conflict` blocked an idempotent retry before the idempotency check ran). `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states — removed (incorrectly, on a documented-not-passed Postgres gap), restored, then removed again correctly only after PR #23's CI came back green on all four required checks and the user's explicit separate authorization. **The one authorized real-Gmail smoke was then performed and succeeded — and its own read-only follow-up diagnostic proved Gmail omits our generated Message-ID from the sent message's headers, disproving the original §3.3 reconciliation design's core assumption.** Reconciliation was rebuilt on a Gmail mailbox `historyId` checkpoint (captured pre-dispatch, persisted before `messages.send`) plus approved-metadata matching (Subject/To/From/Date, via a new pure `domain/reconciliation_match.py`) instead of the generated Message-ID — see "V2-I-b reconciliation correction — the real smoke's finding and the fix" below for the full account, including the corrected dispatch ordering, the new `pre_dispatch_history_id` column/migration, the new `AMBIGUOUS`/`HISTORY_EXPIRED` reconcile outcomes, and the complete updated test matrix. Canonical Demo byte-identical throughout. No real sender/recipient address, provider message id, raw Message-ID value, token, or secret is recorded anywhere in this document or the tests. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made or authorized. |
 | **V2-I-c — LinkedIn action-path closure** | *this commit* (branch `claude/v2-i-c-linkedin-closure`) | `ActionApprovalPanel`'s LinkedIn "Open" now reuses `lib/linkedinSafety.ts::isSafeLinkedInHref` (the same defense-in-depth check `ContactPanel`/V2-E already applies — never a second URL parser) against the LinkedIn contact-channel row's own `origin`/`discovery_state`/`identifier`: when it returns true, "Open" renders a real `<a target="_blank" rel="noreferrer noopener">` to the validated identifier; when false, the existing inline fallback panel renders instead, now with `origin`-aware copy — `DEMO_FIXTURE` keeps the original "simulated profile · demo fixture / no network request was made" wording verbatim, while a `LIVE_PROVIDER` channel that still didn't pass the safety check gets distinct, provenance-honest copy that never claims "demo fixture" or "no network request was made" about a real provider observation. The anchor-vs-fallback decision was extracted into an exported `LinkedInOpenAction` component so it's directly testable with explicit props (the existing test file has no jsdom/testing-library — `renderToStaticMarkup` never runs `useEffect`, so the real `ActionApprovalPanel`'s async `proposal` state can never be driven from a test). Eight new dedicated backend tests (`tests/test_linkedin_action_path.py`) prove, through the real API rather than pure kwargs: `LINKEDIN_COPY_AND_OPEN` executes with `provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None`/zero `action_send_calls`; no send-provider or Gmail-provider resolver is ever called (proven by monkeypatching both to raise); a Live LinkedIn execute consumes no live recipient identity and a later Live `EMAIL_SEND` to the same person still dispatches; a prior successful Live `EMAIL_SEND` to the recipient does NOT block a sibling LinkedIn proposal (clause 12 is `EMAIL_SEND`-only); a real legal/privacy suppression on the EMAIL channel does not affect the sibling LinkedIn proposal (clause 15 is `EMAIL_SEND`-only, complementing the existing pure-function coverage in `test_suppression_policy.py`); duplicate execute is idempotent; and weak/mismatch/unknown LinkedIn identity is blocked with no override. All eight passed on the first run against the existing backend — **no genuine backend defect was found, so no groundwork backend source was changed.** Five new frontend tests cover the four required scenarios (DEMO_FIXTURE zero-href, LIVE_PROVIDER valid-URL real anchor, LIVE_PROVIDER malformed-URL fallback, LIVE_PROVIDER fallback never says "demo fixture") plus a no-channel-row default case. Manual Demo-mode UI walkthrough (propose → approve → execute → Copy → Open) performed via a headless-Chromium Playwright script, confirmed: "Open profile" renders as a `<button>` (never a link) for `DEMO_FIXTURE`, zero `href` anywhere on the page, zero navigation. Canonical Demo untouched (no backend production code changed). Zero provider/network calls. No real LinkedIn URL was ever opened. Gmail/V2-I, reconciliation, suppression, allowance, contact identity grammar/matching, the review check count, the action-policy clause set, `fixtures/demo_pack.yaml`, schema/Alembic, and `master` are all untouched. See "What V2-I-c added" below. |
 | **V2-J — Quality, metrics, production, v2 release preparation** | *this commit* (branch `claude/v2-j-quality-release`) | Two new computed-on-read `/evaluation` blocks, `enrichment` and `actions` — no `evaluation_metrics` table, no new model column, no migration. `enrichment`: `attempted`/`matched`/`match_rate`/`email_found_rate`/`email_verified_rate` (FOUND-denominated)/`catch_all_rate` (NULL-excluded)/`linkedin_resolved_rate`/`identity_match_distribution`/`identifier_grammar_rejections`/`provider_error_rate` (NOT_FOUND never counts)/`not_attempted_budget_count`/`enrichment_attempts_by_status`/`stale_channel_count` (observed-then-aged only, never never-attempted)/`preserved_last_known_good_count`+`_breakdown`/p50-p95 latency/credits+cost+calls (CONTRIB excludes NOT_ATTEMPTED_BUDGET; cost sums across providers, provider-native credits refuse to sum across more than one distinct provider). `actions`: `proposals_by_verdict`/`blocked_reasons` (proposal-time) kept strictly separate from `execution_blocked_reasons`/`execution_blocked_attempts`/`execution_blocked_proposals` (execution-time) /`content_hash_mismatch_count`/approval→execution latency p50-p95/`executions_by_status`+`_by_origin`/`uncertain_count`/`reconciliation_outcomes`/`mean_messages_scanned_per_reconcile`/`cross_run_recipient_blocks`+`_blocked_proposals`. Instrumented the five pre-policy `execute` 409 paths (`NOT_APPROVED`/`APPROVAL_SUPERSEDED`/`SENDER_NOT_CONNECTED`/`SENDER_CHANGED`/`CONTENT_CHANGED`) with a persisted `execution_blocked` `action_events` row before each raise — the five original error contracts (status/code/message/ordering) are byte-for-byte unchanged; this is the same "the seam is an observation, never a behavior branch" discipline the rest of this codebase's telemetry recorders already follow. `ActionRepository.cross_run_blocking_runs` (new) reuses the SAME `_BLOCKING_LIVE_STATUSES` constant `recipient_conflict()` already enforces — never a second, driftable status list; `DEMO_SIMULATED` never participates; a same-run blocking execution is correctly excluded from the cross-run count. `compute_run_evaluation` now takes `ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at `api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` (`engine/runner.py`), preserving the standing boundary that the pipeline engine never touches governed-action state. Minimal new read methods added to `ContactEnrichmentRepository`/`ActionRepository`/`ApprovalRepository` — no provider import anywhere in `evaluation/`/`domain/`. Frontend: `EnrichmentQualityPanel`/`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s shape), additive `EnrichmentMetrics`/`ActionMetrics` types, both rendered from `QualityTab`; every `null` rate renders "—", never "0%"; blocked-reason/status/outcome maps render generically (an unrecognized future value still renders correctly); the action-empty-state reads one explicit sentence, never a wall of zeros. `APP_VERSION`/API package version bumped to `2.0.0`; CI's push-trigger branch fixed `main`→`master`; root `.env.example` documents `APP_VERSION`/`MAX_ENRICHMENT_CALLS_PER_RUN`/`TRUSTED_HOSTS` and its stale `NEXT_PUBLIC_API_URL` block replaced with a pointer to `apps/web/.env.example`/`GROUNDWORK_API_ORIGIN`. `scripts/prod_smoke.py` gained a fourth check (`/evaluation` shape + internal consistency), still Demo-only, still zero egress, still never run by CI. `docs/DEPLOYMENT.md` gained a documentation-only production rate-limiting section (BFF/shared-bucket behavior, the Uvicorn/Render layer honestly marked INFERRED, no blindly-trusted `X-Forwarded-For`, the deferred secure BFF-side redesign) and a release/rollback sequence (migration-before-serve, tag-after-verify, additive-schema-safe rollback); `docs/RUNBOOK.md` gained an operational reading guide for the two new panels; `docs/ARCHITECTURE.md` gained the V2-J narrative section. 24 new backend tests (`tests/test_evaluation_enrichment_metrics.py`, `tests/test_evaluation_action_metrics.py`) plus 5 existing evaluation call sites updated for the new required kwargs — full SQLite suite 1195 passed/1 skipped (baseline 1171 passed/1 skipped, +24, same 1 skip); 11 new frontend tests — full suite 133 passed (baseline 122, +11); frontend lint/typecheck/build all clean; Alembic head unchanged (`336c199f2d05` — no migration, none needed). Canonical Demo regression tests unchanged and green. `master` untouched; no merge, no tag, no deploy, no Neon migration, zero provider/network calls, zero Gmail sends, zero LinkedIn navigation. Local Docker/Postgres were NOT reachable in this session's sandbox (no Docker daemon socket, no local Postgres server) — the Postgres+migration-drift and Docker-build gates are asserted only by GitHub CI, not locally reproduced; stated here explicitly rather than claimed. See "What V2-J added" below. |
-| **v2.0.1 — Live-Quality Hardening (Rev 2)** | *this commit* (branch `fix/v2-0-1-live-quality`) | Six targeted Live-Mode correctness fixes, no scope beyond them: (1) lexical-only `domain/funding_stage.py::canonicalize_funding_stage()` normalizes spelling/case/punctuation of a funding-stage string onto the canonical `snake_case` tokens, never bucketing an unrecognized stage (Series D/E/F/...) onto a different one ("growth" included) — wired into `engine/steps/research.py` (Live-extracted `FundingEvent.stage`) and `engine/objective_parser.py` (LLM-inferred `target_funding_stages`); (2) `engine/steps/enrich.py::resolve_contact`'s persona admission gate is now `leader.title in persona_titles` ONLY — the LLM-authored `is_persona_match` boolean can no longer admit a title the Play never targeted, and an empty `persona_titles` now unconditionally resolves to `UNAVAILABLE`; (3) `domain/grounding.py::date_claim_supported()` (new) requires a funding event's `announced_at` to be fully spelled out (year+month+day, several common written forms) in its `LIVE_FETCH`-origin evidence's own snippet and not in the future, else `engine/steps/signals.py` nulls it — gated on `Evidence.origin == LIVE_FETCH` (never Demo, whose `announced_at` is deterministically fixture-derived, not LLM-extracted) so canonical Demo is structurally unaffected; `SourceDocument.published_at` is never read by this check; (4) `domain/outreach_sanitize.py::strip_trailing_placeholder_signature()` (new) deletes ONLY a draft body's trailing, placeholder-only sender-signature line (e.g. `[Your Name]`) right after the LLM call in `engine/steps/personalize.py` — a mid-body or line-shared placeholder is left untouched and still hard-FAILs `domain/review.py::_no_placeholders`, which itself was not modified; (5) the objective-parse prompt now serves the model the exact six-stage canonical enumeration and instructs it to return the full set (never a narrower guess like `[series_a, series_b]`) for a "requires funding, names no stage" objective, plus the same lexical canonicalization as (1); (6) `apps/web/app/plays/new/page.tsx`'s ICP overrides are now mode-aware (`buildIcpOverrides()`, extracted pure/exported for direct unit testing) — Demo Mode still sends the full canonical fixture ICP byte-for-byte, Live Mode now sends ONLY the four controls the form actually exposes (`target_industries`/size band/`min_score`), never the fixture-only `target_funding_stages`/`target_technologies`/`persona_titles`/`excluded_industries`/`adjacent_industries`/`min_confidence` that used to leak into every Live run regardless of the real objective. Retrieval alignment (query-template expansion, raising the search-query cap 3→5) is explicitly OUT OF SCOPE, deferred to v2.0.2. No separate frozen "v2.0.1 Rev 2" plan document exists anywhere in this repository or environment — searched by filename and content, same gap V2-F/V2-I-a's sessions each found and recorded for their own missing plans; per `CLAUDE.md`'s explicit instruction this is flagged here rather than silently resolved, and the task brief's own detailed, numbered scope (itself as specific as the frozen per-checkpoint plans elsewhere in this repo) was treated as authoritative. `domain/scoring.py`, `tests/test_run_integration.py`, `tests/test_review.py`, schema/Alembic, and every provider/live implementation are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25, `test_run_integration.py` passing unmodified). Backend: 1224 passed/1 skipped (baseline 1195 passed/1 skipped, +29, same 1 skip). Frontend: 136 passed (baseline 133, +3). Zero provider/network/production calls. See "What v2.0.1 added" below. |
+| **v2.0.1 — Live-Quality Hardening (Rev 2)** | `fix/v2-0-1-live-quality` (merged to `master`) | Six targeted Live-Mode correctness fixes, no scope beyond them: (1) lexical-only `domain/funding_stage.py::canonicalize_funding_stage()` normalizes spelling/case/punctuation of a funding-stage string onto the canonical `snake_case` tokens, never bucketing an unrecognized stage (Series D/E/F/...) onto a different one ("growth" included) — wired into `engine/steps/research.py` (Live-extracted `FundingEvent.stage`) and `engine/objective_parser.py` (LLM-inferred `target_funding_stages`); (2) `engine/steps/enrich.py::resolve_contact`'s persona admission gate is now `leader.title in persona_titles` ONLY — the LLM-authored `is_persona_match` boolean can no longer admit a title the Play never targeted, and an empty `persona_titles` now unconditionally resolves to `UNAVAILABLE`; (3) `domain/grounding.py::date_claim_supported()` (new) requires a funding event's `announced_at` to be fully spelled out (year+month+day, several common written forms) in its `LIVE_FETCH`-origin evidence's own snippet and not in the future, else `engine/steps/signals.py` nulls it — gated on `Evidence.origin == LIVE_FETCH` (never Demo, whose `announced_at` is deterministically fixture-derived, not LLM-extracted) so canonical Demo is structurally unaffected; `SourceDocument.published_at` is never read by this check; (4) `domain/outreach_sanitize.py::strip_trailing_placeholder_signature()` (new) deletes ONLY a draft body's trailing, placeholder-only sender-signature line (e.g. `[Your Name]`) right after the LLM call in `engine/steps/personalize.py` — a mid-body or line-shared placeholder is left untouched and still hard-FAILs `domain/review.py::_no_placeholders`, which itself was not modified; (5) the objective-parse prompt now serves the model the exact six-stage canonical enumeration and instructs it to return the full set (never a narrower guess like `[series_a, series_b]`) for a "requires funding, names no stage" objective, plus the same lexical canonicalization as (1); (6) `apps/web/app/plays/new/page.tsx`'s ICP overrides are now mode-aware (`buildIcpOverrides()`, extracted pure/exported for direct unit testing) — Demo Mode still sends the full canonical fixture ICP byte-for-byte, Live Mode now sends ONLY the four controls the form actually exposes (`target_industries`/size band/`min_score`), never the fixture-only `target_funding_stages`/`target_technologies`/`persona_titles`/`excluded_industries`/`adjacent_industries`/`min_confidence` that used to leak into every Live run regardless of the real objective. Retrieval alignment (query-template expansion, raising the search-query cap 3→5) is explicitly OUT OF SCOPE, deferred to v2.0.2. No separate frozen "v2.0.1 Rev 2" plan document exists anywhere in this repository or environment — searched by filename and content, same gap V2-F/V2-I-a's sessions each found and recorded for their own missing plans; per `CLAUDE.md`'s explicit instruction this is flagged here rather than silently resolved, and the task brief's own detailed, numbered scope (itself as specific as the frozen per-checkpoint plans elsewhere in this repo) was treated as authoritative. `domain/scoring.py`, `tests/test_run_integration.py`, `tests/test_review.py`, schema/Alembic, and every provider/live implementation are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25, `test_run_integration.py` passing unmodified). Backend: 1224 passed/1 skipped (baseline 1195 passed/1 skipped, +29, same 1 skip). Frontend: 136 passed (baseline 133, +3). Zero provider/network/production calls. See "What v2.0.1 added" below. |
+| **v2.0.2 — Live Retrieval Alignment (Rev 2)** | *this commit* (branch `fix/v2-0-2-retrieval-alignment`) | Fixes RC-1 — the per-company retrieval starvation bug deferred from v2.0.1 — and threads `PlaySpec` into Live per-company retrieval so query targeting actually reflects the Play. `domain/query_plan.py::build_source_queries()` now takes the full `PlaySpec` (`QUERY_PLAN_VERSION` "v1"→"v2"): `company_funding`/`company_careers`/`company_size` always, `company_persona_leadership` iff `persona_titles` non-empty, `company_technology` iff `target_technologies` non-empty — no generic leadership fallback (`COMPANY_LEADERSHIP` removed outright), yielding exactly 3/4/4/5 emitted queries for the four Play shapes. `TavilySearchProvider.fetch_sources()` rewritten around the RC-1 fix: Phase 1 issues every category's query up front regardless of how many occurrences earlier categories already produced (`_allocate_balanced_occurrences`); Phase 2 rations those hits round-robin, one per category per pass, up to the unchanged `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` (15) ceiling — a category can no longer be starved out just because an earlier category alone filled the ceiling. Deduped winners are then interleaved the same way (`_category_balanced_extract_order`) before truncating to `max_sources_per_prospect` for extraction, plus a defensive final dedupe so `.extract()` never receives the same URL twice even if two categories surfaced the same page (the additional implementation invariant named in this checkpoint's task brief). `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT` 3→5, `LIVE_MAX_SEARCH_CALLS_PER_RUN` 32→40, `MAX_SOURCE_SNIPPET_CHARS` (`prompts/base.py`) 600→1200 (matching `LIVE_MAX_SOURCE_EXCERPT_CHARS`, already 1200). No separate frozen "v2.0.2 Rev 2" plan document exists anywhere in this repository or environment — flagged explicitly per `CLAUDE.md`, same gap v2.0.1/V2-F/V2-I-a each found for their own missing plans; the task brief's own detailed, numbered scope (exact query-count matrix, occurrence-ceiling math, budget numbers) was treated as authoritative. `domain/scoring.py`, review/guardrail rules, grounding rules, the v2.0.1 persona gate, contact-enrichment gating, schema/Alembic, and frontend source are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25 — Demo Mode never calls `TavilySearchProvider`, so this checkpoint cannot touch it structurally, and `make demo` confirms it didn't). Backend: 1246 passed/1 skipped (baseline 1224 passed/1 skipped, +22, same 1 skip). Frontend: 136 passed, lint/typecheck/build all clean (no frontend source changed). Zero provider/network/production calls. See "What v2.0.2 added" below. |
 
 ---
 
 ## Current checkpoint
+
+**v2.0.2 — Live Retrieval Alignment (Rev 2) — COMPLETE.** Fixes the RC-1 per-company retrieval
+starvation bug and threads `PlaySpec` into Live per-company retrieval, on top of the completed v2.0.1
+work, none of which touches `master` or deploys anything. Full detail: "What v2.0.2 added" immediately
+below.
+
+**No separate frozen "v2.0.2 Live Retrieval Alignment Rev 2" plan document exists anywhere in this
+repository or environment.** The task named an authoritative plan file at
+`/root/.claude/plans/we-are-starting-groundwork-mellow-cake.md`, from "the immediately preceding Opus
+planning session" — this session's container has no such file, no `~/.claude/plans/` directory at all,
+and nothing on disk under any name/content match for `mellow-cake`, `retrieval-alignment`, `RC-1`, or
+`starvation` beyond this branch name and `docs/PROGRESS.md`'s own "Next task" pointer left by the
+v2.0.1 session. This is the same gap the v2.0.1, V2-F, and V2-I-a sessions each found and explicitly
+recorded for their own missing "frozen plan" documents (see the historical entries further below) — per
+`CLAUDE.md`'s explicit instruction to flag rather than silently resolve a conflict against the documented
+groundwork, this is recorded here rather than guessed past. The task message's own numbered scope (an
+exact 3/4/4/5 query-count matrix, the RC-1 regression-then-fix testing sequence, exact before/after budget
+numbers, an explicit list of hard invariants and files that must not change) was detailed and internally
+consistent enough to treat as authoritative wherever it didn't conflict with `CLAUDE.md`'s standing v1/v2
+invariants (it never did) or `docs/PROGRESS.md`'s own "Next task" note (it matched exactly: query-template
+expansion + raising the search-query cap 3→5) — exactly as v2.0.1's task brief was treated the same way
+before it.
+
+### What v2.0.2 added
+
+**RC-1 — the starvation bug and its fix.** Before this checkpoint, `TavilySearchProvider.fetch_sources()`
+issued a company's category queries (funding, careers, a generic "leadership") in fixed order and applied
+the global `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` ceiling (15) *during* issuance — the loop broke the
+moment the ceiling was reached. Whenever an earlier category alone returned enough results to fill the
+ceiling (a plausible real-world case: a well-covered funding announcement returning 10+ hits), every later
+category in the fixed order was starved out entirely — zero occurrences, regardless of how many real hits
+its own query would have returned, even though the run's search-call budget had room to spare and that
+category's query was never itself degraded or budget-blocked. `tests/test_search_occurrence_balance.py`
+establishes this regression locally first (`test_rc1_starvation_regression_reproduced_by_naive_sequential_
+fill`, against a `_naive_sequential_fill()` helper standing in for the removed behavior — 3 categories with
+10 hits each, ceiling 15: the naive allocator gives `company_size` exactly zero), then proves the fix
+(`test_rc1_fix_balanced_allocation_gives_every_category_a_share` — the same input, balanced 5/5/5).
+
+The fix is a deterministic two-phase rewrite of `fetch_sources()`: **Phase 1** issues every query in the
+company's plan up front, one category at a time in fixed template order, collecting each category's raw
+hits in full (bounded only by `LIVE_MAX_SEARCH_RESULTS_PER_QUERY`, enforced server-side by Tavily) —
+never gated on how many occurrences earlier categories already produced. **Phase 2**
+(`_allocate_balanced_occurrences`, new, pure) round-robins across categories in that same fixed order, one
+occurrence per category per pass, until the ceiling is reached or every category's hits are exhausted — a
+category with fewer real hits than its "fair share" is never padded, and the remaining slots roll to the
+categories still queued (verified by `test_balanced_allocation_uneven_category_volume_still_deterministic_
+round_robin`: funding/careers=10 hits each, size=2 — size gets its 2, the remaining 13 split 7/6 between
+funding/careers, never fabricated). Deduped winners (`domain/source_identity.py::select_winners`,
+unchanged) are then interleaved across categories the same way (`_category_balanced_extract_order`, new,
+pure) before truncating to `max_sources_per_prospect` (still 5, unchanged) — proven distinct from Phase
+2's occurrence balance by `test_category_balanced_extract_order_survives_a_winner_dedup_collision`, where
+a winner-dedup collision (the same URL surfacing under two categories) shifts first-occurrence order
+enough that a plain truncation would have been imbalanced (2 funding / 0 careers / 1 size) even though
+occurrence allocation upstream was perfectly balanced; the explicit re-balancing step corrects it back to
+1/1/1. The global occurrence ceiling itself (`LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT=15`) is unchanged —
+this checkpoint changes how it's rationed, never its size.
+
+**`PlaySpec` threaded into Live per-company retrieval.** The `SearchProvider.fetch_sources()` Protocol
+(`providers/base.py`) now takes `play_spec: PlaySpec` alongside `company` — `engine/search.py::call_search`
+passes `ctx.play_spec` (already present on every `ProspectContext`, no new field). `DemoSearchProvider`
+accepts and ignores it (fixture sources are authored per company slug, independent of any Play parameter —
+reading it would violate "Demo Mode and Live Mode share the same code path, differing only in which
+provider is wired in" the other way around). `domain/query_plan.py::build_source_queries()` (`QUERY_PLAN_
+VERSION` "v1"→"v2") now takes the full `PlaySpec` and renders: `company_funding`/`company_careers`/
+`company_size` **always** (three deterministic queries from the company's own display name alone);
+`company_persona_leadership` **iff** `play_spec.persona_titles` is non-empty (using the Play's own
+first-listed persona title, never an LLM-chosen one — `test_source_queries_persona_uses_first_title_only`);
+`company_technology` **iff** `play_spec.target_technologies` is non-empty. **There is no generic leadership
+fallback** — `QueryTemplateId.COMPANY_LEADERSHIP` and `render_company_leadership()` are removed outright,
+not merely unused (`test_source_queries_no_generic_leadership_fallback` asserts the enum member doesn't
+exist); a Play with no persona target issues no leadership-flavored query at all. This yields the exact
+3/4/4/5 emitted-query-count matrix the task required, verified both at the pure `build_source_queries()`
+level (`tests/test_query_plan.py`) and at the real transport-call level
+(`test_fetch_sources_query_count_matches_play_spec_shape`, parametrized over all four shapes).
+
+**Bounds raised.** `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT` 3→5 (`config.py`, `.env.example`,
+`providers/registry.py`'s fallback default) — exactly the full company_* category-set size, so no Play
+shape is truncated. `LIVE_MAX_SEARCH_CALLS_PER_RUN` 32→40 — sized so the larger per-prospect query count
+still fits comfortably alongside discovery's own plan/domain-resolution queries (see "search-budget math"
+in the final report). `MAX_SOURCE_SNIPPET_CHARS` (`prompts/base.py`) 600→1200, matching `LIVE_MAX_SOURCE_
+EXCERPT_CHARS` (already 1200) so a source's persisted excerpt isn't truncated a second, tighter time when
+it reaches the research-extraction prompt — Demo Mode is structurally unaffected (`DemoLLMProvider` never
+reads `envelope.user`/prompt text for research extraction; it returns the fixture pack's own pre-authored
+facts regardless of prompt length). `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` (15), `LIVE_MAX_SOURCES_PER_
+PROSPECT` (5), and `LIVE_MAX_EXTRACT_CALLS_PER_RUN` (25) are all unchanged — none of the task's required
+scope named them.
+
+**URL-uniqueness invariant.** The additional implementation invariant named in this checkpoint's task
+("preserve winner/URL uniqueness if the same URL was returned under multiple query templates... never
+send duplicate URLs in a single extract request") is satisfied twice: structurally, by `select_winners`
+grouping occurrences by canonical URL/content hash regardless of which category's query surfaced them, so
+a URL under two templates collapses to exactly one winner whose category is whichever occurrence
+deterministically won (`_winner_sort_key`, unchanged); and defensively, by a final dedupe pass building
+`winner_urls` right before the `.extract()` call, so the actual batched request can never carry the same
+URL twice even under an unanticipated canonicalization edge case. Both proven at the integration level by
+`test_fetch_sources_never_sends_duplicate_urls_to_extract` (the retrieval-occurrence record legitimately
+keeps both occurrences — H1's "same page returned by 3 queries is 3 occurrences" rule — but the extract
+request's `urls` list contains the shared URL exactly once).
+
+**Partial-success preserved.** `test_fetch_sources_partial_success_one_category_failing_does_not_starve_
+others` proves one category exhausting its transport retries (a real `SearchTimeout`) degrades only that
+category — the search-budget-blocked and provider-error code paths inside Phase 1's per-category loop are
+otherwise unchanged from before this checkpoint, just moved out of the old single combined loop.
+
+**Files changed:** `domain/query_plan.py`, `providers/base.py` (Protocol signature), `providers/demo/
+demo_search.py`, `providers/live/tavily_search.py`, `engine/search.py`, `config.py`, `providers/registry.py`,
+`prompts/base.py`, root `.env.example`; tests: `tests/test_query_plan.py` (+10), new `tests/
+test_search_occurrence_balance.py` (+12), plus call-site fixes (no behavior change, just the new required
+`play_spec` argument) in `tests/test_demo_search_provider.py`, `tests/test_tavily_adapter.py`, `tests/
+test_live_retrieval.py`, `tests/test_research_retrieval_state.py`. `domain/scoring.py`, `domain/review.py`,
+`domain/grounding.py`, `engine/steps/enrich.py`'s v2.0.1 persona gate, contact-enrichment gating, `models/
+tables.py`, every `alembic/` revision, and all frontend source are untouched — `git diff --stat` against
+`origin/master` confirms this explicitly. `tests/test_run_integration.py` and `tests/test_review.py` were
+not edited and both pass unmodified.
+
+**Verification.** Backend: `cd apps/api && uv run pytest` — 1246 passed, 1 skipped (baseline before this
+checkpoint: 1224 passed, 1 skipped; +22 new tests, same pre-existing skip). Canonical Demo confirmed
+byte-identical via `make demo`: PASS 2 (Northwind 92, Sable 79) / NEEDS_REVIEW 2 (Riverbend 35, Ferrous 58)
+/ REJECTED 1 (Cobalt 25) / DUPLICATE 1 / FAILED 1 — identical to every prior checkpoint's documented board.
+Frontend: `pnpm lint` / `pnpm typecheck` / `pnpm test` (136 passed, same as baseline) / `pnpm build` all
+clean — no frontend source changed, run only to confirm the backend-only change didn't regress anything
+observable from the API contract. Zero OpenAI/Tavily/Apollo/Hunter/Gmail/LinkedIn/Render/Neon/network/
+production calls were made anywhere in this session's implementation, tests, or verification.
+
+**Deferred beyond v2.0.2 (explicitly out of scope for this checkpoint):** the `feature/v2-contact-
+enrichment -> master` integration is already merged (confirmed on this branch's own ancestry — see below);
+`CompanyRow.profile`/company header refresh post-research (H2's own still-open item — real discovered
+companies keep their discovery-time `"unknown"` industry/size placeholders even after research grounds the
+real facts); the real Tavily/OpenAI Live search smoke (`make search-smoke`) remains manual/money-gated and
+was not run; per-company retrieval still only ever searches within `include_domains=[company.domain]` — a
+company whose funding/careers/size/leadership/technology coverage lives entirely off its own domain (a
+press outlet, a third-party jobs board) is structurally invisible to this retrieval, unchanged by this
+checkpoint and not a v2.0.2 goal.
+
+**Old (pre-v2.0.2) "Current checkpoint" entry, now historical:**
 
 **v2.0.1 — Live-Quality Hardening (Rev 2) — COMPLETE.** Six targeted Live-Mode correctness fixes on top
 of the completed v2 (V2-A through V2-J) work, none of which touch `master` or deploy anything. Full
@@ -5851,19 +5987,18 @@ No PR was created this session, per the task's explicit instruction to stop befo
 
 ## Next task
 
-**Immediate next task: v2.0.2 — retrieval alignment.** Explicitly out of scope for v2.0.1 (see "What
-v2.0.1 added" above): add the size/technology/persona-targeted query templates to `domain/query_plan.py`,
-and raise the search-query cap from 3 to 5. Do not begin it without the user's explicit authorization to
-roll into that checkpoint.
+**v2.0.2 — retrieval alignment is COMPLETE** (see "What v2.0.2 added" above) — RC-1 is fixed, `PlaySpec`
+is threaded into Live per-company retrieval, and the query-count/budget bounds are raised as specified.
+**No immediate next task is authorized.** A future session should not roll into further work without the
+user's explicit authorization; candidates a future session might raise, none scheduled: the deferred items
+listed at the end of "What v2.0.2 added" above (company header refresh post-research, the real Live search
+smoke, off-domain-source visibility).
 
-**The `feature/v2-contact-enrichment -> master` integration PR the paragraph below still describes as the
-next task is DONE** — this branch (`fix/v2-0-1-live-quality`) was created from a tip whose own history
-already contains `8577f5e "Merge pull request #26 from RutikYerunkar/feature/v2-contact-enrichment"`
-immediately after V2-J's PR #25 merge, i.e. PR #26 (the exact integration PR named below) has already been
-merged as of this checkpoint. `master`/`origin/master` are not fetched into this environment (only
-`fix/v2-0-1-live-quality` is), so this is inferred from this branch's own linear commit ancestry, not
-independently confirmed against a fetched `master` — a future session with `master` fetched should confirm
-directly (`git log origin/master -1`) rather than take this note alone as proof.
+**The `feature/v2-contact-enrichment -> master` integration PR is DONE and confirmed directly** — this
+session fetched `origin/fix/v2-0-2-retrieval-alignment` and found it at the same tip as `origin/master`'s
+`838eaea "Merge pull request #27 from RutikYerunkar/fix/v2-0-1-live-quality"`, whose own linear history
+contains `8577f5e "Merge pull request #26 from RutikYerunkar/feature/v2-contact-enrichment"` — the v2.0.1
+session's note asking a future session to confirm this directly (`git log origin/master -1`) is now done.
 
 **Historical note (superseded by the above — kept for continuity):**
 
@@ -6328,3 +6463,24 @@ anywhere in this session's implementation or tests.
   changed by this checkpoint — the eight new backend tests proved the existing LinkedIn action-path
   invariants already held; do not read the mere existence of this test file as evidence that a backend bug
   was found and fixed here.
+- **v2.0.2's own do-not-touch:** `providers/live/tavily_search.py::_allocate_balanced_occurrences()`/
+  `_category_balanced_extract_order()` must stay pure, module-level functions operating on plain
+  `SourceDocument`/`QueryTemplateId` values — do not fold their round-robin logic back into
+  `fetch_sources()`'s own body "for simplicity"; keeping them separate is what let `tests/test_search_
+  occurrence_balance.py` prove the RC-1 fix white-box, the same precedent `_call_tavily`'s own white-box
+  tests already established. The global `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` ceiling (15) must not
+  be split into a smaller per-category cap as an alternative fix — round-robin allocation against one
+  shared ceiling is the approved fix; a per-category cap would silently waste ceiling budget when one
+  category has fewer real hits than its share (see `test_balanced_allocation_uneven_category_volume_
+  still_deterministic_round_robin`'s 2/7/6 split). `domain/query_plan.py::QueryTemplateId.COMPANY_
+  LEADERSHIP` must never be re-added as a fallback — a Play with empty `persona_titles` issuing zero
+  leadership-flavored queries is the deliberate fix, not an oversight; any future "always search
+  leadership too" request is a scope decision requiring the user's explicit approval, not a bug report.
+  `build_source_queries()`'s fixed category order (funding, careers, size, persona_leadership, technology)
+  is load-bearing for `fetch_sources()`'s round-robin fairness AND for truncation-drops-least-specific-
+  last semantics — do not reorder it without re-verifying both `test_source_queries_truncation_drops_
+  least_play_specific_first` and the balanced-allocation tests together. `MAX_SOURCE_SNIPPET_CHARS`
+  (`prompts/base.py`) must stay equal to or greater than `LIVE_MAX_SOURCE_EXCERPT_CHARS` (`config.py`) —
+  the persisted excerpt is the ceiling on what the prompt could ever show; a smaller
+  `MAX_SOURCE_SNIPPET_CHARS` is harmless (a tighter second truncation) but a larger one would silently
+  claim to show more than was ever persisted.

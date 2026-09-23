@@ -95,7 +95,16 @@ class DemoSearchProvider:
         )
         return DomainCandidates(domains=domains, telemetry=[telemetry])
 
-    async def fetch_sources(self, company: CompanySeed, *, ctx_key: str) -> SourceBundle:
+    async def fetch_sources(self, company: CompanySeed, play_spec: PlaySpec, *, ctx_key: str) -> SourceBundle:
+        # `play_spec` is accepted only to satisfy the shared `SearchProvider`
+        # Protocol (v2.0.2 threads it through for `TavilySearchProvider`'s
+        # per-company query targeting) — Demo Mode's fixture sources are
+        # authored per company slug, independent of any Play parameter, so
+        # it is deliberately unused here. Reading it would violate "Demo
+        # Mode and Live Mode share the same code path, differing only in
+        # which provider is wired in" the other way around: a real branch
+        # inside a provider on Play content Demo was never designed to honor.
+        del play_spec
         fixture = self.pack.company_by_slug(company.slug)
         _, _, step_name = parse_ctx_key(ctx_key)
         failure = fixture.failure_script.get(step_name)

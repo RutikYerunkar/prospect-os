@@ -6,8 +6,12 @@ from __future__ import annotations
 
 # Bounded per-source snippet length. Sources can run long; the model needs
 # enough text to extract a claim, not the whole document — this is the
-# "bounded source snippets" token-minimization rule from Phase 2.
-MAX_SOURCE_SNIPPET_CHARS = 600
+# "bounded source snippets" token-minimization rule from Phase 2. Raised
+# 600 -> 1200 in v2.0.2 retrieval alignment to match `LIVE_MAX_SOURCE_
+# EXCERPT_CHARS` (`config.py`) so a source's persisted excerpt isn't
+# truncated a second, tighter time when it reaches the research-extraction
+# prompt.
+MAX_SOURCE_SNIPPET_CHARS = 1200
 
 # How many grounded signals personalization ever sees. More than this adds
 # tokens without adding to what one short email can cite.

@@ -24,7 +24,7 @@ async def test_fetch_sources_returns_source_bundle_with_telemetry() -> None:
     pack = load_fixture_pack()
     provider = DemoSearchProvider(pack, seed=1)
     company = pack.company_by_slug("sable-compute").to_company_seed()
-    bundle = await provider.fetch_sources(company, ctx_key="run:prospect:research")
+    bundle = await provider.fetch_sources(company, pack.play_spec, ctx_key="run:prospect:research")
     assert isinstance(bundle, SourceBundle)
     assert len(bundle.documents) == len(pack.company_by_slug("sable-compute").sources)
     assert bundle.telemetry and bundle.telemetry[0].result_count == len(bundle.documents)
@@ -37,7 +37,7 @@ async def test_fetch_sources_no_real_urls_ever_invented() -> None:
         if not fixture.sources or fixture.failure_script:
             continue  # scripted-failure fixtures are exercised elsewhere
         company = fixture.to_company_seed()
-        bundle = await provider.fetch_sources(company, ctx_key="run:prospect:research")
+        bundle = await provider.fetch_sources(company, pack.play_spec, ctx_key="run:prospect:research")
         for doc in bundle.documents:
             assert doc.url is None
             assert doc.canonical_url is None

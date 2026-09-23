@@ -1,10 +1,18 @@
-"""Deterministic query-plan primitives (H1 Phase 14).
+"""Deterministic query-plan primitives (H1 Phase 14; per-company templates
+extended in v2.0.2 retrieval alignment).
 
 No real provider calls happen anywhere in this module — this is the
 offline, testable machinery an H2 live search adapter would drive. The LLM
 never constructs an arbitrary search query string: every query this
 pipeline could ever issue is rendered from one of these fixed, versioned
 templates, over Play-derived parameters only.
+
+v2.0.2: `build_source_queries()` now takes the full `PlaySpec` (not just a
+company name) so per-company retrieval can target the Play's own
+persona/technology parameters, never a generic fallback. `COMPANY_LEADERSHIP`
+(a generic "leadership team about" query issued unconditionally) is removed
+outright — leadership-flavored retrieval only happens when the Play actually
+names `persona_titles`, via `COMPANY_PERSONA_LEADERSHIP`.
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ from enum import StrEnum
 
 from groundwork.models.schemas import PlaySpec
 
-QUERY_PLAN_VERSION = "v1"
+QUERY_PLAN_VERSION = "v2"
 
 
 class QueryTemplateId(StrEnum):
@@ -26,7 +34,9 @@ class QueryTemplateId(StrEnum):
     OFFICIAL_SITE_DOMAIN = "official_site_domain"
     COMPANY_FUNDING = "company_funding"
     COMPANY_CAREERS = "company_careers"
-    COMPANY_LEADERSHIP = "company_leadership"
+    COMPANY_SIZE = "company_size"
+    COMPANY_PERSONA_LEADERSHIP = "company_persona_leadership"
+    COMPANY_TECHNOLOGY = "company_technology"
 
 
 def _digest(text: str) -> str:
@@ -70,8 +80,22 @@ def render_company_careers(company_name: str) -> str:
     return f"{company_name} careers hiring jobs"
 
 
-def render_company_leadership(company_name: str) -> str:
-    return f"{company_name} leadership team about"
+def render_company_size(company_name: str) -> str:
+    return f"{company_name} company size employees headcount"
+
+
+def render_company_persona_leadership(company_name: str, persona_titles: list[str]) -> str:
+    """Only ever called when `persona_titles` is non-empty — there is no
+    generic leadership fallback (v2.0.2). Deterministic: always the Play's
+    first-listed persona title, never an LLM-chosen one."""
+    persona = persona_titles[0]
+    return f"{company_name} {persona} leadership team"
+
+
+def render_company_technology(company_name: str, target_technologies: list[str]) -> str:
+    """Only ever called when `target_technologies` is non-empty (v2.0.2)."""
+    tech = " ".join(target_technologies[:3])
+    return f"{company_name} {tech} technology stack"
 
 
 def build_query_plan(play_spec: PlaySpec, *, max_queries: int) -> list[QueryPlanEntry]:
@@ -105,17 +129,40 @@ def build_domain_resolution_query(company_name: str) -> QueryPlanEntry:
     )
 
 
-def build_source_queries(company_name: str, *, max_queries: int) -> list[QueryPlanEntry]:
+def build_source_queries(
+    company_name: str, play_spec: PlaySpec, *, max_queries: int
+) -> list[QueryPlanEntry]:
     """Per-company category queries for real per-company source retrieval
-    (H2 Phase 10), bounded at `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT`. Order
-    is fixed — funding, careers/hiring, leadership/about — the highest-
-    signal categories first, so truncation drops the least specific
-    category last, never first. The LLM never constructs these queries;
-    they are rendered only from the company's own display name."""
+    (H2 Phase 10; threaded with the full `PlaySpec` in v2.0.2), bounded at
+    `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT`. Three categories are always
+    issued — funding, careers/hiring, size — deterministically from the
+    company's own display name alone. Two more are issued only when the
+    Play actually targets that axis: `company_persona_leadership` iff
+    `play_spec.persona_titles` is non-empty, `company_technology` iff
+    `play_spec.target_technologies` is non-empty. There is no generic
+    leadership fallback — a Play with no persona targets issues no
+    leadership-flavored query at all. Order is fixed (funding, careers,
+    size, persona_leadership, technology) so truncation below `max_queries`
+    always drops the least Play-specific category first. The LLM never
+    constructs these queries."""
     candidates: list[tuple[QueryTemplateId, str]] = [
         (QueryTemplateId.COMPANY_FUNDING, render_company_funding(company_name)),
         (QueryTemplateId.COMPANY_CAREERS, render_company_careers(company_name)),
-        (QueryTemplateId.COMPANY_LEADERSHIP, render_company_leadership(company_name)),
+        (QueryTemplateId.COMPANY_SIZE, render_company_size(company_name)),
     ]
+    if play_spec.persona_titles:
+        candidates.append(
+            (
+                QueryTemplateId.COMPANY_PERSONA_LEADERSHIP,
+                render_company_persona_leadership(company_name, play_spec.persona_titles),
+            )
+        )
+    if play_spec.target_technologies:
+        candidates.append(
+            (
+                QueryTemplateId.COMPANY_TECHNOLOGY,
+                render_company_technology(company_name, play_spec.target_technologies),
+            )
+        )
     bounded = candidates[: max(max_queries, 0)]
     return [QueryPlanEntry(template_id=tid, query=q, query_digest=_digest(q)) for tid, q in bounded]

@@ -32,7 +32,7 @@ def _total_latency_ms(telemetry: list) -> float:
 
 async def call_search(ctx: ProspectContext) -> list[SourceDocument]:
     ctx_key = ctx.step_key("research")
-    bundle = await ctx.providers.search.fetch_sources(ctx.company, ctx_key=ctx_key)
+    bundle = await ctx.providers.search.fetch_sources(ctx.company, ctx.play_spec, ctx_key=ctx_key)
     await ctx.search_calls.record(telemetry=bundle.telemetry, documents=bundle.documents)
     # Checkpoint I1 Phase 9C — one summary line per call, never the
     # retrieved excerpt/source bodies (those stay in `source_documents`
