@@ -22,6 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from groundwork.domain.funding_stage import canonicalize_funding_stages
 from groundwork.models.llm_io import ObjectiveParseOutput
 from groundwork.models.schemas import PlaySpec
 from groundwork.prompts import objective_parse as prompt
@@ -67,6 +68,14 @@ async def parse_objective(
             attempts = result.attempts
             model, provider = result.model, result.provider
             parsed = result.parsed.model_dump(mode="json")
+            # Lexical-only canonicalization (v2.0.1) — normalize the
+            # model's free-text stage spellings onto the same snake_case
+            # vocabulary scoring/fixtures use before they ever reach a
+            # `PlaySpec`. See `domain/funding_stage.py`.
+            if parsed.get("target_funding_stages"):
+                parsed["target_funding_stages"] = canonicalize_funding_stages(
+                    parsed["target_funding_stages"]
+                )
             # Only inferred fields the model actually populated — an empty
             # list/None means "the objective didn't imply this," not
             # "override the caller's default with nothing."

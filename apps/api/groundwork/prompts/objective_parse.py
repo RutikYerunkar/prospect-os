@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from groundwork.domain.funding_stage import SUPPORTED_FUNDING_STAGES
 from groundwork.providers.base import PromptEnvelope
 
 PROMPT_VERSION = "objective_parse-v1"
+
+_FUNDING_STAGES_LIST = ", ".join(SUPPORTED_FUNDING_STAGES)
 
 _SYSTEM = (
     "You turn a plain-language GTM growth objective into structured ICP "
@@ -15,7 +18,13 @@ _SYSTEM = (
     "Leave a field at its empty/null default if the objective doesn't clearly "
     "imply it — never guess a specific number or industry that isn't supported "
     "by the text. Do not restate the objective text itself; only return the "
-    "structured criteria."
+    "structured criteria. "
+    f"`target_funding_stages` entries must be chosen only from this exact set: "
+    f"{_FUNDING_STAGES_LIST}. If the objective clearly requires the company to "
+    "have raised some funding but does not name which round, return the full "
+    "set of all six stages above rather than guessing a narrower subset — "
+    "never default to just two of them (e.g. series_a/series_b) when the "
+    "objective didn't say that."
 )
 
 

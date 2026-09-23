@@ -5,9 +5,9 @@ this prospect's own grounded signals, which is what makes the isolation
 guarantee structural rather than a matter of prompt discipline: there is
 nothing in scope for the provider to leak even if it wanted to.
 
-v2 §V2-F: this step now drafts one email (unchanged, byte-identical to v1 —
-the block below is untouched) plus, when eligible, one ADDITIONAL LinkedIn
-draft via a SEPARATE LLM call (`prompts/linkedin_personalization.py`, its own
+v2 §V2-F: this step now drafts one email (prompt/LLM call unchanged since
+v1) plus, when eligible, one ADDITIONAL LinkedIn draft via a SEPARATE LLM
+call (`prompts/linkedin_personalization.py`, its own
 `LLMOperation.LINKEDIN_PERSONALIZATION`, its own ctx_key
 `personalize:linkedin`). Eligibility is `contact_channels[LINKEDIN].
 discovery_state == RESOLVED` ONLY — a `MISMATCH` identity is NOT checked
@@ -15,10 +15,19 @@ here (identity policy is not duplicated in personalization); a MISMATCH
 profile that is otherwise RESOLVED still gets a draft, and
 `domain/review.py::_no_fabricated_contact` deterministically blocks it
 afterward. No new step, no new timeout/retry budget — both calls share the
-existing `personalize` step's budget."""
+existing `personalize` step's budget.
+
+v2.0.1: both drafts' bodies now pass through
+`domain/outreach_sanitize.py::strip_trailing_placeholder_signature()` right
+after the LLM call — the one deterministic, generation-boundary edit this
+checkpoint's plan authorizes. It only ever deletes a trailing
+placeholder-only sender-signature line; it never touches the prompt, the
+LLM call itself, or a mid-body placeholder (those still reach
+`domain/review.py::_no_placeholders` and still hard-FAIL there)."""
 
 from __future__ import annotations
 
+from groundwork.domain.outreach_sanitize import strip_trailing_placeholder_signature
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.llm import call_structured
 from groundwork.engine.step import StepResult
@@ -59,7 +68,11 @@ async def personalize(ctx: ProspectContext) -> StepResult:
         channel=Channel.EMAIL,
         step_index=0,
         subject=output.subject,
-        body=output.body,
+        # v2.0.1 — strip only a trailing placeholder-only sender signature
+        # (e.g. "[Your Name]"); a mid-body or unsafe placeholder is left
+        # untouched and still hard-FAILs review. See
+        # `domain/outreach_sanitize.py`.
+        body=strip_trailing_placeholder_signature(output.body),
         claim_map=output.claim_map,
     )
     ctx.drafts.append(draft)
@@ -94,7 +107,7 @@ async def personalize(ctx: ProspectContext) -> StepResult:
             channel=Channel.LINKEDIN,
             step_index=1,
             subject=None,
-            body=linkedin_output.body,
+            body=strip_trailing_placeholder_signature(linkedin_output.body),
             claim_map=linkedin_output.claim_map,
         )
         ctx.drafts.append(linkedin_draft)

@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import uuid
 
-from groundwork.domain.grounding import is_grounded, numeric_claim_supported
+from groundwork.domain.grounding import date_claim_supported, is_grounded, numeric_claim_supported
 from groundwork.domain.industry import allowed_categories, validate_category
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.step import StepResult
-from groundwork.models.enums import SignalType
+from groundwork.models.enums import EvidenceOrigin, SignalType
 from groundwork.models.schemas import Signal
 
 
@@ -44,6 +44,24 @@ async def signals(ctx: ProspectContext) -> StepResult:
             demoted += 1
         else:
             verified += 1
+
+        # v2.0.1 — DATE PROVENANCE for funding events. Live-extracted
+        # evidence only: a real search result's text is the only place an
+        # event date can be hallucinated by the model, so this only
+        # applies to `EvidenceOrigin.LIVE_FETCH` evidence — Demo Mode's
+        # `announced_at` is deterministically constructed by the fixture
+        # pack itself (never LLM-extracted text), so it is never subject
+        # to this check, exactly like `source_url` above is only ever set
+        # for `LIVE_FETCH` evidence in `engine/steps/research.py`. An
+        # unsupported date becomes `None` — never inferred or repaired.
+        if (
+            signal_type is SignalType.FUNDING
+            and getattr(item, "announced_at", None) is not None
+            and evidence is not None
+            and evidence.origin == EvidenceOrigin.LIVE_FETCH
+            and not date_claim_supported(evidence.snippet, item.announced_at, ctx.reference_date)
+        ):
+            item.announced_at = None
 
         ctx.signals.append(
             Signal(
