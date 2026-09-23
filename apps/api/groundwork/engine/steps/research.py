@@ -22,6 +22,7 @@ H1 Phase 1/9/10/11 — commit-once architecture. Two bugs this closes:
 
 from __future__ import annotations
 
+from groundwork.domain.funding_stage import canonicalize_funding_stage
 from groundwork.domain.source_identity import evidence_id_for, select_winners
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.llm import call_structured
@@ -95,6 +96,15 @@ async def research(ctx: ProspectContext) -> StepResult:
     # source_ref.
     evidence_id_by_ref = {e.source_ref: e.id for e in candidate_evidence if e.source_ref}
     facts = output.facts
+    # Lexical-only canonicalization (v2.0.1) — normalize spelling/case/
+    # punctuation of the model's free-text stage onto the same snake_case
+    # vocabulary `domain/scoring.py::_FUNDING_STAGE_ORDER` and
+    # `PlaySpec.target_funding_stages` use, so a real "Series A"/"series a
+    # round" from Live extraction actually matches instead of silently
+    # scoring 0 on a spelling mismatch. Never remaps to a different stage —
+    # see `domain/funding_stage.py` module docstring.
+    for funding_event in facts.funding_events:
+        funding_event.stage = canonicalize_funding_stage(funding_event.stage)
     for item in (*facts.funding_events, *facts.hiring_roles, *facts.tech_mentions, *facts.leadership):
         if item.source_ref and item.source_ref in evidence_id_by_ref:
             item.evidence_ids = [evidence_id_by_ref[item.source_ref]]

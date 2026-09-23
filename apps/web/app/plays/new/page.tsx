@@ -25,6 +25,60 @@ const DEFAULT_OBJECTIVE =
 
 type Phase = "idle" | "parsing" | "starting";
 
+// v2.0.1 Live-Quality Hardening: mode-aware ICP overrides, extracted as a
+// pure top-level function (not a component closure) so it's directly
+// unit-testable without a DOM — see `page.overrides.test.ts`.
+//
+// This used to be a single unconditional `overrides()` sent for BOTH Demo
+// and Live, which meant every Live run silently inherited the canonical
+// Demo fixture's own funding-stage/technology/persona/exclusion targeting.
+// That was the highest-leverage Live UI bug this checkpoint fixes.
+//
+// Demo Mode keeps sending the full canonical fixture ICP, byte-for-byte
+// unchanged — the form only exposes four ICP controls (§18), but the rest
+// of the canonical demo ICP (exclusions, funding stage, tech, persona,
+// confidence floor) still has to be sent so the fixture pack's
+// exclude-list disqualifier (Cobalt Retail Systems' `retail_pos`) actually
+// fires. Without this, a play created from this form never sends
+// `excluded_industries` and Cobalt silently scores PASS instead of the
+// fixture's intended REJECTED — a real demo-consistency bug, not a
+// hypothetical one.
+//
+// Live Mode sends ONLY the controls this form actually exposes —
+// `target_industries`, the size band, and the minimum score. It must
+// NEVER send `target_funding_stages`, `target_technologies`,
+// `persona_titles`, `excluded_industries`, `adjacent_industries`, or
+// `min_confidence` — those are canonical-Demo-fixture-only values with no
+// corresponding form control, and sending them for a real company would
+// silently pin every Live run to the Demo fixture's own narrow targeting
+// (e.g. rejecting every real prospect outside `series_a`/`series_b`, or
+// requiring a persona title real companies never use).
+export function buildIcpOverrides(
+  targetMode: Mode,
+  form: { industries: string[]; sizeMin: number; sizeMax: number; minScore: number },
+) {
+  if (targetMode === "demo") {
+    return {
+      target_industries: form.industries,
+      excluded_industries: ["retail_pos"],
+      adjacent_industries: { data_tooling: ["ai_infrastructure"] },
+      size_band_min: form.sizeMin,
+      size_band_max: form.sizeMax,
+      target_funding_stages: ["series_a", "series_b"],
+      target_technologies: ["kubernetes", "pytorch", "triton"],
+      persona_titles: ["VP of Sales", "Head of Sales", "VP of Revenue"],
+      min_score: form.minScore,
+      min_confidence: 0.6,
+    };
+  }
+  return {
+    target_industries: form.industries,
+    size_band_min: form.sizeMin,
+    size_band_max: form.sizeMax,
+    min_score: form.minScore,
+  };
+}
+
 // Checkpoint I1 Phase 9: prefer the API's own (already-safe, already
 // specific) `.detail` over a generic "request failed" message — and tell a
 // truly unreachable API apart from a request that reached it and failed.
@@ -186,11 +240,14 @@ export default function NewPlayPage() {
   const committedSignatureRef = useRef<string | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
 
-  // Preview is unconditionally deterministic and doesn't accept `mode` at
-  // all (Checkpoint I1 Phase 7) — a mode-only change shouldn't trigger a
-  // fresh preview request. `signature` (mode included) is still what
-  // decides whether Run Agents can reuse an already-committed Play.
-  const previewSignature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount });
+  // Preview itself is unconditionally deterministic and doesn't accept
+  // `mode` (Checkpoint I1 Phase 7) — but the *overrides* it's called with
+  // are mode-aware since v2.0.1 (`overridesForMode()` above), so a
+  // mode-only toggle now DOES need a fresh preview (Demo vs. Live send
+  // different `icp_overrides`). `previewSignature` therefore includes
+  // `mode` too, same as `signature` — kept as a separate name only so each
+  // call site documents which concern it's serving.
+  const previewSignature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount, mode });
   const signature = JSON.stringify({ objective, industries, sizeMin, sizeMax, minScore, targetCount, mode });
   const live = providerSettings?.live;
   // Checkpoint I1 Phase 8/9 — three distinct "why can't I use Live" states,
@@ -219,27 +276,10 @@ export default function NewPlayPage() {
   // to Demo underneath the user.
   const effectiveMode: Mode = mode === "live" && !liveSelectable ? "demo" : mode;
 
-  // The form only exposes four ICP controls (§18) — the rest of the
-  // canonical demo ICP (exclusions, funding stage, tech, persona,
-  // confidence floor) isn't user-editable here, but still has to be sent so
-  // the fixture pack's exclude-list disqualifier (Cobalt Retail Systems'
-  // `retail_pos`) actually fires. Without this, a play created from this
-  // form never sends `excluded_industries` and Cobalt silently scores PASS
-  // instead of the fixture's intended REJECTED — a real demo-consistency
-  // bug, not a hypothetical one.
-  function overrides() {
-    return {
-      target_industries: industries,
-      excluded_industries: ["retail_pos"],
-      adjacent_industries: { data_tooling: ["ai_infrastructure"] },
-      size_band_min: sizeMin,
-      size_band_max: sizeMax,
-      target_funding_stages: ["series_a", "series_b"],
-      target_technologies: ["kubernetes", "pytorch", "triton"],
-      persona_titles: ["VP of Sales", "Head of Sales", "VP of Revenue"],
-      min_score: minScore,
-      min_confidence: 0.6,
-    };
+  // Thin closure over this form's own state — the actual mode-aware logic
+  // is the pure, top-level `buildIcpOverrides()` above.
+  function overridesForMode(targetMode: Mode) {
+    return buildIcpOverrides(targetMode, { industries, sizeMin, sizeMax, minScore });
   }
 
   // Preview the objective + controls into a structured PlaySpec via the
@@ -267,7 +307,7 @@ export default function NewPlayPage() {
 
       setPhase("parsing");
       setError(null);
-      previewPlay({ objective, icp_overrides: overrides(), target_count: targetCount }, controller.signal)
+      previewPlay({ objective, icp_overrides: overridesForMode(mode), target_count: targetCount }, controller.signal)
         .then((preview) => {
           if (seq !== parseSeqRef.current) return; // superseded by a newer edit
           setDisplaySpec({ icp_spec: preview.icp_spec, parse_source: preview.parse_source });
@@ -300,7 +340,7 @@ export default function NewPlayPage() {
     setPhase("parsing");
     try {
       const play = await createPlay({
-        objective, icp_overrides: overrides(), target_count: targetCount, mode: "live",
+        objective, icp_overrides: overridesForMode("live"), target_count: targetCount, mode: "live",
         use_live_objective_parser: true,
       });
       setCommittedPlay(play);
@@ -319,7 +359,9 @@ export default function NewPlayPage() {
       let play = committedPlay;
       if (!play || committedSignatureRef.current !== signature) {
         setPhase("parsing");
-        play = await createPlay({ objective, icp_overrides: overrides(), target_count: targetCount, mode: effectiveMode });
+        play = await createPlay({
+          objective, icp_overrides: overridesForMode(effectiveMode), target_count: targetCount, mode: effectiveMode,
+        });
         setCommittedPlay(play);
         committedSignatureRef.current = signature;
         setDisplaySpec({ icp_spec: play.icp_spec, parse_source: play.parse_source });

@@ -16,10 +16,18 @@ from groundwork.models.schemas import Contact, ResearchFacts
 
 
 def resolve_contact(prospect_id: str, facts: ResearchFacts, persona_titles: list[str]) -> Contact:
+    """v2.0.1 — the admission gate is `leader.title in persona_titles`
+    ONLY. `LeadershipCandidate.is_persona_match` is an LLM-authored
+    boolean and must never decide admission on its own: a Live extraction
+    can (and has) set it `True` for a title the Play never asked for (e.g.
+    an "SVP Product" leader on a revenue-persona play), which would wrongly
+    grant `VERIFIED`/`PERSONA_ONLY` contact status and move the
+    `persona_availability` score for a buyer nobody targeted. An empty
+    `persona_titles` means the Play named no qualifying buyer at all, so
+    `persona_matches` is always empty and every prospect resolves to
+    `UNAVAILABLE` — never inferred from the LLM's own claim of a match."""
     grounded = [leader for leader in facts.leadership if leader.evidence_ids]
-    persona_matches = [
-        leader for leader in grounded if leader.is_persona_match or leader.title in persona_titles
-    ]
+    persona_matches = [leader for leader in grounded if leader.title in persona_titles]
     if not persona_matches:
         return Contact(prospect_id=prospect_id, verification=ContactVerification.UNAVAILABLE, evidence_ids=[])
 

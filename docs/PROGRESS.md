@@ -34,10 +34,122 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-I-b — Live Gmail execution + reconciliation + audit (refusal removed, one real smoke performed, reconciliation corrected post-smoke)** | *this commit* (branch `claude/v2-i-b-gmail-execution`, PR #23) | Real `GmailSendProvider` (`providers/live/gmail_send.py`), the pure §3.4 outcome classifier (`domain/send_classifier.py`), deterministic MIME construction (`providers/live/gmail_mime.py`), caller-generated Message-ID persisted before dispatch (`domain/message_id.py`, retained for historical/audit compatibility only — see below), the rolling-24h `live_send_allowance_lock`/`live_send_reservations` allowance (one additive migration, `2384e7ddd94e`), the full CLAIMED->history-checkpoint->allowance->IN_FLIGHT->dispatch->classify->settle ordering (`api/live_send_orchestration.py`), bounded zero-`q` §3.3 reconciliation and operator-gated stale recovery endpoints, and the full audit trail API/UI. Two real pre-existing bugs fixed while wiring this in (enum-class unification; a policy-ordering bug where `recipient_conflict` blocked an idempotent retry before the idempotency check ran). `LIVE_EXTERNAL_EMAIL_SEND_DISABLED` went through three states — removed (incorrectly, on a documented-not-passed Postgres gap), restored, then removed again correctly only after PR #23's CI came back green on all four required checks and the user's explicit separate authorization. **The one authorized real-Gmail smoke was then performed and succeeded — and its own read-only follow-up diagnostic proved Gmail omits our generated Message-ID from the sent message's headers, disproving the original §3.3 reconciliation design's core assumption.** Reconciliation was rebuilt on a Gmail mailbox `historyId` checkpoint (captured pre-dispatch, persisted before `messages.send`) plus approved-metadata matching (Subject/To/From/Date, via a new pure `domain/reconciliation_match.py`) instead of the generated Message-ID — see "V2-I-b reconciliation correction — the real smoke's finding and the fix" below for the full account, including the corrected dispatch ordering, the new `pre_dispatch_history_id` column/migration, the new `AMBIGUOUS`/`HISTORY_EXPIRED` reconcile outcomes, and the complete updated test matrix. Canonical Demo byte-identical throughout. No real sender/recipient address, provider message id, raw Message-ID value, token, or secret is recorded anywhere in this document or the tests. No second real Gmail/OpenAI/Tavily/Apollo/Hunter call has been made or authorized. |
 | **V2-I-c — LinkedIn action-path closure** | *this commit* (branch `claude/v2-i-c-linkedin-closure`) | `ActionApprovalPanel`'s LinkedIn "Open" now reuses `lib/linkedinSafety.ts::isSafeLinkedInHref` (the same defense-in-depth check `ContactPanel`/V2-E already applies — never a second URL parser) against the LinkedIn contact-channel row's own `origin`/`discovery_state`/`identifier`: when it returns true, "Open" renders a real `<a target="_blank" rel="noreferrer noopener">` to the validated identifier; when false, the existing inline fallback panel renders instead, now with `origin`-aware copy — `DEMO_FIXTURE` keeps the original "simulated profile · demo fixture / no network request was made" wording verbatim, while a `LIVE_PROVIDER` channel that still didn't pass the safety check gets distinct, provenance-honest copy that never claims "demo fixture" or "no network request was made" about a real provider observation. The anchor-vs-fallback decision was extracted into an exported `LinkedInOpenAction` component so it's directly testable with explicit props (the existing test file has no jsdom/testing-library — `renderToStaticMarkup` never runs `useEffect`, so the real `ActionApprovalPanel`'s async `proposal` state can never be driven from a test). Eight new dedicated backend tests (`tests/test_linkedin_action_path.py`) prove, through the real API rather than pure kwargs: `LINKEDIN_COPY_AND_OPEN` executes with `provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None`/zero `action_send_calls`; no send-provider or Gmail-provider resolver is ever called (proven by monkeypatching both to raise); a Live LinkedIn execute consumes no live recipient identity and a later Live `EMAIL_SEND` to the same person still dispatches; a prior successful Live `EMAIL_SEND` to the recipient does NOT block a sibling LinkedIn proposal (clause 12 is `EMAIL_SEND`-only); a real legal/privacy suppression on the EMAIL channel does not affect the sibling LinkedIn proposal (clause 15 is `EMAIL_SEND`-only, complementing the existing pure-function coverage in `test_suppression_policy.py`); duplicate execute is idempotent; and weak/mismatch/unknown LinkedIn identity is blocked with no override. All eight passed on the first run against the existing backend — **no genuine backend defect was found, so no groundwork backend source was changed.** Five new frontend tests cover the four required scenarios (DEMO_FIXTURE zero-href, LIVE_PROVIDER valid-URL real anchor, LIVE_PROVIDER malformed-URL fallback, LIVE_PROVIDER fallback never says "demo fixture") plus a no-channel-row default case. Manual Demo-mode UI walkthrough (propose → approve → execute → Copy → Open) performed via a headless-Chromium Playwright script, confirmed: "Open profile" renders as a `<button>` (never a link) for `DEMO_FIXTURE`, zero `href` anywhere on the page, zero navigation. Canonical Demo untouched (no backend production code changed). Zero provider/network calls. No real LinkedIn URL was ever opened. Gmail/V2-I, reconciliation, suppression, allowance, contact identity grammar/matching, the review check count, the action-policy clause set, `fixtures/demo_pack.yaml`, schema/Alembic, and `master` are all untouched. See "What V2-I-c added" below. |
 | **V2-J — Quality, metrics, production, v2 release preparation** | *this commit* (branch `claude/v2-j-quality-release`) | Two new computed-on-read `/evaluation` blocks, `enrichment` and `actions` — no `evaluation_metrics` table, no new model column, no migration. `enrichment`: `attempted`/`matched`/`match_rate`/`email_found_rate`/`email_verified_rate` (FOUND-denominated)/`catch_all_rate` (NULL-excluded)/`linkedin_resolved_rate`/`identity_match_distribution`/`identifier_grammar_rejections`/`provider_error_rate` (NOT_FOUND never counts)/`not_attempted_budget_count`/`enrichment_attempts_by_status`/`stale_channel_count` (observed-then-aged only, never never-attempted)/`preserved_last_known_good_count`+`_breakdown`/p50-p95 latency/credits+cost+calls (CONTRIB excludes NOT_ATTEMPTED_BUDGET; cost sums across providers, provider-native credits refuse to sum across more than one distinct provider). `actions`: `proposals_by_verdict`/`blocked_reasons` (proposal-time) kept strictly separate from `execution_blocked_reasons`/`execution_blocked_attempts`/`execution_blocked_proposals` (execution-time) /`content_hash_mismatch_count`/approval→execution latency p50-p95/`executions_by_status`+`_by_origin`/`uncertain_count`/`reconciliation_outcomes`/`mean_messages_scanned_per_reconcile`/`cross_run_recipient_blocks`+`_blocked_proposals`. Instrumented the five pre-policy `execute` 409 paths (`NOT_APPROVED`/`APPROVAL_SUPERSEDED`/`SENDER_NOT_CONNECTED`/`SENDER_CHANGED`/`CONTENT_CHANGED`) with a persisted `execution_blocked` `action_events` row before each raise — the five original error contracts (status/code/message/ordering) are byte-for-byte unchanged; this is the same "the seam is an observation, never a behavior branch" discipline the rest of this codebase's telemetry recorders already follow. `ActionRepository.cross_run_blocking_runs` (new) reuses the SAME `_BLOCKING_LIVE_STATUSES` constant `recipient_conflict()` already enforces — never a second, driftable status list; `DEMO_SIMULATED` never participates; a same-run blocking execution is correctly excluded from the cross-run count. `compute_run_evaluation` now takes `ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at `api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` (`engine/runner.py`), preserving the standing boundary that the pipeline engine never touches governed-action state. Minimal new read methods added to `ContactEnrichmentRepository`/`ActionRepository`/`ApprovalRepository` — no provider import anywhere in `evaluation/`/`domain/`. Frontend: `EnrichmentQualityPanel`/`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s shape), additive `EnrichmentMetrics`/`ActionMetrics` types, both rendered from `QualityTab`; every `null` rate renders "—", never "0%"; blocked-reason/status/outcome maps render generically (an unrecognized future value still renders correctly); the action-empty-state reads one explicit sentence, never a wall of zeros. `APP_VERSION`/API package version bumped to `2.0.0`; CI's push-trigger branch fixed `main`→`master`; root `.env.example` documents `APP_VERSION`/`MAX_ENRICHMENT_CALLS_PER_RUN`/`TRUSTED_HOSTS` and its stale `NEXT_PUBLIC_API_URL` block replaced with a pointer to `apps/web/.env.example`/`GROUNDWORK_API_ORIGIN`. `scripts/prod_smoke.py` gained a fourth check (`/evaluation` shape + internal consistency), still Demo-only, still zero egress, still never run by CI. `docs/DEPLOYMENT.md` gained a documentation-only production rate-limiting section (BFF/shared-bucket behavior, the Uvicorn/Render layer honestly marked INFERRED, no blindly-trusted `X-Forwarded-For`, the deferred secure BFF-side redesign) and a release/rollback sequence (migration-before-serve, tag-after-verify, additive-schema-safe rollback); `docs/RUNBOOK.md` gained an operational reading guide for the two new panels; `docs/ARCHITECTURE.md` gained the V2-J narrative section. 24 new backend tests (`tests/test_evaluation_enrichment_metrics.py`, `tests/test_evaluation_action_metrics.py`) plus 5 existing evaluation call sites updated for the new required kwargs — full SQLite suite 1195 passed/1 skipped (baseline 1171 passed/1 skipped, +24, same 1 skip); 11 new frontend tests — full suite 133 passed (baseline 122, +11); frontend lint/typecheck/build all clean; Alembic head unchanged (`336c199f2d05` — no migration, none needed). Canonical Demo regression tests unchanged and green. `master` untouched; no merge, no tag, no deploy, no Neon migration, zero provider/network calls, zero Gmail sends, zero LinkedIn navigation. Local Docker/Postgres were NOT reachable in this session's sandbox (no Docker daemon socket, no local Postgres server) — the Postgres+migration-drift and Docker-build gates are asserted only by GitHub CI, not locally reproduced; stated here explicitly rather than claimed. See "What V2-J added" below. |
+| **v2.0.1 — Live-Quality Hardening (Rev 2)** | *this commit* (branch `fix/v2-0-1-live-quality`) | Six targeted Live-Mode correctness fixes, no scope beyond them: (1) lexical-only `domain/funding_stage.py::canonicalize_funding_stage()` normalizes spelling/case/punctuation of a funding-stage string onto the canonical `snake_case` tokens, never bucketing an unrecognized stage (Series D/E/F/...) onto a different one ("growth" included) — wired into `engine/steps/research.py` (Live-extracted `FundingEvent.stage`) and `engine/objective_parser.py` (LLM-inferred `target_funding_stages`); (2) `engine/steps/enrich.py::resolve_contact`'s persona admission gate is now `leader.title in persona_titles` ONLY — the LLM-authored `is_persona_match` boolean can no longer admit a title the Play never targeted, and an empty `persona_titles` now unconditionally resolves to `UNAVAILABLE`; (3) `domain/grounding.py::date_claim_supported()` (new) requires a funding event's `announced_at` to be fully spelled out (year+month+day, several common written forms) in its `LIVE_FETCH`-origin evidence's own snippet and not in the future, else `engine/steps/signals.py` nulls it — gated on `Evidence.origin == LIVE_FETCH` (never Demo, whose `announced_at` is deterministically fixture-derived, not LLM-extracted) so canonical Demo is structurally unaffected; `SourceDocument.published_at` is never read by this check; (4) `domain/outreach_sanitize.py::strip_trailing_placeholder_signature()` (new) deletes ONLY a draft body's trailing, placeholder-only sender-signature line (e.g. `[Your Name]`) right after the LLM call in `engine/steps/personalize.py` — a mid-body or line-shared placeholder is left untouched and still hard-FAILs `domain/review.py::_no_placeholders`, which itself was not modified; (5) the objective-parse prompt now serves the model the exact six-stage canonical enumeration and instructs it to return the full set (never a narrower guess like `[series_a, series_b]`) for a "requires funding, names no stage" objective, plus the same lexical canonicalization as (1); (6) `apps/web/app/plays/new/page.tsx`'s ICP overrides are now mode-aware (`buildIcpOverrides()`, extracted pure/exported for direct unit testing) — Demo Mode still sends the full canonical fixture ICP byte-for-byte, Live Mode now sends ONLY the four controls the form actually exposes (`target_industries`/size band/`min_score`), never the fixture-only `target_funding_stages`/`target_technologies`/`persona_titles`/`excluded_industries`/`adjacent_industries`/`min_confidence` that used to leak into every Live run regardless of the real objective. Retrieval alignment (query-template expansion, raising the search-query cap 3→5) is explicitly OUT OF SCOPE, deferred to v2.0.2. No separate frozen "v2.0.1 Rev 2" plan document exists anywhere in this repository or environment — searched by filename and content, same gap V2-F/V2-I-a's sessions each found and recorded for their own missing plans; per `CLAUDE.md`'s explicit instruction this is flagged here rather than silently resolved, and the task brief's own detailed, numbered scope (itself as specific as the frozen per-checkpoint plans elsewhere in this repo) was treated as authoritative. `domain/scoring.py`, `tests/test_run_integration.py`, `tests/test_review.py`, schema/Alembic, and every provider/live implementation are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25, `test_run_integration.py` passing unmodified). Backend: 1224 passed/1 skipped (baseline 1195 passed/1 skipped, +29, same 1 skip). Frontend: 136 passed (baseline 133, +3). Zero provider/network/production calls. See "What v2.0.1 added" below. |
 
 ---
 
 ## Current checkpoint
+
+**v2.0.1 — Live-Quality Hardening (Rev 2) — COMPLETE.** Six targeted Live-Mode correctness fixes on top
+of the completed v2 (V2-A through V2-J) work, none of which touch `master` or deploy anything. Full
+detail: "What v2.0.1 added" immediately below.
+
+**No separate frozen "v2.0.1 Live-Quality Hardening Rev 2" plan document exists anywhere in this
+repository or environment** — searched by filename (`docs/*.md`, `apps/**`) and by content (`live-quality`,
+`live_quality`, `Rev 2`, `v2.0.1`/`v2_0_1`); nothing matched beyond this branch name and the task brief
+itself. This is the same gap the V2-F and V2-I-a sessions each found and explicitly recorded for their own
+missing "frozen plan" documents (see "Old (pre-V2-G)"/"Old (pre-V2-F)" entries further below) — per
+`CLAUDE.md`'s explicit instruction to flag rather than silently resolve a conflict against the documented
+groundwork, this is recorded here rather than guessed past. The task brief's own numbered scope (six
+required items, explicit hard invariants, an explicit list of files/tests that must not change) was
+detailed and internally consistent enough to treat as authoritative wherever it didn't conflict with
+`CLAUDE.md`'s standing v1/v2 invariants (it never did), exactly as V2-F's task brief was treated the same
+way against Part 6/Part 13 before it.
+
+### What v2.0.1 added
+
+1. **Lexical-only funding-stage canonicalization.** New `domain/funding_stage.py` (pure, no I/O):
+   `canonicalize_funding_stage()` normalizes a stage string's spelling/case/punctuation onto the six
+   canonical `snake_case` tokens `domain/scoring.py::_FUNDING_STAGE_ORDER` already uses (duplicated as
+   `SUPPORTED_FUNDING_STAGES`, not imported, since that name is private to `scoring.py` — `tests/
+   test_funding_stage.py::test_supported_stages_mirror_scoring_module_exactly` guards the two staying in
+   sync); an unrecognized stage (`"Series D"`, `"Series E"`, arbitrary free text) is normalized for
+   punctuation/case only and returned as its own distinct token — **never** remapped onto a different
+   recognized stage, and never bucketed onto `"growth"` unless the input itself lexically says "growth".
+   Wired into two call sites, both idempotent on already-canonical input (verified for the demo fixture's
+   own `"series_a"`/`"series_b"` strings): `engine/steps/research.py` canonicalizes each Live-extracted
+   `FundingEvent.stage` right after the LLM call, before `ctx.facts` is committed; `engine/objective_parser.
+   py` canonicalizes the LLM's `target_funding_stages` list the same way. `domain/scoring.py` itself is
+   untouched.
+2. **Deterministic persona matching.** `engine/steps/enrich.py::resolve_contact`'s admission gate was
+   `leader.is_persona_match or leader.title in persona_titles` — the LLM-authored boolean could admit a
+   title the Play never targeted (the real-world case that motivated this fix: a Live extraction setting
+   `is_persona_match=True` for an "SVP Product" leader on a revenue-persona play). Now it is `leader.title
+   in persona_titles` ONLY. `persona_titles == []` means the Play named no qualifying buyer, so every
+   prospect now unconditionally resolves to `UNAVAILABLE` regardless of what the LLM claims. All four
+   `is_persona_match: true` fixtures in `fixtures/demo_pack.yaml` already carry a title that's also
+   literally in the canonical demo Play's `persona_titles` (`"VP of Sales"` ×3, `"Head of Sales"` ×1), so
+   this is a no-op for canonical Demo. New `tests/test_enrich_persona_gate.py` (4 tests).
+3. **Deterministic date grounding.** New `domain/grounding.py::date_claim_supported(snippet, claimed_date,
+   reference_date)`: a funding event's `announced_at` survives only when it is not in the future relative
+   to `reference_date` AND the exact date is fully spelled out (year + month + day — several common
+   written forms: `"March 15, 2024"`, `"15 March 2024"`, ISO `"2024-03-15"`, `"03/15/2024"`; a bare year or
+   month+year never counts) in the cited evidence's own snippet. `SourceDocument.published_at` is
+   structurally never passed to or read by this function — the only date it can ever validate against is
+   the evidence snippet's own text. Wired into `engine/steps/signals.py`, gated on `evidence.origin ==
+   EvidenceOrigin.LIVE_FETCH` — the same origin-based differentiation `engine/steps/research.py` already
+   uses for `source_url` (never an `if mode == demo` branch): Demo Mode's `announced_at` is deterministically
+   computed from the fixture's own `announced_days_ago` relative to a dynamic `date.today()` reference, is
+   never LLM-extracted from text, and has no literal calendar date anywhere in its static snippet strings —
+   applying this check to `DEMO_FIXTURE` evidence would null every canonical Demo funding date and zero out
+   `funding_signal`'s recency term for all five companies, which is exactly why the gate exists. An
+   unsupported date becomes `None`, never inferred or repaired. New `tests/test_funding_date_grounding.py`
+   (7 tests, including one proving canonical-Demo-shaped `DEMO_FIXTURE` evidence is never date-checked).
+4. **Placeholder prevention at the generation boundary.** New `domain/outreach_sanitize.py::
+   strip_trailing_placeholder_signature()` (pure; reuses `domain/review.py`'s own `_PLACEHOLDER_PATTERNS`
+   rather than a second, driftable pattern set) deletes a draft body's trailing line ONLY when that whole
+   line is one placeholder-shaped token (e.g. `"[Your Name]"`) standing in for a signature — it never
+   fabricates a name in its place, only ever deletes. Anything else (mid-body, sharing a line with real
+   content, more than the last line) is left completely untouched and still reaches `domain/review.py::
+   _no_placeholders`, which was NOT modified and still hard-FAILs it exactly as before. Wired into `engine/
+   steps/personalize.py` right after each of the two LLM calls (email, LinkedIn) — the prompts and the LLM
+   calls themselves are unchanged. Demo Mode's fixture-templated bodies end in `"Best,\nThe Groundwork
+   Team"` (never a placeholder shape), so this is a no-op for canonical Demo. New `tests/
+   test_outreach_sanitize.py` (7 tests).
+5. **Objective-parser funding-stage contract.** `prompts/objective_parse.py`'s system prompt now serves the
+   model `domain/funding_stage.py::SUPPORTED_FUNDING_STAGES`'s exact six-token enumeration and instructs it
+   to return the full set — never a narrower guess like `[series_a, series_b]` — for an objective that
+   requires funding but names no specific round; `engine/objective_parser.py` canonicalizes whatever the
+   model returns (see item 1). The empty-list behavior when the objective implies no funding constraint at
+   all is unchanged (verified by `tests/test_objective_parser_funding_stage.py::
+   test_empty_list_behavior_preserved_when_model_infers_no_stage` and `..._deterministic_fallback_path_
+   unaffected`) — `domain/scoring.py`'s `_stage_match` semantics are untouched either way. This LLM branch
+   only ever executes when `mode is Mode.LIVE and use_live_objective_parser` (`api/routers/plays.py`), so
+   canonical Demo (which always calls `parse_objective(..., use_llm=False)`) never exercises it. New `tests/
+   test_objective_parser_funding_stage.py` (4 tests).
+6. **Live UI overrides mode-awareness.** `apps/web/app/plays/new/page.tsx`'s single unconditional
+   `overrides()` (sent for both Demo and Live) is replaced by a pure, exported, mode-aware
+   `buildIcpOverrides(mode, {industries, sizeMin, sizeMax, minScore})`, extracted to module scope
+   specifically so it's directly unit-testable without a DOM (`vitest`'s `environment: "node"` has no
+   jsdom). Demo Mode's branch is byte-for-byte identical to the old unconditional object — the canonical
+   fixture ICP (`excluded_industries: ["retail_pos"]`, `adjacent_industries`, `target_funding_stages:
+   ["series_a", "series_b"]`, `target_technologies`, `persona_titles`, `min_confidence: 0.6`) is preserved
+   exactly, per this checkpoint's explicit user sign-off overriding the historical PROGRESS.md do-not-touch
+   note on this file (that note protected canonical Demo reproducibility, which remains unchanged — it did
+   not intend to freeze a Live-mode bug in place). Live Mode's branch now sends ONLY `target_industries`/
+   `size_band_min`/`size_band_max`/`min_score` — the four controls the form actually exposes — and never
+   the six fixture-only fields above, which used to silently pin every Live run to the Demo fixture's own
+   narrow targeting regardless of the real objective. All three call sites (`previewPlay` in the debounced
+   preview effect, `handleParseWithModel`, `handleRunAgents`) now call `buildIcpOverrides` with the mode
+   that will actually be used; `previewSignature` now includes `mode` (previously deliberately excluded,
+   since overrides used to be mode-independent) so a Demo/Live toggle correctly triggers a fresh preview.
+   New `apps/web/app/plays/new/page.overrides.test.ts` (3 tests).
+
+**Explicitly out of scope, deferred to v2.0.2 (retrieval alignment)**: no size/technology/persona-targeted
+query templates were added; the search-query cap was not raised from 3 to 5; `engine/discovery.py`,
+`domain/query_plan.py`, and every `providers/live/*` implementation are untouched.
+
+**Verification.** Backend: `cd apps/api && uv run pytest` — 1224 passed, 1 skipped (baseline before this
+checkpoint: 1195 passed, 1 skipped; +29 new tests, same pre-existing skip). `tests/test_run_integration.py`
+and `tests/test_review.py` were not edited and both pass unmodified; canonical Demo scores confirmed
+unchanged (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25). Frontend: `pnpm test` (vitest)
+— 136 passed (baseline 133; +3 new). `git diff --stat` confirms zero changes to `domain/scoring.py`, any
+`alembic/` revision, `models/tables.py`, or any `providers/live/*` file. Zero OpenAI/Tavily/Apollo/Hunter/
+Gmail/LinkedIn calls were made — no provider/live code was touched, and nothing in this checkpoint's own
+new code makes a network call (`domain/funding_stage.py` and `domain/outreach_sanitize.py` are pure
+string/regex operations; `domain/grounding.py::date_claim_supported()` is a pure date/regex comparison).
+
+**Old (pre-v2.0.1) "Current checkpoint" entry, now historical:**
 
 **V2-J — Quality, metrics, production, v2 release preparation.** The final V2 checkpoint per
 `docs/V2_IMPLEMENTATION_PLAN.md` Part 13: `/evaluation` extended with `enrichment`/`actions` blocks, the
@@ -5738,6 +5850,22 @@ No PR was created this session, per the task's explicit instruction to stop befo
 ---
 
 ## Next task
+
+**Immediate next task: v2.0.2 — retrieval alignment.** Explicitly out of scope for v2.0.1 (see "What
+v2.0.1 added" above): add the size/technology/persona-targeted query templates to `domain/query_plan.py`,
+and raise the search-query cap from 3 to 5. Do not begin it without the user's explicit authorization to
+roll into that checkpoint.
+
+**The `feature/v2-contact-enrichment -> master` integration PR the paragraph below still describes as the
+next task is DONE** — this branch (`fix/v2-0-1-live-quality`) was created from a tip whose own history
+already contains `8577f5e "Merge pull request #26 from RutikYerunkar/feature/v2-contact-enrichment"`
+immediately after V2-J's PR #25 merge, i.e. PR #26 (the exact integration PR named below) has already been
+merged as of this checkpoint. `master`/`origin/master` are not fetched into this environment (only
+`fix/v2-0-1-live-quality` is), so this is inferred from this branch's own linear commit ancestry, not
+independently confirmed against a fetched `master` — a future session with `master` fetched should confirm
+directly (`git log origin/master -1`) rather than take this note alone as proof.
+
+**Historical note (superseded by the above — kept for continuity):**
 
 **Immediate next task: V2-J — the single integration PR into `master`**, per the v2 section of
 `docs/V2_IMPLEMENTATION_PLAN.md`/`CLAUDE.md`'s own invariant ("`master` remains untouched until the single

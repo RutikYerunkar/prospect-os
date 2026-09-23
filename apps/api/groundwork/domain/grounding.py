@@ -5,11 +5,21 @@ detection in §9 work: an LLM proposes `{claim, evidence_id}`, and this module
 deterministically confirms the claim's tokens actually occur in the cited
 evidence's snippet before it's allowed to carry weight anywhere downstream
 (scoring, review's `claim_grounding` check).
+
+v2.0.1 note (`date_claim_supported()`): `SourceDocument.published_at` (the
+provider's metadata timestamp for when a source was published) must never be
+read by, or passed into, this module's date-grounding check. It is a
+different fact from a claimed *event* date (e.g. when a funding round was
+announced) and is never served to the extraction LLM in the first place
+(`prompts/research_extraction.py::ResearchSourceInput` carries only
+`ref`/`title`/`text`) — licensing an event date from it here would silently
+reopen exactly the "infer, don't verify" gap this check exists to close.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from groundwork.models.schemas import Evidence
 
@@ -102,6 +112,104 @@ def numeric_claim_supported(snippet: str, claimed_count: int) -> bool:
     if claimed_count < MIN_PLAUSIBLE_EMPLOYEE_COUNT or claimed_count > MAX_PLAUSIBLE_EMPLOYEE_COUNT:
         return False
     return claimed_count in _numbers_in_text(snippet)
+
+
+_MONTH_NAMES: dict[str, int] = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+_MONTH_NAME_ALT = "|".join(sorted(_MONTH_NAMES, key=len, reverse=True))
+
+# Fully-specified (year + month + day) textual date forms only — a bare
+# year or a bare "March 2024" is deliberately never enough (see
+# `date_claim_supported()`'s docstring).
+_DATE_PATTERNS = (
+    # "March 15, 2024" / "March 15th 2024" / "Mar. 15 2024"
+    re.compile(
+        rf"\b({_MONTH_NAME_ALT})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", re.IGNORECASE
+    ),
+    # "15 March 2024" / "15th of March, 2024"
+    re.compile(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_NAME_ALT})\.?,?\s+(\d{{4}})\b", re.IGNORECASE
+    ),
+    # ISO "2024-03-15"
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
+    # "03/15/2024" (US month/day/year)
+    re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"),
+)
+
+
+def _dates_in_text(text: str) -> set[date]:
+    """Every fully-specified calendar date literally spelled out in `text`,
+    in any of a few common written forms. Deliberately conservative: a
+    match that fails `date()` construction (e.g. "February 30") is simply
+    not a date, not an error."""
+    found: set[date] = set()
+
+    for match in _DATE_PATTERNS[0].finditer(text):
+        month_name, day, year = match.groups()
+        month = _MONTH_NAMES[month_name.lower()]
+        try:
+            found.add(date(int(year), month, int(day)))
+        except ValueError:
+            continue
+
+    for match in _DATE_PATTERNS[1].finditer(text):
+        day, month_name, year = match.groups()
+        month = _MONTH_NAMES[month_name.lower()]
+        try:
+            found.add(date(int(year), month, int(day)))
+        except ValueError:
+            continue
+
+    for match in _DATE_PATTERNS[2].finditer(text):
+        year, month, day = match.groups()
+        try:
+            found.add(date(int(year), int(month), int(day)))
+        except ValueError:
+            continue
+
+    for match in _DATE_PATTERNS[3].finditer(text):
+        month, day, year = match.groups()
+        try:
+            found.add(date(int(year), int(month), int(day)))
+        except ValueError:
+            continue
+
+    return found
+
+
+def date_claim_supported(snippet: str, claimed_date: date, reference_date: date) -> bool:
+    """v2.0.1 Live-Quality Hardening — DATE PROVENANCE. An event date
+    (e.g. a funding announcement's `announced_at`) survives only when:
+
+    1. It is not in the future relative to `reference_date` — a claimed
+       date the pipeline itself hasn't reached yet can never be real; and
+    2. The exact claimed date is present, fully spelled out (year + month
+       + day, in one of a few common written forms), in the cited
+       evidence's own snippet text.
+
+    A snippet that only implies a date loosely — a bare year, a
+    month-and-year with no day, relative language like "last month" or
+    "recently," or `SourceDocument.published_at` (deliberately never
+    consulted here — see `domain/grounding.py`'s v2.0.1 module note) —
+    never satisfies this check. The caller (`engine/steps/signals.py`) is
+    responsible for setting the field to `None` rather than inferring or
+    repairing it when this returns `False`.
+    """
+    if claimed_date > reference_date:
+        return False
+    return claimed_date in _dates_in_text(snippet)
 
 
 def verify_claim_evidence(
