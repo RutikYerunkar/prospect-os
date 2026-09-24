@@ -6144,6 +6144,37 @@ No PR was created this session, per the task's explicit instruction to stop befo
 
 ---
 
+## Production bug fix: Approval empty-state copy wrong for NOT_QUALIFIED (post-v2.0.3)
+
+**Observed:** a production Live run correctly produced `ICP score: 49`, `min_score: 80`,
+`status: NOT_QUALIFIED`, `review.verdict: PASS`. The prospect-detail page's Approval panel rendered
+"This prospect never reached a review verdict, so there is nothing for a human to decide yet." — false
+for this prospect, whose review verdict is PASS.
+
+**Root cause:** `apps/web/app/prospects/[id]/page.tsx`'s `ApprovalBar` gates on a single `decidable`
+boolean (`DECIDABLE_STATUSES.includes(prospect.status)` — unchanged by this fix) and, when not
+decidable, always rendered one hardcoded string regardless of *why* the prospect isn't decidable.
+`NOT_QUALIFIED` (review verdict PASS, but below the play's `min_score` floor — see "What v2.0.3 added"
+above) and genuinely-pre-review statuses (`PENDING`/`RUNNING`/`DUPLICATE`/`FAILED`/`TIMED_OUT`) both hit
+that one branch, but only the latter group has actually never reached a review verdict.
+
+**Fix (`apps/web/lib/approvalCopy.ts`, new pure helper):** `approvalEmptyStateCopy(status)` returns the
+qualification-threshold explanation for `NOT_QUALIFIED` and the original "never reached a review
+verdict" copy for every other non-decidable status. `page.tsx` calls it in place of the hardcoded
+string. `DECIDABLE_STATUSES`/the `decidable` boolean, `domain/action_policy.py`, review logic, scoring,
+and retrieval are all untouched — this is display copy only; `NOT_QUALIFIED` remains non-actionable with
+no override path, exactly as v2.0.3 specified.
+
+**Tests (`apps/web/lib/approvalCopy.test.ts`, new, 7 cases):** `NOT_QUALIFIED` gets the qualification
+copy; each genuinely-no-verdict status (`PENDING`/`RUNNING`/`DUPLICATE`/`FAILED`/`TIMED_OUT`) retains the
+original copy; `PASS`/`NEEDS_REVIEW`/`REJECTED` (decidable, so this helper is never invoked for them in
+the real component) don't yield the qualification copy either, as a characterization check. Frontend:
+**152 passed** (baseline 145, +7); `lint`/`typecheck`/`build` all clean. No backend file touched, no
+migration, no scoring/review/action-policy/contact-enrichment/Gmail/LinkedIn change, zero
+OpenAI/Tavily/Apollo/Hunter/Gmail/LinkedIn/network/provider calls anywhere in this session.
+
+---
+
 ## Next task
 
 **v2.0.3 — qualification semantics + source-boundary audit is COMPLETE** (see "What v2.0.3 added" above)

@@ -3,6 +3,7 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { ApiError, NetworkError, approveProspect, getProspect, rejectProspect } from "@/lib/api";
+import { approvalEmptyStateCopy } from "@/lib/approvalCopy";
 import { formatConfidence, formatScore, formatStatus } from "@/lib/format";
 import type { ApprovalState, EvidenceItem, ProspectAggregate, ProspectStatus } from "@/lib/types";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -166,9 +167,7 @@ function ApprovalBar({
       )}
 
       {!decidable ? (
-        <p className="text-sm text-zinc-500">
-          This prospect never reached a review verdict, so there is nothing for a human to decide yet.
-        </p>
+        <p className="text-sm text-zinc-500">{approvalEmptyStateCopy(prospect.status)}</p>
       ) : decided ? (
         <p className="text-sm text-zinc-500">
           Decision recorded. This is an audit-trail entry — the pipeline&apos;s own {formatStatus(prospect.status)}{" "}
