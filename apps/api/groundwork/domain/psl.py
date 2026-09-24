@@ -125,3 +125,25 @@ def canonical_domain(raw: str) -> str | None:
         return None
     registrable = decomposed.registrable
     return registrable or None
+
+
+def is_company_domain(url_or_host: str | None, company_domain: str) -> bool:
+    """v2.0.3 source-boundary predicate: True iff `url_or_host` resolves to
+    the SAME registrable domain as `company_domain` — including any
+    legitimate subdomain of it (`careers.acme.com` under `acme.com`), never
+    an unrelated host. Pure, offline; reuses `canonical_domain`'s existing
+    PSL-aware registrable-domain semantics rather than a second, hand-rolled
+    comparison — a subdomain already collapses to the same `registrable`
+    string as its parent, so simple equality on the two canonical domains is
+    both "same domain" and "legitimate subdomain" at once.
+
+    Fail-closed: an unparseable/empty `url_or_host`, or a `company_domain`
+    that itself doesn't resolve to a registrable domain, is never a match.
+    """
+    if not url_or_host:
+        return False
+    result_domain = canonical_domain(url_or_host)
+    company_canonical = canonical_domain(company_domain)
+    if not result_domain or not company_canonical:
+        return False
+    return result_domain == company_canonical

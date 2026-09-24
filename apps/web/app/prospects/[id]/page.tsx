@@ -26,6 +26,7 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   DUPLICATE: "neutral",
   FAILED: "rose",
   TIMED_OUT: "rose",
+  NOT_QUALIFIED: "indigo",
 };
 
 const VERIFICATION_TONE: Record<string, BadgeTone> = {

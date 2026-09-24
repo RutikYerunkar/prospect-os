@@ -13,6 +13,7 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   DUPLICATE: "neutral",
   FAILED: "rose",
   TIMED_OUT: "rose",
+  NOT_QUALIFIED: "indigo",
 };
 
 function StageTrack({ stage, terminal }: { stage: string; terminal: boolean }) {

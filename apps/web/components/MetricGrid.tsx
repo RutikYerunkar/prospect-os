@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Progress } from "@/components/ui/Progress";
 import { formatCount, formatDuration, formatPercent } from "@/lib/format";
+import { notQualifiedFromVolume } from "@/lib/runCounts";
 import type { QualityMetrics, ReliabilityMetrics, VolumeMetrics } from "@/lib/types";
 
 function MetricCard({
@@ -78,6 +79,7 @@ export function MetricGrid({
   const pass = volume.by_status["PASS"] ?? volume.qualified;
   const failedCount = volume.by_status["FAILED"] ?? 0;
   const timedOutCount = volume.by_status["TIMED_OUT"] ?? 0;
+  const notQualified = notQualifiedFromVolume(volume.by_status);
 
   const syntheticOnly =
     Object.keys(quality.provenance_mix).length > 0 &&
@@ -91,11 +93,18 @@ export function MetricGrid({
       <MetricGroup title="Volume" hint="Counted directly from this run's prospect rows and their engine-computed status.">
         <MetricCard label="Discovered" value={formatCount(volume.discovered)} hint="Prospects discovery returned for this run, before dedupe." />
         <MetricCard label="Completed" value={formatCount(completed)} hint="Prospects no longer PENDING/RUNNING — reached a terminal status." />
-        <MetricCard label="Pass" value={formatCount(pass)} tone="emerald" hint="Status = PASS: cleared scoring, review, and the min-score/confidence gate." />
+        <MetricCard label="Pass" value={formatCount(pass)} tone="emerald" hint="Status = PASS: review verdict PASS (all seven checks, including the confidence floor) AND score at or above the Play's own min-score floor — a passing review that falls short of the min-score floor is NOT_QUALIFIED instead, not PASS." />
         <MetricCard label="Needs review" value={formatCount(volume.needs_review)} tone="amber" hint="Status = NEEDS_REVIEW: a soft guardrail check failed." />
         <MetricCard label="Rejected" value={formatCount(volume.rejected)} tone="rose" hint="Status = REJECTED: disqualified by scoring or a hard guardrail check." />
         <MetricCard label="Duplicate" value={formatCount(volume.duplicated)} hint="Status = DUPLICATE: caught by dedupe before the pipeline ran." />
         <MetricCard label="Failed" value={formatCount(volume.failed)} tone="rose" hint={`Status = FAILED or TIMED_OUT (${failedCount} failed, ${timedOutCount} timed out) — retries exhausted or the run watchdog expired.`} />
+        {notQualified > 0 && (
+          <MetricCard
+            label="Not qualified"
+            value={formatCount(notQualified)}
+            hint="Status = NOT_QUALIFIED: review verdict PASS, but score below the Play's own min-score floor."
+          />
+        )}
       </MetricGroup>
 
       <MetricGroup title="Grounding / quality" hint="Whether output was supportable, not just whether it existed.">

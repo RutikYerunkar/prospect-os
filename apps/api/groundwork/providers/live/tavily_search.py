@@ -59,7 +59,7 @@ from tavily import BadRequestError, InvalidAPIKeyError, UsageLimitExceededError
 from tavily.errors import ForbiddenError
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
-from groundwork.domain.psl import canonical_domain
+from groundwork.domain.psl import canonical_domain, is_company_domain
 from groundwork.domain.query_plan import (
     QueryTemplateId,
     build_domain_resolution_query,
@@ -325,13 +325,32 @@ class TavilySearchProvider:
             telemetry.extend(attempt_telemetry)
 
             results = (raw or {}).get("results", [])
+            # v2.0.3 source boundary: `include_domains=[company.domain]` is
+            # only a hint to the provider, not an enforced guarantee — drop
+            # any result whose own URL doesn't resolve to this company's
+            # registrable domain (or a legitimate subdomain of it) BEFORE it
+            # ever becomes a retrieval occurrence, fail-closed on an
+            # unparseable URL. This only scopes per-company source retrieval
+            # — `resolve_domain()`/`raw_discover()` (domain resolution and
+            # discovery) are deliberately unscoped and untouched.
+            in_domain_results = [
+                r for r in results
+                if is_company_domain(r.get("url") if isinstance(r, dict) else None, company.domain)
+            ]
+            if attempt_telemetry:
+                # Existing search telemetry only — no new column. `result_count`
+                # stays the provider-returned count (set above in `_call_tavily`);
+                # `selected_count` narrows to what was actually kept after the
+                # domain-boundary filter, so a dropped off-domain result is
+                # provably visible without any schema change.
+                attempt_telemetry[-1].selected_count = len(in_domain_results)
             retrieved_at = datetime.now(timezone.utc)
             hits_by_category[query.template_id] = [
                 self._to_source_document(
                     r, ref=f"src:{uuid.uuid4().hex[:12]}", rank=i, retrieved_at=retrieved_at,
                     extraction_method="tavily_search",
                 )
-                for i, r in enumerate(results)
+                for i, r in enumerate(in_domain_results)
             ]
 
         # Phase 2: balanced occurrence allocation — round-robin across

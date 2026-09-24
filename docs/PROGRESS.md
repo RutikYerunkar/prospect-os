@@ -35,11 +35,170 @@ not to re-litigate. Updated and committed at every checkpoint boundary (see
 | **V2-I-c — LinkedIn action-path closure** | *this commit* (branch `claude/v2-i-c-linkedin-closure`) | `ActionApprovalPanel`'s LinkedIn "Open" now reuses `lib/linkedinSafety.ts::isSafeLinkedInHref` (the same defense-in-depth check `ContactPanel`/V2-E already applies — never a second URL parser) against the LinkedIn contact-channel row's own `origin`/`discovery_state`/`identifier`: when it returns true, "Open" renders a real `<a target="_blank" rel="noreferrer noopener">` to the validated identifier; when false, the existing inline fallback panel renders instead, now with `origin`-aware copy — `DEMO_FIXTURE` keeps the original "simulated profile · demo fixture / no network request was made" wording verbatim, while a `LIVE_PROVIDER` channel that still didn't pass the safety check gets distinct, provenance-honest copy that never claims "demo fixture" or "no network request was made" about a real provider observation. The anchor-vs-fallback decision was extracted into an exported `LinkedInOpenAction` component so it's directly testable with explicit props (the existing test file has no jsdom/testing-library — `renderToStaticMarkup` never runs `useEffect`, so the real `ActionApprovalPanel`'s async `proposal` state can never be driven from a test). Eight new dedicated backend tests (`tests/test_linkedin_action_path.py`) prove, through the real API rather than pure kwargs: `LINKEDIN_COPY_AND_OPEN` executes with `provider=None`/`dispatched=False`/`sender_identifier=None`/`recipient_identity_key=None`/zero `action_send_calls`; no send-provider or Gmail-provider resolver is ever called (proven by monkeypatching both to raise); a Live LinkedIn execute consumes no live recipient identity and a later Live `EMAIL_SEND` to the same person still dispatches; a prior successful Live `EMAIL_SEND` to the recipient does NOT block a sibling LinkedIn proposal (clause 12 is `EMAIL_SEND`-only); a real legal/privacy suppression on the EMAIL channel does not affect the sibling LinkedIn proposal (clause 15 is `EMAIL_SEND`-only, complementing the existing pure-function coverage in `test_suppression_policy.py`); duplicate execute is idempotent; and weak/mismatch/unknown LinkedIn identity is blocked with no override. All eight passed on the first run against the existing backend — **no genuine backend defect was found, so no groundwork backend source was changed.** Five new frontend tests cover the four required scenarios (DEMO_FIXTURE zero-href, LIVE_PROVIDER valid-URL real anchor, LIVE_PROVIDER malformed-URL fallback, LIVE_PROVIDER fallback never says "demo fixture") plus a no-channel-row default case. Manual Demo-mode UI walkthrough (propose → approve → execute → Copy → Open) performed via a headless-Chromium Playwright script, confirmed: "Open profile" renders as a `<button>` (never a link) for `DEMO_FIXTURE`, zero `href` anywhere on the page, zero navigation. Canonical Demo untouched (no backend production code changed). Zero provider/network calls. No real LinkedIn URL was ever opened. Gmail/V2-I, reconciliation, suppression, allowance, contact identity grammar/matching, the review check count, the action-policy clause set, `fixtures/demo_pack.yaml`, schema/Alembic, and `master` are all untouched. See "What V2-I-c added" below. |
 | **V2-J — Quality, metrics, production, v2 release preparation** | *this commit* (branch `claude/v2-j-quality-release`) | Two new computed-on-read `/evaluation` blocks, `enrichment` and `actions` — no `evaluation_metrics` table, no new model column, no migration. `enrichment`: `attempted`/`matched`/`match_rate`/`email_found_rate`/`email_verified_rate` (FOUND-denominated)/`catch_all_rate` (NULL-excluded)/`linkedin_resolved_rate`/`identity_match_distribution`/`identifier_grammar_rejections`/`provider_error_rate` (NOT_FOUND never counts)/`not_attempted_budget_count`/`enrichment_attempts_by_status`/`stale_channel_count` (observed-then-aged only, never never-attempted)/`preserved_last_known_good_count`+`_breakdown`/p50-p95 latency/credits+cost+calls (CONTRIB excludes NOT_ATTEMPTED_BUDGET; cost sums across providers, provider-native credits refuse to sum across more than one distinct provider). `actions`: `proposals_by_verdict`/`blocked_reasons` (proposal-time) kept strictly separate from `execution_blocked_reasons`/`execution_blocked_attempts`/`execution_blocked_proposals` (execution-time) /`content_hash_mismatch_count`/approval→execution latency p50-p95/`executions_by_status`+`_by_origin`/`uncertain_count`/`reconciliation_outcomes`/`mean_messages_scanned_per_reconcile`/`cross_run_recipient_blocks`+`_blocked_proposals`. Instrumented the five pre-policy `execute` 409 paths (`NOT_APPROVED`/`APPROVAL_SUPERSEDED`/`SENDER_NOT_CONNECTED`/`SENDER_CHANGED`/`CONTENT_CHANGED`) with a persisted `execution_blocked` `action_events` row before each raise — the five original error contracts (status/code/message/ordering) are byte-for-byte unchanged; this is the same "the seam is an observation, never a behavior branch" discipline the rest of this codebase's telemetry recorders already follow. `ActionRepository.cross_run_blocking_runs` (new) reuses the SAME `_BLOCKING_LIVE_STATUSES` constant `recipient_conflict()` already enforces — never a second, driftable status list; `DEMO_SIMULATED` never participates; a same-run blocking execution is correctly excluded from the cross-run count. `compute_run_evaluation` now takes `ActionRepository`/`ApprovalRepository` as separate keyword arguments, wired in only at `api/routers/evaluation.py` — deliberately NOT added to the engine's own `Repos` (`engine/runner.py`), preserving the standing boundary that the pipeline engine never touches governed-action state. Minimal new read methods added to `ContactEnrichmentRepository`/`ActionRepository`/`ApprovalRepository` — no provider import anywhere in `evaluation/`/`domain/`. Frontend: `EnrichmentQualityPanel`/`ActionGovernancePanel` (mirroring `SearchQualityPanel`'s shape), additive `EnrichmentMetrics`/`ActionMetrics` types, both rendered from `QualityTab`; every `null` rate renders "—", never "0%"; blocked-reason/status/outcome maps render generically (an unrecognized future value still renders correctly); the action-empty-state reads one explicit sentence, never a wall of zeros. `APP_VERSION`/API package version bumped to `2.0.0`; CI's push-trigger branch fixed `main`→`master`; root `.env.example` documents `APP_VERSION`/`MAX_ENRICHMENT_CALLS_PER_RUN`/`TRUSTED_HOSTS` and its stale `NEXT_PUBLIC_API_URL` block replaced with a pointer to `apps/web/.env.example`/`GROUNDWORK_API_ORIGIN`. `scripts/prod_smoke.py` gained a fourth check (`/evaluation` shape + internal consistency), still Demo-only, still zero egress, still never run by CI. `docs/DEPLOYMENT.md` gained a documentation-only production rate-limiting section (BFF/shared-bucket behavior, the Uvicorn/Render layer honestly marked INFERRED, no blindly-trusted `X-Forwarded-For`, the deferred secure BFF-side redesign) and a release/rollback sequence (migration-before-serve, tag-after-verify, additive-schema-safe rollback); `docs/RUNBOOK.md` gained an operational reading guide for the two new panels; `docs/ARCHITECTURE.md` gained the V2-J narrative section. 24 new backend tests (`tests/test_evaluation_enrichment_metrics.py`, `tests/test_evaluation_action_metrics.py`) plus 5 existing evaluation call sites updated for the new required kwargs — full SQLite suite 1195 passed/1 skipped (baseline 1171 passed/1 skipped, +24, same 1 skip); 11 new frontend tests — full suite 133 passed (baseline 122, +11); frontend lint/typecheck/build all clean; Alembic head unchanged (`336c199f2d05` — no migration, none needed). Canonical Demo regression tests unchanged and green. `master` untouched; no merge, no tag, no deploy, no Neon migration, zero provider/network calls, zero Gmail sends, zero LinkedIn navigation. Local Docker/Postgres were NOT reachable in this session's sandbox (no Docker daemon socket, no local Postgres server) — the Postgres+migration-drift and Docker-build gates are asserted only by GitHub CI, not locally reproduced; stated here explicitly rather than claimed. See "What V2-J added" below. |
 | **v2.0.1 — Live-Quality Hardening (Rev 2)** | `fix/v2-0-1-live-quality` (merged to `master`) | Six targeted Live-Mode correctness fixes, no scope beyond them: (1) lexical-only `domain/funding_stage.py::canonicalize_funding_stage()` normalizes spelling/case/punctuation of a funding-stage string onto the canonical `snake_case` tokens, never bucketing an unrecognized stage (Series D/E/F/...) onto a different one ("growth" included) — wired into `engine/steps/research.py` (Live-extracted `FundingEvent.stage`) and `engine/objective_parser.py` (LLM-inferred `target_funding_stages`); (2) `engine/steps/enrich.py::resolve_contact`'s persona admission gate is now `leader.title in persona_titles` ONLY — the LLM-authored `is_persona_match` boolean can no longer admit a title the Play never targeted, and an empty `persona_titles` now unconditionally resolves to `UNAVAILABLE`; (3) `domain/grounding.py::date_claim_supported()` (new) requires a funding event's `announced_at` to be fully spelled out (year+month+day, several common written forms) in its `LIVE_FETCH`-origin evidence's own snippet and not in the future, else `engine/steps/signals.py` nulls it — gated on `Evidence.origin == LIVE_FETCH` (never Demo, whose `announced_at` is deterministically fixture-derived, not LLM-extracted) so canonical Demo is structurally unaffected; `SourceDocument.published_at` is never read by this check; (4) `domain/outreach_sanitize.py::strip_trailing_placeholder_signature()` (new) deletes ONLY a draft body's trailing, placeholder-only sender-signature line (e.g. `[Your Name]`) right after the LLM call in `engine/steps/personalize.py` — a mid-body or line-shared placeholder is left untouched and still hard-FAILs `domain/review.py::_no_placeholders`, which itself was not modified; (5) the objective-parse prompt now serves the model the exact six-stage canonical enumeration and instructs it to return the full set (never a narrower guess like `[series_a, series_b]`) for a "requires funding, names no stage" objective, plus the same lexical canonicalization as (1); (6) `apps/web/app/plays/new/page.tsx`'s ICP overrides are now mode-aware (`buildIcpOverrides()`, extracted pure/exported for direct unit testing) — Demo Mode still sends the full canonical fixture ICP byte-for-byte, Live Mode now sends ONLY the four controls the form actually exposes (`target_industries`/size band/`min_score`), never the fixture-only `target_funding_stages`/`target_technologies`/`persona_titles`/`excluded_industries`/`adjacent_industries`/`min_confidence` that used to leak into every Live run regardless of the real objective. Retrieval alignment (query-template expansion, raising the search-query cap 3→5) is explicitly OUT OF SCOPE, deferred to v2.0.2. No separate frozen "v2.0.1 Rev 2" plan document exists anywhere in this repository or environment — searched by filename and content, same gap V2-F/V2-I-a's sessions each found and recorded for their own missing plans; per `CLAUDE.md`'s explicit instruction this is flagged here rather than silently resolved, and the task brief's own detailed, numbered scope (itself as specific as the frozen per-checkpoint plans elsewhere in this repo) was treated as authoritative. `domain/scoring.py`, `tests/test_run_integration.py`, `tests/test_review.py`, schema/Alembic, and every provider/live implementation are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25, `test_run_integration.py` passing unmodified). Backend: 1224 passed/1 skipped (baseline 1195 passed/1 skipped, +29, same 1 skip). Frontend: 136 passed (baseline 133, +3). Zero provider/network/production calls. See "What v2.0.1 added" below. |
-| **v2.0.2 — Live Retrieval Alignment (Rev 2)** | *this commit* (branch `fix/v2-0-2-retrieval-alignment`) | Fixes RC-1 — the per-company retrieval starvation bug deferred from v2.0.1 — and threads `PlaySpec` into Live per-company retrieval so query targeting actually reflects the Play. `domain/query_plan.py::build_source_queries()` now takes the full `PlaySpec` (`QUERY_PLAN_VERSION` "v1"→"v2"): `company_funding`/`company_careers`/`company_size` always, `company_persona_leadership` iff `persona_titles` non-empty, `company_technology` iff `target_technologies` non-empty — no generic leadership fallback (`COMPANY_LEADERSHIP` removed outright), yielding exactly 3/4/4/5 emitted queries for the four Play shapes. `TavilySearchProvider.fetch_sources()` rewritten around the RC-1 fix: Phase 1 issues every category's query up front regardless of how many occurrences earlier categories already produced (`_allocate_balanced_occurrences`); Phase 2 rations those hits round-robin, one per category per pass, up to the unchanged `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` (15) ceiling — a category can no longer be starved out just because an earlier category alone filled the ceiling. Deduped winners are then interleaved the same way (`_category_balanced_extract_order`) before truncating to `max_sources_per_prospect` for extraction, plus a defensive final dedupe so `.extract()` never receives the same URL twice even if two categories surfaced the same page (the additional implementation invariant named in this checkpoint's task brief). `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT` 3→5, `LIVE_MAX_SEARCH_CALLS_PER_RUN` 32→40, `MAX_SOURCE_SNIPPET_CHARS` (`prompts/base.py`) 600→1200 (matching `LIVE_MAX_SOURCE_EXCERPT_CHARS`, already 1200). No separate frozen "v2.0.2 Rev 2" plan document exists anywhere in this repository or environment — flagged explicitly per `CLAUDE.md`, same gap v2.0.1/V2-F/V2-I-a each found for their own missing plans; the task brief's own detailed, numbered scope (exact query-count matrix, occurrence-ceiling math, budget numbers) was treated as authoritative. `domain/scoring.py`, review/guardrail rules, grounding rules, the v2.0.1 persona gate, contact-enrichment gating, schema/Alembic, and frontend source are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25 — Demo Mode never calls `TavilySearchProvider`, so this checkpoint cannot touch it structurally, and `make demo` confirms it didn't). Backend: 1246 passed/1 skipped (baseline 1224 passed/1 skipped, +22, same 1 skip). Frontend: 136 passed, lint/typecheck/build all clean (no frontend source changed). Zero provider/network/production calls. See "What v2.0.2 added" below. |
+| **v2.0.2 — Live Retrieval Alignment (Rev 2)** | `fix/v2-0-2-retrieval-alignment` (merged to `master`) | Fixes RC-1 — the per-company retrieval starvation bug deferred from v2.0.1 — and threads `PlaySpec` into Live per-company retrieval so query targeting actually reflects the Play. `domain/query_plan.py::build_source_queries()` now takes the full `PlaySpec` (`QUERY_PLAN_VERSION` "v1"→"v2"): `company_funding`/`company_careers`/`company_size` always, `company_persona_leadership` iff `persona_titles` non-empty, `company_technology` iff `target_technologies` non-empty — no generic leadership fallback (`COMPANY_LEADERSHIP` removed outright), yielding exactly 3/4/4/5 emitted queries for the four Play shapes. `TavilySearchProvider.fetch_sources()` rewritten around the RC-1 fix: Phase 1 issues every category's query up front regardless of how many occurrences earlier categories already produced (`_allocate_balanced_occurrences`); Phase 2 rations those hits round-robin, one per category per pass, up to the unchanged `LIVE_MAX_RESULT_OCCURRENCES_PER_PROSPECT` (15) ceiling — a category can no longer be starved out just because an earlier category alone filled the ceiling. Deduped winners are then interleaved the same way (`_category_balanced_extract_order`) before truncating to `max_sources_per_prospect` for extraction, plus a defensive final dedupe so `.extract()` never receives the same URL twice even if two categories surfaced the same page (the additional implementation invariant named in this checkpoint's task brief). `LIVE_MAX_SOURCE_QUERIES_PER_PROSPECT` 3→5, `LIVE_MAX_SEARCH_CALLS_PER_RUN` 32→40, `MAX_SOURCE_SNIPPET_CHARS` (`prompts/base.py`) 600→1200 (matching `LIVE_MAX_SOURCE_EXCERPT_CHARS`, already 1200). No separate frozen "v2.0.2 Rev 2" plan document exists anywhere in this repository or environment — flagged explicitly per `CLAUDE.md`, same gap v2.0.1/V2-F/V2-I-a each found for their own missing plans; the task brief's own detailed, numbered scope (exact query-count matrix, occurrence-ceiling math, budget numbers) was treated as authoritative. `domain/scoring.py`, review/guardrail rules, grounding rules, the v2.0.1 persona gate, contact-enrichment gating, schema/Alembic, and frontend source are untouched. Canonical Demo verified byte-identical (Northwind 92 / Riverbend 35 / Ferrous 58 / Sable 79 / Cobalt 25 — Demo Mode never calls `TavilySearchProvider`, so this checkpoint cannot touch it structurally, and `make demo` confirms it didn't). Backend: 1246 passed/1 skipped (baseline 1224 passed/1 skipped, +22, same 1 skip). Frontend: 136 passed, lint/typecheck/build all clean (no frontend source changed). Zero provider/network/production calls. See "What v2.0.2 added" below. |
+| **v2.0.3 — Qualification Semantics + Source-Boundary Audit (Rev 2)** | *this commit* (branch `fix/v2-0-3-qualification-semantics`) | Adds `ProspectStatus.NOT_QUALIFIED` — a prospect whose review verdict is PASS but whose `score.overall` falls below `play_spec.min_score` — as the last step of `engine/runner.py::_derive_final_status()`'s precedence chain (disqualified → review FAIL → review NEEDS_REVIEW → exclusion UNKNOWN → score floor → PASS), never as an eighth review check (still exactly seven). `PlaySpec.min_score` is now server-validated `Field(ge=0, le=100)`; an invalid explicit/API value 422s through the router's existing `ValidationError` catch, while an invalid model-INFERRED value is discarded in `engine/objective_parser.py::parse_objective()` before `PlaySpec.model_validate()` so the deterministic-degradation contract holds (a bad inference never raises). `domain/action_policy.py::_NON_ACTIONABLE_PROSPECT_STATUSES` gained `NOT_QUALIFIED` (no manual override, not added to `api/routers/prospects.py::_DECIDABLE_STATUSES`) — a below-minimum prospect is proposal/approve/execute-blocked with the existing `prospect_not_actionable` reason, proven through the real API with send-provider resolution patched to raise if ever called. New pure `domain/psl.py::is_company_domain()` (reuses `canonical_domain`'s PSL-aware registrable-domain semantics) enforces a source-domain boundary in `TavilySearchProvider.fetch_sources()` only — an off-domain or unparseable result is dropped before it ever becomes a retrieval occurrence, fail-closed; `resolve_domain()`/`raw_discover()` (domain resolution and discovery) stay deliberately unscoped, locked in by regression tests. No new telemetry column: the existing `SearchAttemptTelemetry.selected_count` (previously always equal to `result_count`) now narrows to the post-filter kept count. Frontend: `NOT_QUALIFIED` added to the `ProspectStatus` union and every status tone map (Board row, prospect header); `RunSummary`/`MetricGrid` show a "Not qualified" stat/card only when the count is `> 0`, backed by new pure helpers (`lib/runCounts.ts`) so the gating is testable under vitest's node-only environment without rendering; `MetricGrid`'s PASS tooltip corrected — it previously claimed PASS meant clearing "the min-score/confidence gate" as one bundled thing, which was never actually true (before this checkpoint `min_score` was parsed into `PlaySpec` but never enforced anywhere), and now accurately states PASS requires both review verdict PASS (confidence floor included, as one of the seven checks) AND score at/above the min-score floor, with a below-floor passing review explicitly called out as NOT_QUALIFIED instead. No separate frozen "v2.0.3 Rev 2" plan document exists anywhere in this repository or environment — the same gap every prior `fix/v2-0-*`/V2-F/V2-I-a session found and recorded for its own missing plan; per `CLAUDE.md`'s explicit instruction this is flagged here rather than silently resolved, and the task message's own detailed, invariant-level scope (exact precedence order, exact non-actionable/decidable-set treatment, exact source-boundary semantics, an explicit hard-invariant list) was treated as authoritative, matching every prior checkpoint's own resolution of this identical gap. No migration, no Alembic revision, no scoring-weight/formula change, no eighth review guardrail, no retrieval-architecture change beyond the domain filter, no Gmail/LinkedIn/contact-enrichment/provider-credential change. Canonical Demo verified byte-identical via `make demo` and `test_run_integration.py` (unmodified): PASS 2 (Northwind 92, Sable 79) / NEEDS_REVIEW 2 (Riverbend 35, Ferrous 58) / REJECTED 1 (Cobalt 25) / DUPLICATE 1 / FAILED 1 — Ferrous's own review verdict is NEEDS_REVIEW, not PASS, so it was never at risk of the new score-floor check despite scoring 58 under the pack's own `min_score: 60`; no prospect in the canonical Demo run is NOT_QUALIFIED. Backend: 1295 passed/1 skipped (baseline 1246 passed/1 skipped, +49 — 48 new test functions across six new files plus one added parametrize case in `tests/test_action_policy.py`, the only existing test file this checkpoint modified; same 1 pre-existing skip). Frontend: 145 passed (baseline 136, +9); lint/typecheck/build all clean. Zero OpenAI/Tavily/Apollo/Hunter/Gmail/LinkedIn/Render/Neon/network/production calls anywhere in this session. See "What v2.0.3 added" below. |
 
 ---
 
 ## Current checkpoint
+
+**v2.0.3 — Qualification Semantics + Source-Boundary Audit (Rev 2) — COMPLETE.** Adds `NOT_QUALIFIED`
+qualification semantics (a review-PASS prospect below `play_spec.min_score` is no longer silently
+counted as PASS, and is no longer actionable) plus a company-domain source boundary for Live per-company
+retrieval, on top of the completed v2.0.2 work, none of which touches `master` or deploys anything. Full
+detail: "What v2.0.3 added" immediately below.
+
+**No separate frozen "v2.0.3 Qualification Semantics + Source-Boundary Audit Rev 2" plan document exists
+anywhere in this repository or environment.** The task named an authoritative plan file at
+`/root/.claude/plans/we-are-starting-groundwork-eventual-stonebraker.md`, from "the immediately preceding
+Opus planning session" — this session's container has no `~/.claude/plans/` directory at all, and nothing
+on disk under any name/content match for `stonebraker`, `qualification-semantics`, `source-boundary`, or
+`NOT_QUALIFIED` beyond this branch name and the task message itself. This is the same gap every prior
+`fix/v2-0-*` session (and V2-F, V2-I-a before them) found and explicitly recorded for its own missing
+"frozen plan" document (see the historical entries further below) — per `CLAUDE.md`'s explicit instruction
+to flag rather than silently resolve a conflict against the documented groundwork, this is recorded here
+rather than guessed past. The task message's own scope was detailed and internally consistent enough to
+treat as authoritative wherever it didn't conflict with `CLAUDE.md`'s standing v1/v2 invariants (it never
+did): an exact precedence order for the new status, an exact list of what `domain/action_policy.py` may
+and may not gain, an exact source-boundary semantics (same registrable domain + legitimate subdomains,
+fail-closed, discovery/domain-resolution unscoped), an explicit "no schema/telemetry column" constraint,
+an explicit canonical-Demo-must-not-change requirement with the exact expected distribution/scores, and an
+explicit hard-invariant list (no migration, no scoring-weight change, no eighth review guardrail, no
+retrieval expansion) — exactly as v2.0.1's and v2.0.2's task briefs were each treated the same way before
+it.
+
+### What v2.0.3 added
+
+**Qualification semantics.** `ProspectStatus.NOT_QUALIFIED` (new) is derived as the LAST step of
+`engine/runner.py::_derive_final_status()`'s precedence chain — evaluated only once disqualification,
+review FAIL, review NEEDS_REVIEW, and exclusion UNKNOWN have all already cleared, i.e. only when the
+prospect would otherwise be PASS: `if ctx.score.overall < ctx.play_spec.min_score: return
+ProspectStatus.NOT_QUALIFIED`. The seven review checks (`domain/review.py::run_checks`) are completely
+untouched — a NOT_QUALIFIED prospect's own review verdict is always PASS, all seven checks, proven both
+at the unit level (`tests/test_qualification_status.py`, a lightweight `SimpleNamespace` stand-in
+exercising every precedence branch — disqualified/FAIL/NEEDS_REVIEW/UNKNOWN each outrank the score floor
+even when the score is also below it) and end-to-end through the real engine
+(`tests/test_qualification_end_to_end.py`, raising the canonical Demo pack's own `min_score` past
+Northwind Labs' real computed 92 and confirming `status == NOT_QUALIFIED` while `review.verdict == PASS`
+with 7 checks). `models/schemas.py::PlaySpec.min_score` is now `Field(default=60, ge=0, le=100)` —
+`min_confidence` and every other `PlaySpec` field are deliberately untouched (no general validation
+cleanup). An out-of-range EXPLICIT/API `min_score` (-1, 101, or further out) fails Pydantic validation,
+which `api/routers/plays.py`'s two `PlaySpec.model_validate` call sites (`POST /plays`, `POST
+/plays/preview`) already catch and turn into the existing `UnprocessableEntityError` (422) path — no new
+error-handling code was needed (`tests/test_qualification_api.py`). An out-of-range MODEL-INFERRED
+`min_score` (from the Objective Parser's real LLM call) is a different problem: raising there would break
+`parse_objective()`'s existing "never raise, always degrade deterministically" contract, so
+`engine/objective_parser.py` now discards an inferred `min_score` outside 0..100 from the `inferred` dict
+BEFORE it ever reaches `PlaySpec.model_validate()` — the rest of that call's inference (industries, funding
+stages, etc.) still applies, `parse_source` stays `"llm"` (only the one bad field was dropped, not the
+whole parse), and a valid user override still wins over even a would-have-been-discarded bad inference
+(`tests/test_qualification_objective_parser.py`). Boundary values (`min_score` 0 and 100) are valid on
+both paths; at `min_score=0` nothing is ever `< 0` so a prospect can never become NOT_QUALIFIED regardless
+of score, and at `min_score=100` only a perfect 100 still qualifies.
+
+**Action safety.** `domain/action_policy.py::_NON_ACTIONABLE_PROSPECT_STATUSES` gained
+`ProspectStatus.NOT_QUALIFIED` — a below-minimum prospect is blocked from `EMAIL_SEND`/
+`LINKEDIN_COPY_AND_OPEN` proposal, approval, and execution with the existing `prospect_not_actionable`
+reason (clause 2), the SAME reason every other non-actionable status already produces — no new reason
+string, no manual override anywhere (D7 holds). Deliberately NOT added to
+`api/routers/prospects.py::_DECIDABLE_STATUSES` (an unrelated manual approve/reject surface for the
+prospect itself, not its actions) — a NOT_QUALIFIED prospect is neither manually decidable nor
+action-eligible, and those are two independent gates the task was explicit about not conflating.
+`test_action_policy.py`'s existing `test_clause_2_prospect_not_actionable` parametrize list gained
+`ProspectStatus.NOT_QUALIFIED` as its ninth case — the one existing test file this checkpoint was
+explicitly approved to modify; every other pre-existing test file is untouched. Proven end-to-end through
+the real API (`tests/test_qualification_action_policy_api.py`): `propose` still creates the audit-trail
+row but with `policy_verdict: "BLOCKED"` and `prospect_not_actionable` in `blocked_reasons`; `approve`
+409s with `code: "PROPOSAL_BLOCKED"` before ever touching approval-record creation; `execute` is
+structurally unreachable (it requires an `APPROVED` approval first) — with `resolve_send_provider`/
+`build_gmail_send_provider` BOTH monkeypatched to raise `AssertionError` if invoked at all (mirroring
+V2-I-c's `test_linkedin_action_path.py` proof style), confirming zero send-provider calls anywhere along
+the propose → approve → execute path for a NOT_QUALIFIED prospect. Execute-time policy re-evaluation is
+unchanged — `api/routers/actions.py` already re-fetches `prospect.status` fresh from the DB on every call
+(`ProspectStatus(prospect.status)`, line 224), so no router code needed to change for this to hold.
+
+**Source boundary.** New pure `domain/psl.py::is_company_domain(url_or_host, company_domain)` reuses
+`canonical_domain()`'s existing PSL-aware registrable-domain semantics (H1 Phase 2, offline `tldextract`)
+rather than a second hand-rolled comparison: a subdomain of a company's registrable domain (e.g.
+`careers.acme.com` under `acme.com`) already collapses to the SAME `canonical_domain()` string as its
+parent, so plain equality on the two canonical domains is simultaneously "same domain" and "legitimate
+subdomain" — proven for both plain `.com` and two-label-suffix (`acme.co.uk`) registrable domains
+(`tests/test_source_boundary.py`). An off-domain URL (`acme-robotics.com.evil.com`, an unrelated
+third-party press domain, `evil.com/acme-robotics.com`) or an unparseable/empty one fails closed — never
+treated as a match. Enforced in EXACTLY ONE call site: `TavilySearchProvider.fetch_sources()`'s
+per-company DOMAIN_SEARCH loop, right after each Tavily search response is received and BEFORE any result
+becomes a `SourceDocument`/retrieval occurrence — `include_domains=[company.domain]` is only a hint to the
+provider, not an enforced guarantee, so this is real defense-in-depth, not a redundant check
+(`test_off_domain_result_dropped_before_becoming_an_occurrence`,
+`test_off_domain_unparseable_url_also_dropped`). `resolve_domain()` (domain resolution — finding a
+company's real domain from an unscoped web search, so there is no known domain yet to scope against) and
+`raw_discover()` (discovery — finding candidate companies across the whole web) are deliberately left
+completely unscoped, unchanged, and now locked in by two new regression tests
+(`test_raw_discover_stays_unscoped_by_company_domain`, `test_resolve_domain_stays_unscoped_by_company_
+domain`) proving an off-domain result still passes through both untouched. No schema or telemetry column
+was added: the existing `SearchAttemptTelemetry.selected_count` field (previously ALWAYS set equal to
+`result_count` — `_call_tavily()` never distinguished them) now narrows to the count that survived the
+domain-boundary filter for the one DOMAIN_SEARCH attempt per query, while `result_count` keeps reporting
+exactly what Tavily returned — `test_selected_count_narrows_below_result_count_on_partial_drop` proves
+`selected_count < result_count` on a mixed on/off-domain response, and `test_all_on_domain_results_
+selected_count_equals_result_count` proves the field stays unchanged (as it always was) when nothing was
+dropped. The v2.0.2 allocator (`_allocate_balanced_occurrences`/`_category_balanced_extract_order`), query
+templates, the occurrence ceiling (15), extraction ordering, the source-query cap (5), and the
+search-call-per-run cap (40) are all untouched — the filter runs on the raw `results` list before any of
+that machinery sees it, so every existing v2.0.2 test continues to pass unmodified.
+
+**Frontend.** `lib/types.ts::ProspectStatus` gained `"NOT_QUALIFIED"`. Every status tone map gained a
+`NOT_QUALIFIED: "indigo"` entry (`components/ProspectRow.tsx` for the Board, `app/prospects/[id]/page.tsx`
+for the prospect header) — `indigo` was the one `BadgeTone` not already claimed by an existing prospect
+status, keeping NOT_QUALIFIED visually distinct from both NEEDS_REVIEW (amber) and REJECTED/FAILED (rose).
+`formatStatus()` already generically replaces `_` with a space, so "NOT_QUALIFIED" renders as "NOT
+QUALIFIED" with no format-function change needed. New `lib/runCounts.ts` — two small pure functions
+(`countByStatus` for `RunSummary`'s raw prospect-list filtering pattern, `notQualifiedFromVolume` for
+`MetricGrid`'s `volume.by_status` lookup pattern) extracted specifically so the "only show when count > 0"
+gating is directly unit-testable under `vitest.config.mts`'s node-only environment (no jsdom/
+testing-library configured in this repo) without rendering either component — `lib/runCounts.test.ts`
+covers both helpers plus the `count > 0` visibility boundary itself. `RunSummary` gained a `Stat
+label="Not qualified"` (tone `indigo`) and `MetricGrid` gained a `MetricCard label="Not qualified"`,
+BOTH rendered only when the count is non-zero, so the canonical Demo (which produces zero NOT_QUALIFIED
+prospects) renders byte-identical to before this checkpoint. `MetricGrid`'s PASS tooltip was corrected:
+the old copy ("Status = PASS: cleared scoring, review, and the min-score/confidence gate") was never
+actually true before this checkpoint — `min_score` was parsed into `PlaySpec` at Checkpoint C but nothing
+downstream ever read it, so a review-PASS prospect below any `min_score` was already silently counted as
+PASS. The corrected copy states what is now actually enforced: review verdict PASS (all seven checks,
+confidence floor included, as one of them) AND score at or above the Play's own min-score floor, with a
+below-floor passing review explicitly named as becoming NOT_QUALIFIED instead — this is the one
+intentional Demo-visible copy delta the task called out.
+
+**Verification.** Backend: `cd apps/api && uv run pytest` — 1295 passed, 1 skipped (baseline 1246
+passed/1 skipped; +49: 48 new test functions across six new files — `tests/test_qualification_status.py`,
+`tests/test_qualification_end_to_end.py`, `tests/test_qualification_api.py`, `tests/test_qualification_
+action_policy_api.py`, `tests/test_qualification_objective_parser.py`, `tests/test_source_boundary.py` —
+plus the one added `test_action_policy.py` parametrize case; same 1 pre-existing skip). Protected subset
+re-run explicitly (`test_run_integration.py`, `test_action_policy.py`, `test_action_policy_integration.py`,
+`test_suppression_policy.py`, `test_exclusion_unknown_forces_review.py`, `test_exclusion_persistence_
+reload.py`, `test_linkedin_action_path.py`, `test_query_plan.py`, `test_search_occurrence_balance.py`,
+`test_tavily_adapter.py`, `test_live_retrieval.py`, `test_discovery_telemetry.py`, `test_research_
+retrieval_state.py`, `test_contact_enrichment_orchestration.py`) — 162 passed. `make demo` confirmed
+byte-identical: PASS 2 (Northwind 92, Sable 79) / NEEDS_REVIEW 2 (Riverbend 35, Ferrous 58) / REJECTED 1
+(Cobalt 25) / DUPLICATE 1 / FAILED 1 — Ferrous's review verdict is NEEDS_REVIEW (not PASS), so despite
+scoring 58 under the pack's own `min_score: 60` it was never a NOT_QUALIFIED candidate; no prospect in the
+canonical run is NOT_QUALIFIED. `evaluation/metrics.py` was not modified — `volume.by_status` is already a
+fully dynamic dict keyed by whatever `ProspectStatus` values a run actually produced, so `NOT_QUALIFIED`
+flows through automatically with zero metrics-layer code change, confirmed by inspection and by the
+canonical-Demo payload staying identical. Frontend: `pnpm lint` / `pnpm typecheck` / `pnpm test` (145
+passed, baseline 136, +9) / `pnpm build` all clean. Zero OpenAI/Tavily/Apollo/Hunter/Gmail/LinkedIn/
+Render/Neon/network/production calls anywhere in this session's implementation, tests, or verification.
+
+**Deferred beyond v2.0.3 (explicitly out of scope for this checkpoint, per the task's own hard-invariant
+list):** any DB migration or Alembic revision (none was needed — `ProspectStatus`/`prospect_status` is a
+plain `String` column with no CHECK constraint); any scoring-weight/formula change; an eighth review
+guardrail (NOT_QUALIFIED is a final-status derivation, never folded into `domain/review.py`); any
+retrieval-architecture expansion beyond the one domain-boundary filter (v2.0.2's allocator/query
+templates/caps are all untouched); any off-domain research expansion (the boundary narrows retrieval, it
+never widens it); any retry-policy change; any Gmail/LinkedIn behavior change; any contact-enrichment
+provider change; any provider credential change; any production data read.
+
+**Old (pre-v2.0.3) "Current checkpoint" entry, now historical:**
 
 **v2.0.2 — Live Retrieval Alignment (Rev 2) — COMPLETE.** Fixes the RC-1 per-company retrieval
 starvation bug and threads `PlaySpec` into Live per-company retrieval, on top of the completed v2.0.1
@@ -5987,12 +6146,19 @@ No PR was created this session, per the task's explicit instruction to stop befo
 
 ## Next task
 
+**v2.0.3 — qualification semantics + source-boundary audit is COMPLETE** (see "What v2.0.3 added" above)
+— `NOT_QUALIFIED` is derived correctly with the specified precedence, `min_score` is server-validated,
+below-minimum prospects are action-blocked, and per-company Live retrieval is scoped to the company's own
+domain. **No immediate next task is authorized.** A future session should not roll into further work
+without the user's explicit authorization; candidates a future session might raise, none scheduled: the
+deferred items listed at the end of "What v2.0.3 added" above, plus the still-open items carried over from
+"What v2.0.2 added" (company header refresh post-research, the real Live search smoke, off-domain-source
+visibility — none of which this checkpoint's scope touched).
+
+**Historical note (superseded by the above — kept for continuity):**
+
 **v2.0.2 — retrieval alignment is COMPLETE** (see "What v2.0.2 added" above) — RC-1 is fixed, `PlaySpec`
 is threaded into Live per-company retrieval, and the query-count/budget bounds are raised as specified.
-**No immediate next task is authorized.** A future session should not roll into further work without the
-user's explicit authorization; candidates a future session might raise, none scheduled: the deferred items
-listed at the end of "What v2.0.2 added" above (company header refresh post-research, the real Live search
-smoke, off-domain-source visibility).
 
 **The `feature/v2-contact-enrichment -> master` integration PR is DONE and confirmed directly** — this
 session fetched `origin/fix/v2-0-2-retrieval-alignment` and found it at the same tip as `origin/master`'s

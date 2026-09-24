@@ -136,6 +136,9 @@ class TestEmailSendClausesIndependently:
             ProspectStatus.TIMED_OUT,
             ProspectStatus.PENDING,
             ProspectStatus.RUNNING,
+            # v2.0.3 — a below-minimum prospect (review PASS, score under
+            # play_spec.min_score) is never actionable, no override.
+            ProspectStatus.NOT_QUALIFIED,
         ],
     )
     def test_clause_2_prospect_not_actionable(self, status):

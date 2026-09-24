@@ -54,7 +54,12 @@ class PlaySpec(BaseModel):
     target_funding_stages: list[str] = Field(default_factory=list)
     target_technologies: list[str] = Field(default_factory=list)
     persona_titles: list[str] = Field(default_factory=list)
-    min_score: int = 60
+    # v2.0.3: server-validated 0..100 inclusive — an out-of-range explicit/API
+    # value fails Pydantic validation, which the two `PlaySpec.model_validate`
+    # call sites (`api/routers/plays.py`) already turn into the existing 422
+    # path. `min_confidence` is deliberately untouched (out of this
+    # checkpoint's scope).
+    min_score: int = Field(default=60, ge=0, le=100)
     min_confidence: float = 0.6
     # Default of 7 mirrors the demo fixture pack's own canonical size
     # (6 required companies + the optional Sable Compute fixture, §23) so a
