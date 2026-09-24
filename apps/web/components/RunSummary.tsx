@@ -3,6 +3,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Progress } from "@/components/ui/Progress";
 import { Stat } from "@/components/ui/Stat";
 import { formatElapsedSince, formatRunStatus } from "@/lib/format";
+import { countByStatus } from "@/lib/runCounts";
 import type { ProspectSummary, RunResponse } from "@/lib/types";
 import type { ConnectionState } from "@/lib/useRunStream";
 
@@ -86,6 +87,7 @@ export function RunSummary({
   const rejected = list.filter((p) => p.status === "REJECTED").length;
   const duplicate = list.filter((p) => p.status === "DUPLICATE").length;
   const failed = list.filter((p) => p.status === "FAILED" || p.status === "TIMED_OUT").length;
+  const notQualified = countByStatus(list, "NOT_QUALIFIED");
 
   return (
     <div className="flex flex-col gap-4 border-b border-zinc-800 bg-zinc-950 px-6 py-5">
@@ -137,6 +139,7 @@ export function RunSummary({
         <Stat label="Rejected" value={rejected} tone="rose" />
         <Stat label="Duplicate" value={duplicate} />
         <Stat label="Failed" value={failed} tone="rose" />
+        {notQualified > 0 && <Stat label="Not qualified" value={notQualified} tone="indigo" />}
       </div>
     </div>
   );

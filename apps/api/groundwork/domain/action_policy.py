@@ -43,6 +43,11 @@ POLICY_VERSION = "v1"
 ENRICHMENT_STALE_AFTER_DAYS_DEFAULT = 30
 
 #: §6.1 clause 2 — a prospect in any of these statuses is not actionable.
+#: v2.0.3: NOT_QUALIFIED (review PASS, but below `play_spec.min_score`) is
+#: included — a below-minimum prospect must never be proposal/send/action
+#: eligible, with no override path (D7). It is deliberately NOT added to
+#: `api/routers/prospects.py::_DECIDABLE_STATUSES` — that set governs manual
+#: prospect approve/reject, an unrelated decision surface.
 _NON_ACTIONABLE_PROSPECT_STATUSES = frozenset(
     {
         ProspectStatus.REJECTED,
@@ -51,6 +56,7 @@ _NON_ACTIONABLE_PROSPECT_STATUSES = frozenset(
         ProspectStatus.TIMED_OUT,
         ProspectStatus.PENDING,
         ProspectStatus.RUNNING,
+        ProspectStatus.NOT_QUALIFIED,
     }
 )
 

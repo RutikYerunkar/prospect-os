@@ -47,6 +47,12 @@ class ProspectStatus(StrEnum):
     DUPLICATE = "DUPLICATE"
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
+    # v2.0.3 — a prospect that passed every review check (verdict PASS) but
+    # scored below the Play's own `min_score` floor. Distinct from REJECTED
+    # (a review FAIL / hard disqualifier) and from NEEDS_REVIEW (a review
+    # verdict of NEEDS_REVIEW) — the review verdict for a NOT_QUALIFIED
+    # prospect is always PASS; only the qualification floor pushed it here.
+    NOT_QUALIFIED = "NOT_QUALIFIED"
 
 
 class ReviewVerdict(StrEnum):

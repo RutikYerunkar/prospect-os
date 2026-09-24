@@ -80,6 +80,17 @@ async def parse_objective(
             # list/None means "the objective didn't imply this," not
             # "override the caller's default with nothing."
             inferred = {k: v for k, v in parsed.items() if v not in (None, [], {})}
+            # v2.0.3: `min_score` is now server-validated 0..100 on
+            # `PlaySpec` (`ValidationError` -> the existing 422 path for an
+            # explicit/API value). A model-INFERRED value out of that range
+            # must never raise here — this function's whole contract is
+            # deterministic degradation on any inference problem, never a
+            # raised exception. Discard it before it ever reaches
+            # `PlaySpec.model_validate` below; the caller's default (or a
+            # valid user override, applied after this) wins instead.
+            inferred_min_score = inferred.get("min_score")
+            if isinstance(inferred_min_score, int) and not (0 <= inferred_min_score <= 100):
+                del inferred["min_score"]
             parse_source = "llm"
 
     # User overrides always win — applied last, on top of any inference.

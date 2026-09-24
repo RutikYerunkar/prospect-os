@@ -88,6 +88,18 @@ def _derive_final_status(ctx: ProspectContext) -> ProspectStatus:
     would otherwise be PASS is downgraded to NEEDS_REVIEW — this is
     deliberately NOT an eighth review guardrail; the seven deterministic
     checks stay exactly seven.
+
+    v2.0.3 — qualification score floor: evaluated LAST, only once every
+    other check has already cleared to what would otherwise be PASS. A
+    prospect whose review verdict is PASS, whose exclusion status is not
+    UNKNOWN, and who isn't hard-disqualified, but whose `score.overall`
+    falls below the Play's own `play_spec.min_score`, is NOT_QUALIFIED —
+    never REJECTED (the review verdict for it is still PASS; this is a
+    qualification-floor outcome, not a review failure) and never folded
+    into the seven review checks themselves (those stay exactly seven,
+    same discipline as the UNKNOWN-exclusion downgrade above). Precedence:
+    disqualified -> review FAIL -> review NEEDS_REVIEW -> exclusion UNKNOWN
+    -> score floor -> PASS.
     """
     if ctx.score is not None and ctx.score.disqualified:
         return ProspectStatus.REJECTED
@@ -98,6 +110,8 @@ def _derive_final_status(ctx: ProspectContext) -> ProspectStatus:
             return ProspectStatus.NEEDS_REVIEW
     if ctx.score is not None and ctx.score.exclusion_status == ExclusionEvaluation.UNKNOWN:
         return ProspectStatus.NEEDS_REVIEW
+    if ctx.score is not None and ctx.score.overall < ctx.play_spec.min_score:
+        return ProspectStatus.NOT_QUALIFIED
     return ProspectStatus.PASS
 
 

@@ -26,7 +26,8 @@ export type ProspectStatus =
   | "REJECTED"
   | "DUPLICATE"
   | "FAILED"
-  | "TIMED_OUT";
+  | "TIMED_OUT"
+  | "NOT_QUALIFIED";
 
 export type ContactVerification = "VERIFIED" | "PERSONA_ONLY" | "UNAVAILABLE";
 
