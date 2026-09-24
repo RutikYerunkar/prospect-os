@@ -100,7 +100,7 @@ def build_provider_bundle(
             runtime=search_runtime,
             search_budget=search_budget,
             max_results_per_query=bounds.get("max_results_per_query", 10),
-            max_source_queries_per_prospect=bounds.get("max_source_queries_per_prospect", 3),
+            max_source_queries_per_prospect=bounds.get("max_source_queries_per_prospect", 5),
             max_result_occurrences_per_prospect=bounds.get("max_result_occurrences_per_prospect", 15),
             max_sources_per_prospect=bounds.get("max_sources_per_prospect", 5),
             max_source_excerpt_chars=bounds.get("max_source_excerpt_chars", 1200),

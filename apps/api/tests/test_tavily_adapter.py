@@ -82,7 +82,8 @@ async def test_extract_results_and_failed_results_mapped() -> None:
         max_source_queries_per_prospect=1,
     )
     company = CompanySeed(slug="acme", name="Acme", domain="acme.example.com", industry="unknown", size_band="unknown", employee_count=0)
-    bundle = await provider.fetch_sources(company, ctx_key="run1:p1:research")
+    spec = PlaySpec(objective_text="find companies", target_industries=["robotics"])
+    bundle = await provider.fetch_sources(company, spec, ctx_key="run1:p1:research")
     by_url = {d.url: d for d in bundle.documents}
     assert by_url["https://acme.example.com/a"].status.value == "ok"
     assert by_url["https://acme.example.com/a"].extraction_method == "tavily_extract"

@@ -320,8 +320,15 @@ class Settings(BaseSettings):
     # wires an actual `TavilySearchProvider` that must respect them.
     live_max_plan_queries_per_run: int = 4
     live_max_domain_resolution_queries_per_run: int = 8
-    live_max_source_queries_per_prospect: int = 3
-    live_max_search_calls_per_run: int = 32
+    # v2.0.2 retrieval alignment: raised 3 -> 5 to fit the full company_*
+    # category set (funding/careers/size always, persona_leadership/
+    # technology when the Play targets that axis) — see
+    # `domain/query_plan.py::build_source_queries`.
+    live_max_source_queries_per_prospect: int = 5
+    # v2.0.2: raised 32 -> 40 to cover the larger per-prospect query count
+    # above at `LIVE_MAX_PROSPECTS_PER_RUN` (5) without narrowing headroom
+    # for domain-resolution/discovery search calls in the same run.
+    live_max_search_calls_per_run: int = 40
     search_max_transport_retries: int = 1
     live_max_result_occurrences_per_prospect: int = 15
     live_max_sources_per_prospect: int = 5

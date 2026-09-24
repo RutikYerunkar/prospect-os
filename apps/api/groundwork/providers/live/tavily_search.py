@@ -35,6 +35,15 @@ issues exactly ONE batched Tavily `extract()` call per prospect for those
 winners (not one call per URL) — bounded, and countable as a single
 `LIVE_MAX_EXTRACT_CALLS_PER_RUN` unit. A failed URL in that batch (`
 failed_results`) degrades that one source, never the whole prospect.
+
+v2.0.2 (RC-1 fix): all of a company's category queries are issued first
+(`_allocate_balanced_occurrences`'s "Phase 1"), then occurrences are
+rationed across categories round-robin up to the occurrence ceiling
+("Phase 2") — a category that returns many results can no longer starve a
+later category out of the ceiling entirely. Winners are then interleaved
+across categories the same way (`_category_balanced_extract_order`) before
+truncating to `max_sources_per_prospect`, so the batch sent to `.extract()`
+draws evenly across categories too.
 """
 
 from __future__ import annotations
@@ -51,7 +60,12 @@ from tavily.errors import ForbiddenError
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from groundwork.domain.psl import canonical_domain
-from groundwork.domain.query_plan import build_domain_resolution_query, build_query_plan, build_source_queries
+from groundwork.domain.query_plan import (
+    QueryTemplateId,
+    build_domain_resolution_query,
+    build_query_plan,
+    build_source_queries,
+)
 from groundwork.domain.source_identity import compute_content_sha256, select_winners
 from groundwork.domain.url_safety import canonicalize_url
 from groundwork.models.enums import EvidenceOrigin, SourceStatus
@@ -93,6 +107,79 @@ _ERROR_CLASS_BY_STATUS: dict[SearchAttemptStatus, type[SearchProviderError]] = {
 
 def _backoff_s(retry_index: int) -> float:
     return min(0.5 * (2 ** (retry_index - 1)), 4.0)
+
+
+def _allocate_balanced_occurrences(
+    category_order: list[QueryTemplateId],
+    hits_by_category: dict[QueryTemplateId, list[SourceDocument]],
+    *,
+    ceiling: int,
+) -> tuple[list[SourceDocument], dict[str, QueryTemplateId]]:
+    """RC-1 fix: round-robins across `category_order` (fixed, deterministic
+    — the order `fetch_sources()` issued the queries in), taking at most one
+    occurrence per category per pass, until `ceiling` occurrences have been
+    allocated or every category's hits are exhausted. Each category's own
+    hits are consumed in their own (rank) order, so within a category
+    nothing changes; across categories, no single category can consume the
+    whole ceiling before a later category gets its fair first share — the
+    exact failure the pre-v2.0.2 sequential-fill loop had. Returns the
+    allocated occurrences plus a `ref -> category` map, so a later stage can
+    still attribute a deduped winner back to the one category its winning
+    occurrence came from."""
+    cursors = {tid: 0 for tid in category_order}
+    allocated: list[SourceDocument] = []
+    category_by_ref: dict[str, QueryTemplateId] = {}
+    while len(allocated) < ceiling:
+        progressed = False
+        for tid in category_order:
+            if len(allocated) >= ceiling:
+                break
+            hits = hits_by_category.get(tid, [])
+            cursor = cursors[tid]
+            if cursor < len(hits):
+                doc = hits[cursor]
+                allocated.append(doc)
+                category_by_ref[doc.ref] = tid
+                cursors[tid] = cursor + 1
+                progressed = True
+        if not progressed:
+            break
+    return allocated, category_by_ref
+
+
+def _category_balanced_extract_order(
+    winners: list[SourceDocument],
+    *,
+    category_order: list[QueryTemplateId],
+    category_by_ref: dict[str, QueryTemplateId],
+) -> list[SourceDocument]:
+    """Round-robins the deduped `winners` across `category_order` (same
+    fixed order as allocation above) before `fetch_sources()` truncates to
+    `max_sources_per_prospect` for extraction — so the sources actually sent
+    to `.extract()` are drawn evenly across categories rather than favoring
+    whichever category happened to win the most/earliest occurrences.
+    Each bucket keeps its own winners in their incoming (already
+    quality-ordered, via `select_winners`) order; only the interleaving
+    across categories changes."""
+    buckets: dict[QueryTemplateId, list[SourceDocument]] = {tid: [] for tid in category_order}
+    for winner in winners:
+        category = category_by_ref.get(winner.ref)
+        if category is not None and category in buckets:
+            buckets[category].append(winner)
+    cursors = {tid: 0 for tid in category_order}
+    ordered: list[SourceDocument] = []
+    while True:
+        progressed = False
+        for tid in category_order:
+            bucket = buckets[tid]
+            cursor = cursors[tid]
+            if cursor < len(bucket):
+                ordered.append(bucket[cursor])
+                cursors[tid] = cursor + 1
+                progressed = True
+        if not progressed:
+            break
+    return ordered
 
 
 def _parse_published_date(raw: Any) -> date | None:
@@ -189,14 +276,27 @@ class TavilySearchProvider:
         domains = [d for d in (canonical_domain(c.url) for c in candidates) if d]
         return DomainCandidates(domains=domains, candidates=candidates, telemetry=telemetry)
 
-    async def fetch_sources(self, company: CompanySeed, *, ctx_key: str) -> SourceBundle:
-        queries = build_source_queries(company.name, max_queries=self.max_source_queries_per_prospect)
-        occurrences: list[SourceDocument] = []
+    async def fetch_sources(self, company: CompanySeed, play_spec: PlaySpec, *, ctx_key: str) -> SourceBundle:
+        queries = build_source_queries(
+            company.name, play_spec, max_queries=self.max_source_queries_per_prospect
+        )
         telemetry: list[SearchAttemptTelemetry] = []
 
+        # Phase 1 (deterministic two-phase query issue): issue every query
+        # in the plan up front, one category at a time, in fixed template
+        # order — never gated on how many occurrences earlier categories
+        # already produced. Applying the global occurrence ceiling *during*
+        # issuance (the pre-v2.0.2 behavior) is exactly the RC-1 starvation
+        # bug: whichever category came last in fixed order could be fully
+        # starved out just because earlier categories alone already filled
+        # the ceiling, even when the run's search-call budget had room to
+        # spare. Each category's raw hits are collected in full (bounded
+        # only by `max_results_per_query`, enforced server-side by Tavily);
+        # Phase 2 below is what actually rations them against the ceiling.
+        category_order: list[QueryTemplateId] = []
+        hits_by_category: dict[QueryTemplateId, list[SourceDocument]] = {}
         for query in queries:
-            if len(occurrences) >= self.max_result_occurrences_per_prospect:
-                break
+            category_order.append(query.template_id)
             if self.search_budget is not None and not await self.search_budget.reserve_search_call():
                 telemetry.append(
                     self._budget_blocked_telemetry(
@@ -205,6 +305,7 @@ class TavilySearchProvider:
                         query_digest=query.query_digest,
                     )
                 )
+                hits_by_category[query.template_id] = []
                 continue
             try:
                 raw, attempt_telemetry = await self._call_tavily(
@@ -219,26 +320,53 @@ class TavilySearchProvider:
                 )
             except SearchProviderError as exc:
                 telemetry.extend(exc.telemetry)
+                hits_by_category[query.template_id] = []
                 continue
             telemetry.extend(attempt_telemetry)
 
             results = (raw or {}).get("results", [])
             retrieved_at = datetime.now(timezone.utc)
-            remaining = max(self.max_result_occurrences_per_prospect - len(occurrences), 0)
-            for i, r in enumerate(results[:remaining]):
-                occurrences.append(
-                    self._to_source_document(
-                        r, ref=f"src:{uuid.uuid4().hex[:12]}", rank=i, retrieved_at=retrieved_at,
-                        extraction_method="tavily_search",
-                    )
+            hits_by_category[query.template_id] = [
+                self._to_source_document(
+                    r, ref=f"src:{uuid.uuid4().hex[:12]}", rank=i, retrieved_at=retrieved_at,
+                    extraction_method="tavily_search",
                 )
+                for i, r in enumerate(results)
+            ]
+
+        # Phase 2: balanced occurrence allocation — round-robin across
+        # categories (in the same fixed template order) up to the global
+        # `max_result_occurrences_per_prospect` ceiling, one occurrence at a
+        # time per category, rather than draining categories sequentially.
+        # This is the RC-1 fix: a category that returns many results can no
+        # longer consume the whole ceiling before a later category gets any
+        # share at all.
+        occurrences, category_by_ref = _allocate_balanced_occurrences(
+            category_order, hits_by_category, ceiling=self.max_result_occurrences_per_prospect,
+        )
 
         # Winners are the same object references held in `occurrences` —
         # mutating extraction results onto them below updates `occurrences`
         # in place; `engine/steps/research.py` re-derives this identical
         # winner set deterministically, so no separate merge is needed.
-        winners = select_winners(occurrences)[: self.max_sources_per_prospect]
-        winner_urls = [w.url for w in winners if w.url]
+        # `select_winners` already collapses two occurrences of the same
+        # source (by canonical URL, or `content_sha256`) into one winner
+        # regardless of which category query surfaced it — so a URL
+        # returned under two different templates is assigned to exactly one
+        # category, deterministically, via `_winner_sort_key`.
+        winners = _category_balanced_extract_order(
+            select_winners(occurrences), category_order=category_order, category_by_ref=category_by_ref,
+        )[: self.max_sources_per_prospect]
+        # Defensive final dedupe: even though `select_winners` already
+        # guarantees one winner per source identity, this guarantees the
+        # actual `.extract()` request never carries the same URL string
+        # twice, regardless of any upstream canonicalization edge case.
+        winner_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for w in winners:
+            if w.url and w.url not in seen_urls:
+                seen_urls.add(w.url)
+                winner_urls.append(w.url)
         if winner_urls:
             can_extract = self.search_budget is None or await self.search_budget.reserve_extract_call()
             if not can_extract:

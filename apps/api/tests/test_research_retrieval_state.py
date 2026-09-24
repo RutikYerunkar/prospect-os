@@ -32,9 +32,9 @@ class _CountingSearch(DemoSearchProvider):
         super().__init__(*args, **kwargs)
         self.fetch_calls = 0
 
-    async def fetch_sources(self, company, *, ctx_key):  # type: ignore[override]
+    async def fetch_sources(self, company, play_spec, *, ctx_key):  # type: ignore[override]
         self.fetch_calls += 1
-        return await super().fetch_sources(company, ctx_key=ctx_key)
+        return await super().fetch_sources(company, play_spec, ctx_key=ctx_key)
 
 
 class _FlakyLLM:

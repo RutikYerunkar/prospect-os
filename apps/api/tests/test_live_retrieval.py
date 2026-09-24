@@ -12,7 +12,7 @@ from datetime import date
 from groundwork.engine.context import ProspectContext
 from groundwork.engine.search import call_search
 from groundwork.models.enums import EvidenceOrigin
-from groundwork.models.schemas import CompanySeed
+from groundwork.models.schemas import CompanySeed, PlaySpec
 from groundwork.observability.enrichment_calls import EnrichmentCallRecorder
 from groundwork.observability.events import EventEmitter
 from groundwork.observability.llm_calls import LLMCallRecorder
@@ -29,13 +29,18 @@ COMPANY = CompanySeed(
     slug="acme-robotics", name="Acme Robotics", domain="acme-robotics.com",
     industry="unknown", size_band="unknown", employee_count=0, hq_country="unknown",
 )
+# Baseline PlaySpec (no persona_titles/target_technologies) -> exactly the
+# 3 always-on categories (funding/careers/size), matching these tests'
+# `max_source_queries_per_prospect` expectations unchanged from before
+# v2.0.2's persona/technology-conditional categories were added.
+SPEC = PlaySpec(objective_text="find robotics companies", target_industries=["robotics"])
 
 
 async def test_include_domains_sent_on_every_source_query() -> None:
     provider, transport = make_search_provider(
         [(200, search_response(results=[])) for _ in range(3)], max_source_queries_per_prospect=3
     )
-    await provider.fetch_sources(COMPANY, ctx_key="run1:p1:research")
+    await provider.fetch_sources(COMPANY, SPEC, ctx_key="run1:p1:research")
     assert transport.calls == 3
     for request in transport.requests:
         body = json.loads(request.content)
@@ -46,7 +51,7 @@ async def test_source_query_count_bounded_per_prospect() -> None:
     provider, transport = make_search_provider(
         [(200, search_response(results=[])) for _ in range(1)], max_source_queries_per_prospect=1
     )
-    await provider.fetch_sources(COMPANY, ctx_key="run1:p1:research")
+    await provider.fetch_sources(COMPANY, SPEC, ctx_key="run1:p1:research")
     assert transport.calls == 1  # bounded, never 3 (the full category count)
 
 
@@ -59,7 +64,7 @@ async def test_duplicate_url_across_queries_yields_one_winner() -> None:
         (200, {"results": [{"url": same_url, "raw_content": "Acme raised funding, full text."}], "failed_results": []}),
     ]
     provider, transport = make_search_provider(steps, max_source_queries_per_prospect=3)
-    bundle = await provider.fetch_sources(COMPANY, ctx_key="run1:p1:research")
+    bundle = await provider.fetch_sources(COMPANY, SPEC, ctx_key="run1:p1:research")
     from groundwork.domain.source_identity import select_winners
 
     winners = select_winners(bundle.documents)
@@ -78,7 +83,7 @@ async def test_only_winners_are_extracted() -> None:
         (200, {"results": [{"url": "https://acme-robotics.com/a", "raw_content": "Real extracted body."}], "failed_results": []}),
     ]
     provider, transport = make_search_provider(steps, max_source_queries_per_prospect=3)
-    bundle = await provider.fetch_sources(COMPANY, ctx_key="run1:p1:research")
+    bundle = await provider.fetch_sources(COMPANY, SPEC, ctx_key="run1:p1:research")
     extract_requests = [r for r in transport.requests if "urls" in json.loads(r.content)]
     assert len(extract_requests) == 1
     extracted_urls = json.loads(extract_requests[0].content)["urls"]
